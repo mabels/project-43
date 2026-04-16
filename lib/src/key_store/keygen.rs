@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
-use sequoia_openpgp as openpgp;
 use openpgp::cert::prelude::*;
 use openpgp::types::KeyFlags;
+use sequoia_openpgp as openpgp;
 
 /// Generate a new OpenPGP cert with sign + encrypt + auth subkeys.
 /// algo: "ed25519" | "rsa4096" | "rsa3072"
@@ -9,9 +9,12 @@ use openpgp::types::KeyFlags;
 pub fn generate(uid: &str, algo: &str, passphrase: Option<&str>) -> Result<openpgp::Cert> {
     let suite = match algo {
         "ed25519" => CipherSuite::Cv25519,
-        "rsa4096"  => CipherSuite::RSA4k,
-        "rsa3072"  => CipherSuite::RSA3k,
-        other => bail!("Unknown algorithm '{}'. Supported: ed25519, rsa4096, rsa3072", other),
+        "rsa4096" => CipherSuite::RSA4k,
+        "rsa3072" => CipherSuite::RSA3k,
+        other => bail!(
+            "Unknown algorithm '{}'. Supported: ed25519, rsa4096, rsa3072",
+            other
+        ),
     };
 
     let mut builder = CertBuilder::new()

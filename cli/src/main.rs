@@ -4,12 +4,15 @@ mod pgp;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use key_mgmt::subcmd::KeyCmd;
-use pgp::subcmd::PgpCmd;
 use p43::key_store::store::KeyStore;
+use pgp::subcmd::PgpCmd;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "p43", about = "project-43 — key management and OpenPGP operations")]
+#[command(
+    name = "p43",
+    about = "project-43 — key management and OpenPGP operations"
+)]
 struct Cli {
     /// Key store directory (default: ~/.config/project-43/keys)
     #[arg(long, global = true)]
@@ -53,17 +56,15 @@ fn main() -> Result<()> {
             .join("keys")
     });
 
-    let soft_key = cli.key_file.or_else(|| {
-        std::env::var("YK_KEY_FILE").ok().map(PathBuf::from)
-    });
+    let soft_key = cli
+        .key_file
+        .or_else(|| std::env::var("YK_KEY_FILE").ok().map(PathBuf::from));
 
     match cli.command {
         Command::Key(cmd) => {
             let ks = KeyStore::open(&store_dir)?;
             key_mgmt::run(cmd, &ks)
         }
-        Command::Pgp(cmd) => {
-            pgp::run(cmd, soft_key, cli.passphrase, cli.pin)
-        }
+        Command::Pgp(cmd) => pgp::run(cmd, soft_key, cli.passphrase, cli.pin),
     }
 }

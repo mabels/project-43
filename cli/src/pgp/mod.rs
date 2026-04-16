@@ -14,7 +14,10 @@ pub fn run(
 ) -> Result<()> {
     match cmd {
         PgpCmd::List => {
-            anyhow::ensure!(soft_key.is_none(), "'pgp list' shows card info — omit --key-file");
+            anyhow::ensure!(
+                soft_key.is_none(),
+                "'pgp list' shows card info — omit --key-file"
+            );
             card::list_card()?;
         }
 
@@ -28,7 +31,11 @@ pub fn run(
             print!("{}", sig);
         }
 
-        PgpCmd::Encrypt { message, file, recipient } => {
+        PgpCmd::Encrypt {
+            message,
+            file,
+            recipient,
+        } => {
             let data = read_input(message, file)?;
             print!("{}", ops::encrypt(&data, &recipient)?);
         }
@@ -43,7 +50,11 @@ pub fn run(
             io::stdout().write_all(&plain)?;
         }
 
-        PgpCmd::SignEncrypt { message, file, recipient } => {
+        PgpCmd::SignEncrypt {
+            message,
+            file,
+            recipient,
+        } => {
             let data = read_input(message, file)?;
             let cipher = if let Some(kf) = soft_key {
                 soft_ops::sign_encrypt(&data, &kf, &recipient, &resolve_passphrase(passphrase)?)?
@@ -54,11 +65,14 @@ pub fn run(
         }
 
         PgpCmd::Verify { file, sig, signer } => {
-            let data     = read_input(None, file)?;
+            let data = read_input(None, file)?;
             let sig_data = std::fs::read(&sig)?;
             match ops::verify(&data, &sig_data, &signer) {
-                Ok(())  => eprintln!("✓ Signature valid"),
-                Err(e)  => { eprintln!("✗ Signature invalid: {e}"); std::process::exit(1); }
+                Ok(()) => eprintln!("✓ Signature valid"),
+                Err(e) => {
+                    eprintln!("✗ Signature invalid: {e}");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -70,8 +84,14 @@ pub fn run(
                 ops::decrypt_verify(&data, &signer, &resolve_pin(pin)?)
             };
             match result {
-                Ok(plain) => { io::stdout().write_all(&plain)?; eprintln!("\n✓ Signature valid"); }
-                Err(e)    => { eprintln!("✗ Decrypt/verify failed: {e}"); std::process::exit(1); }
+                Ok(plain) => {
+                    io::stdout().write_all(&plain)?;
+                    eprintln!("\n✓ Signature valid");
+                }
+                Err(e) => {
+                    eprintln!("✗ Decrypt/verify failed: {e}");
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -82,21 +102,33 @@ pub fn run(
 
 fn read_input(message: Option<String>, file: Option<PathBuf>) -> Result<Vec<u8>> {
     use std::io::Read;
-    if let Some(msg)  = message { return Ok(msg.into_bytes()); }
-    if let Some(path) = file    { return Ok(std::fs::read(path)?); }
+    if let Some(msg) = message {
+        return Ok(msg.into_bytes());
+    }
+    if let Some(path) = file {
+        return Ok(std::fs::read(path)?);
+    }
     let mut buf = Vec::new();
     io::stdin().read_to_end(&mut buf)?;
     Ok(buf)
 }
 
 fn resolve_pin(provided: Option<String>) -> Result<String> {
-    if let Some(v) = provided               { return Ok(v); }
-    if let Ok(v)  = std::env::var("YK_PIN") { return Ok(v); }
+    if let Some(v) = provided {
+        return Ok(v);
+    }
+    if let Ok(v) = std::env::var("YK_PIN") {
+        return Ok(v);
+    }
     Ok(rpassword::prompt_password("Card PIN: ")?)
 }
 
 fn resolve_passphrase(provided: Option<String>) -> Result<String> {
-    if let Some(v) = provided                      { return Ok(v); }
-    if let Ok(v)  = std::env::var("YK_PASSPHRASE") { return Ok(v); }
+    if let Some(v) = provided {
+        return Ok(v);
+    }
+    if let Ok(v) = std::env::var("YK_PASSPHRASE") {
+        return Ok(v);
+    }
     Ok(rpassword::prompt_password("Key passphrase: ")?)
 }

@@ -3,7 +3,7 @@ use p43::key_store::{keygen, store::KeyStore};
 
 pub fn run(ks: &KeyStore, uid: &str, algo: &str, no_encrypt: bool) -> Result<()> {
     let passphrase = if !no_encrypt {
-        let pw  = rpassword::prompt_password("Passphrase for private key: ")?;
+        let pw = rpassword::prompt_password("Passphrase for private key: ")?;
         let pw2 = rpassword::prompt_password("Confirm passphrase: ")?;
         anyhow::ensure!(pw == pw2, "Passphrases do not match");
         Some(pw)

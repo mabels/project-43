@@ -101,7 +101,7 @@ impl DecryptionHelper for SoftDecryptHelper {
                 }
             }
         }
-        Err(anyhow::anyhow!("No key could decrypt the session key").into())
+        Err(anyhow::anyhow!("No key could decrypt the session key"))
     }
 }
 
@@ -124,10 +124,10 @@ impl VerificationHelper for VerifyDecryptHelper {
                         return Ok(());
                     }
                 }
-                return Err(anyhow::anyhow!("No valid signature found").into());
+                return Err(anyhow::anyhow!("No valid signature found"));
             }
         }
-        Err(anyhow::anyhow!("No signature layer in message").into())
+        Err(anyhow::anyhow!("No signature layer in message"))
     }
 }
 
@@ -159,7 +159,7 @@ impl DecryptionHelper for VerifyDecryptHelper {
                 }
             }
         }
-        Err(anyhow::anyhow!("No key could decrypt the session key").into())
+        Err(anyhow::anyhow!("No key could decrypt the session key"))
     }
 }
 

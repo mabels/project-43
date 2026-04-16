@@ -7,7 +7,7 @@ pub fn run_list(ks: &KeyStore) -> Result<()> {
     if keys.is_empty() {
         println!("No keys in store.");
     } else {
-        println!("{:<36} {:<16} {}", "UID", "Algorithm", "Fingerprint");
+        println!("{:<36} {:<16} Fingerprint", "UID", "Algorithm");
         println!("{}", "-".repeat(90));
         for e in keys {
             println!("{:<36} {:<16} {}", e.uid, e.algo, e.fingerprint);

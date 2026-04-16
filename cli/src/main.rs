@@ -1,11 +1,13 @@
 mod key_mgmt;
 mod pgp;
+mod ssh_agent_cmd;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use key_mgmt::subcmd::KeyCmd;
 use p43::key_store::store::KeyStore;
 use pgp::subcmd::PgpCmd;
+use ssh_agent_cmd::subcmd::SshAgentArgs;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -43,6 +45,9 @@ enum Command {
     /// OpenPGP card / software-key operations — sign, encrypt, decrypt, verify
     #[command(subcommand)]
     Pgp(PgpCmd),
+
+    /// SSH agent — expose a key over the OpenSSH agent protocol
+    SshAgent(SshAgentArgs),
 }
 
 fn main() -> Result<()> {
@@ -66,5 +71,12 @@ fn main() -> Result<()> {
             key_mgmt::run(cmd, &ks)
         }
         Command::Pgp(cmd) => pgp::run(cmd, soft_key, cli.passphrase, cli.pin),
+        Command::SshAgent(args) => {
+            let passphrase = cli
+                .passphrase
+                .or_else(|| std::env::var("YK_PASSPHRASE").ok())
+                .unwrap_or_default();
+            ssh_agent_cmd::run(args, soft_key, passphrase)
+        }
     }
 }

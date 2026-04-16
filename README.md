@@ -164,4 +164,4 @@ project-43/
 
 Apache License 2.0 — see [LICENSE](LICENSE).
 
-Copyright 2026 Meno Abels <meno.abels@gmail.com>
+Copyright 2026 Meno Abels <meno.abels@adviser.com>

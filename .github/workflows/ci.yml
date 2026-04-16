@@ -25,7 +25,7 @@ jobs:
             pkg-config \
             libclang-dev \
             llvm \
-            libnettle-dev \
+            nettle-dev \
             libpcsclite-dev
 
       - name: install Rust stable

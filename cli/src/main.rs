@@ -76,7 +76,8 @@ fn main() -> Result<()> {
                 .passphrase
                 .or_else(|| std::env::var("YK_PASSPHRASE").ok())
                 .unwrap_or_default();
-            ssh_agent_cmd::run(args, soft_key, passphrase)
+            let pin = cli.pin.or_else(|| std::env::var("YK_PIN").ok());
+            ssh_agent_cmd::run(args, &store_dir, soft_key, passphrase, pin)
         }
     }
 }

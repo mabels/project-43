@@ -35,11 +35,29 @@ impl From<KeySlot> for SshKeySlot {
 pub struct SshAgentArgs {
     /// Unix socket path to listen on.
     ///
-    /// Set SSH_AUTH_SOCK to this path so SSH clients can find the agent.
-    #[arg(long, default_value = "~/.p43-ssh-agent.sock")]
-    pub socket: String,
+    /// Defaults to `p43-ssh-agent.sock` in the same directory as the key
+    /// store (usually ~/.config/project-43/).  Set SSH_AUTH_SOCK to this
+    /// path so SSH clients can find the agent.
+    #[arg(long)]
+    pub socket: Option<String>,
 
     /// Which subkey to expose: `auth` (default, falls back to `sign`) or `sign`.
+    ///
+    /// Only used for software-key mode (--key-file).
     #[arg(long, default_value_t = KeySlot::Auth)]
     pub key_slot: KeySlot,
+
+    /// Use a YubiKey (OpenPGP card) instead of a software key file.
+    ///
+    /// Requires --pin / YK_PIN.  The signing slot (PSO:CDS) is used.
+    #[arg(long)]
+    pub card: bool,
+
+    /// Maximum number of card operations allowed to run in parallel.
+    ///
+    /// A YubiKey can only process one PC/SC command at a time, so the default
+    /// of 1 serialises all requests through an in-memory queue.  Raise this
+    /// only if you have multiple cards that can be addressed simultaneously.
+    #[arg(long, default_value_t = 1)]
+    pub concurrency: usize,
 }

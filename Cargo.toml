@@ -4,3 +4,13 @@ members = [
     "cli",
 ]
 resolver = "2"
+
+# matrix-sdk 0.16.0 overflows the default recursion limit (128) with
+# deeply-nested async state machines — the overshoot is a constant
+# "query depth increased by 130" (confirmed on rustc 1.92, 1.93 and 1.94,
+# so a toolchain pin is not a viable alternative for our feature set).
+# We vendor a copy with the limit raised to 256 until an upstream release
+# fixes it.  Tracking: https://github.com/matrix-org/matrix-rust-sdk/issues/6254
+# Full rationale: docs/decisions/0003-vendored-matrix-sdk.md.
+[patch.crates-io]
+matrix-sdk = { path = "vendor/matrix-sdk" }

@@ -1,10 +1,12 @@
 mod key_mgmt;
+mod matrix_cmd;
 mod pgp;
 mod ssh_agent_cmd;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use key_mgmt::subcmd::KeyCmd;
+use matrix_cmd::subcmd::MatrixCmd;
 use p43::key_store::store::KeyStore;
 use pgp::subcmd::PgpCmd;
 use ssh_agent_cmd::subcmd::SshAgentArgs;
@@ -48,6 +50,10 @@ enum Command {
 
     /// SSH agent — expose a key over the OpenSSH agent protocol
     SshAgent(SshAgentArgs),
+
+    /// Matrix — login, send messages, listen for messages
+    #[command(subcommand)]
+    Matrix(MatrixCmd),
 }
 
 fn main() -> Result<()> {
@@ -79,5 +85,6 @@ fn main() -> Result<()> {
             let pin = cli.pin.or_else(|| std::env::var("YK_PIN").ok());
             ssh_agent_cmd::run(args, &store_dir, soft_key, passphrase, pin)
         }
+        Command::Matrix(cmd) => matrix_cmd::run(cmd, &store_dir),
     }
 }

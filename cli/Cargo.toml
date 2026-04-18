@@ -7,6 +7,10 @@ edition = "2021"
 name = "p43"
 path = "src/main.rs"
 
+[features]
+default = ["e2e-encryption"]
+e2e-encryption = ["p43/e2e-encryption"]
+
 [dependencies]
 p43            = { path = "../lib" }
 clap           = { version = "4", features = ["derive"] }

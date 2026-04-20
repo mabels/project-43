@@ -18,5 +18,10 @@ pub fn run(cmd: KeyCmd, ks: &KeyStore) -> Result<()> {
         KeyCmd::ExportPriv { key } => store::run_export_priv(ks, &key),
         KeyCmd::Import { file } => store::run_import(ks, &file),
         KeyCmd::Delete { key } => store::run_delete(ks, &key),
+        KeyCmd::RegisterCard { key, ident } => store::run_register_card(ks, &key, &ident),
+        KeyCmd::ImportCard { uid, card } => {
+            store::run_import_card(ks, card.as_deref(), uid.as_deref())
+        }
+        KeyCmd::ListCards => store::run_list_cards(),
     }
 }

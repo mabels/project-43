@@ -1,8 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:p43/src/rust/api/simple.dart';
+import '../services/notification_service.dart';
+import '../services/settings_service.dart';
 
 class AgentScreen extends StatefulWidget {
-  const AgentScreen({super.key});
+  const AgentScreen({super.key, this.onSignRequest});
+
+  /// Called when an `ssh.sign_request` arrives so the shell can switch to
+  /// the Agent tab if it is not already in focus.
+  final VoidCallback? onSignRequest;
 
   @override
   State<AgentScreen> createState() => _AgentScreenState();
@@ -32,7 +38,7 @@ class _AgentScreenState extends State<AgentScreen> {
     if (_listening) return;
     _listening = true;
     mxListenAgent(roomId: roomId).listen(
-      (event) {
+      (event) async {
         if (!mounted) return;
         if (event is AgentRequest_ListKeys) {
           setState(() => _log.insert(
@@ -47,16 +53,70 @@ class _AgentScreenState extends State<AgentScreen> {
               ));
           _autoRespondListKeys(roomId, event.requestId);
         } else if (event is AgentRequest_Sign) {
-          setState(() => _log.insert(
-                0,
-                _RequestEntry(
-                  type: 'ssh.sign_request',
-                  requestId: event.requestId,
-                  description: event.description,
-                  fingerprint: event.fingerprint,
-                  status: _RequestStatus.pending,
-                ),
-              ));
+          final fp = event.fingerprint;
+          final autoApprove =
+              SettingsService.instance.settings.autoApproveWhenCached;
+
+          // Jump to the agent tab immediately, before any async work.
+          widget.onSignRequest?.call();
+
+          // Resolve key details and cache check concurrently.
+          final results = await Future.wait([
+            fp.isNotEmpty
+                ? getSshKeyDetails(fingerprint: fp)
+                : Future<SshKeyDetails?>.value(null),
+            if (autoApprove && fp.isNotEmpty)
+              hasCachedPassphrase(fingerprint: fp).then((v) => v as Object?)
+            else
+              Future.value(false),
+          ]);
+          if (!mounted) return;
+
+          final details = results[0] as SshKeyDetails?;
+          final cached = autoApprove && (results[1] as bool? ?? false);
+
+          // Emit notification if enabled in settings.
+          if (SettingsService.instance.settings.notifyOnSignRequest) {
+            final label = _keyLabel(details?.name ?? '', details?.cardIdents ?? []);
+            NotificationService.instance.showSignRequest(
+              keyLabel: label,
+              algo: details?.algo ?? '',
+              fingerprint: fp,
+            );
+          }
+
+          if (cached) {
+            // Auto-approve: add as responding immediately, no tile shown to user.
+            setState(() => _log.insert(
+                  0,
+                  _RequestEntry(
+                    type: 'ssh.sign_request',
+                    requestId: event.requestId,
+                    description: event.description,
+                    fingerprint: fp,
+                    keyName: details?.name,
+                    keyAlgo: details?.algo,
+                    cardIdents: details?.cardIdents ?? const [],
+                    status: _RequestStatus.responding,
+                  ),
+                ));
+            _autoRespondSign(roomId, event.requestId);
+          } else {
+            // Manual approval required — show pending tile with buttons.
+            setState(() => _log.insert(
+                  0,
+                  _RequestEntry(
+                    type: 'ssh.sign_request',
+                    requestId: event.requestId,
+                    description: event.description,
+                    fingerprint: fp,
+                    keyName: details?.name,
+                    keyAlgo: details?.algo,
+                    cardIdents: details?.cardIdents ?? const [],
+                    status: _RequestStatus.pending,
+                  ),
+                ));
+          }
         }
         // Keep log bounded.
         if (_log.length > 50) _log.removeLast();
@@ -66,12 +126,23 @@ class _AgentScreenState extends State<AgentScreen> {
     );
   }
 
+  Future<void> _autoRespondSign(String roomId, String requestId) async {
+    try {
+      await mxRespondSignCached(roomId: roomId, requestId: requestId);
+      SettingsService.instance.resetCacheTimer();
+      _updateStatus(requestId, _RequestStatus.done);
+    } catch (e) {
+      // Cache miss or stale — surface as error so the user notices.
+      _updateStatusWithError(requestId, e);
+    }
+  }
+
   Future<void> _autoRespondListKeys(String roomId, String requestId) async {
     try {
       await mxRespondListKeys(roomId: roomId, requestId: requestId);
       _updateStatus(requestId, _RequestStatus.done);
     } catch (e) {
-      _updateStatus(requestId, _RequestStatus.error);
+      _updateStatusWithError(requestId, e);
     }
   }
 
@@ -82,6 +153,223 @@ class _AgentScreenState extends State<AgentScreen> {
       if (idx != -1) _log[idx] = _log[idx].copyWith(status: status);
     });
   }
+
+  void _updateStatusWithError(String requestId, Object error) {
+    if (!mounted) return;
+    setState(() {
+      final idx = _log.indexWhere((e) => e.requestId == requestId);
+      if (idx != -1) {
+        _log[idx] = _log[idx].copyWith(
+          status: _RequestStatus.error,
+          errorMessage: error.toString(),
+        );
+      }
+    });
+  }
+
+  // ── Sign approval ────────────────────────────────────────────────────────────
+
+  Future<void> _approveSign(_RequestEntry entry) async {
+    final roomId = _agentRoom;
+    if (roomId == null) return;
+
+    final fp = entry.fingerprint ?? '';
+
+    // If the passphrase for this key is already cached, skip the dialog.
+    // Future biometric path: biometric success → mxRespondSignCached, same
+    // flow, no passphrase dialog shown.
+    final cached = fp.isNotEmpty && await hasCachedPassphrase(fingerprint: fp);
+
+    if (!cached) {
+      final passphrase = await _promptPassphrase(entry);
+      if (passphrase == null) return; // cancelled
+
+      _updateStatus(entry.requestId, _RequestStatus.responding);
+      try {
+        await mxRespondSign(
+          roomId: roomId,
+          requestId: entry.requestId,
+          passphrase: passphrase,
+        );
+        SettingsService.instance.resetCacheTimer();
+        _updateStatus(entry.requestId, _RequestStatus.done);
+      } catch (e) {
+        _updateStatusWithError(entry.requestId, e);
+      }
+      return;
+    }
+
+    // Cached path — no dialog needed.
+    _updateStatus(entry.requestId, _RequestStatus.responding);
+    try {
+      await mxRespondSignCached(roomId: roomId, requestId: entry.requestId);
+      SettingsService.instance.resetCacheTimer();
+      _updateStatus(entry.requestId, _RequestStatus.done);
+    } catch (_) {
+      // Cache may be stale (key was re-encrypted); fall back to passphrase prompt.
+      _updateStatus(entry.requestId, _RequestStatus.pending);
+      final passphrase = await _promptPassphrase(entry);
+      if (passphrase == null) {
+        _updateStatus(entry.requestId, _RequestStatus.error);
+        return;
+      }
+      _updateStatus(entry.requestId, _RequestStatus.responding);
+      try {
+        await mxRespondSign(
+          roomId: roomId,
+          requestId: entry.requestId,
+          passphrase: passphrase,
+        );
+        SettingsService.instance.resetCacheTimer();
+        _updateStatus(entry.requestId, _RequestStatus.done);
+      } catch (e2) {
+        _updateStatusWithError(entry.requestId, e2);
+      }
+    }
+  }
+
+  Future<void> _rejectSign(String requestId) async {
+    final roomId = _agentRoom;
+    if (roomId == null) return;
+
+    _updateStatus(requestId, _RequestStatus.error);
+    try {
+      await mxRejectSign(roomId: roomId, requestId: requestId);
+    } catch (_) {
+      // Best-effort — status already updated.
+    }
+  }
+
+  Future<String?> _promptPassphrase(_RequestEntry entry) async {
+    // Prefer the already-resolved details on the entry; fall back to a fresh
+    // lookup only when missing (e.g. stale-cache retry path).
+    final fp = entry.fingerprint ?? '';
+    final details = (entry.keyName != null)
+        ? SshKeyDetails(
+            name: entry.keyName!,
+            algo: entry.keyAlgo ?? '',
+            cardIdents: entry.cardIdents,
+          )
+        : (fp.isNotEmpty ? await getSshKeyDetails(fingerprint: fp) : null);
+
+    if (!mounted) return null;
+
+    final ctrl = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2C2C2E),
+        title: const Text('Key passphrase'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ── Key context ───────────────────────────────────────────────
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              margin: const EdgeInsets.only(bottom: 14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1C1C1E),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF3A3A3C)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Key name + algo badge on the same row.
+                  if (details != null && details.name.isNotEmpty) ...[
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _keyLabel(details.name, details.cardIdents),
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFFE5E5EA),
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (details.algo.isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF3A3A3C),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              details.algo,
+                              style: const TextStyle(
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                                color: Color(0xFF8E8E93),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  // SSH fingerprint — smaller, monospace, secondary.
+                  if (fp.isNotEmpty)
+                    Text(
+                      fp,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        color: Color(0xFF636366),
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  // Sign context / description from the desktop client.
+                  if (entry.description != null &&
+                      entry.description!.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      entry.description!,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF8E8E93),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            // ── Passphrase field ──────────────────────────────────────────
+            TextField(
+              controller: ctrl,
+              obscureText: true,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'Enter passphrase',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => Navigator.pop(ctx, ctrl.text),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            child: const Text('Sign'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Room picker ──────────────────────────────────────────────────────────────
 
   Future<void> _pickRoom() async {
     final rooms = await mxListRooms();
@@ -179,7 +467,15 @@ class _AgentScreenState extends State<AgentScreen> {
                 : ListView.builder(
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     itemCount: _log.length,
-                    itemBuilder: (context, i) => _LogTile(entry: _log[i]),
+                    itemBuilder: (context, i) => _LogTile(
+                      entry: _log[i],
+                      onApprove: _log[i].status == _RequestStatus.pending
+                          ? () => _approveSign(_log[i])
+                          : null,
+                      onReject: _log[i].status == _RequestStatus.pending
+                          ? () => _rejectSign(_log[i].requestId)
+                          : null,
+                    ),
                   ),
           ),
         ],
@@ -245,13 +541,57 @@ class _RoomBanner extends StatelessWidget {
 // ── Log tile ──────────────────────────────────────────────────────────────────
 
 class _LogTile extends StatelessWidget {
-  const _LogTile({required this.entry});
+  const _LogTile({
+    required this.entry,
+    this.onApprove,
+    this.onReject,
+  });
 
   final _RequestEntry entry;
+  final VoidCallback? onApprove;
+  final VoidCallback? onReject;
+
+  void _showError(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2C2C2E),
+        title: const Row(
+          children: [
+            Icon(Icons.error_outline, color: Color(0xFFFF453A), size: 18),
+            SizedBox(width: 8),
+            Text('Sign error', style: TextStyle(fontSize: 15)),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            entry.errorMessage ?? 'Unknown error',
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 11,
+              color: Color(0xFFFF453A),
+              height: 1.5,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final isSign = entry.type == 'ssh.sign_request';
+    final isPending = entry.status == _RequestStatus.pending;
+    final isError = entry.status == _RequestStatus.error;
+    final hasErrorDetail = isError && entry.errorMessage != null;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Container(
@@ -259,41 +599,140 @@ class _LogTile extends StatelessWidget {
         decoration: BoxDecoration(
           color: const Color(0xFF2C2C2E),
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: const Color(0xFF3A3A3C)),
+          border: Border.all(
+            color: isPending && isSign
+                ? const Color(0xFFFF9F0A)
+                : isError
+                    ? const Color(0xFFFF453A).withValues(alpha: 0.4)
+                    : const Color(0xFF3A3A3C),
+          ),
         ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _StatusDot(entry.status),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    entry.type,
-                    style: const TextStyle(
-                        fontSize: 12,
-                        fontFamily: 'monospace',
-                        fontWeight: FontWeight.w600),
+            Row(
+              children: [
+                _StatusDot(entry.status),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.type,
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.w600),
+                      ),
+                      if (entry.keyName != null &&
+                          entry.keyName!.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                _keyLabel(
+                                    entry.keyName!, entry.cardIdents),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: Color(0xFFE5E5EA),
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (entry.keyAlgo != null &&
+                                entry.keyAlgo!.isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 5, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF3A3A3C),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  entry.keyAlgo!,
+                                  style: const TextStyle(
+                                    fontSize: 9,
+                                    fontFamily: 'monospace',
+                                    color: Color(0xFF8E8E93),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
+                      if (entry.fingerprint != null)
+                        Text(
+                          entry.fingerprint!,
+                          style: TextStyle(
+                              fontSize: 10,
+                              fontFamily: 'monospace',
+                              color: cs.onSurface.withValues(alpha: 0.5)),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      if (entry.description != null)
+                        Text(
+                          entry.description!,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: cs.onSurface.withValues(alpha: 0.55)),
+                        ),
+                      Text(
+                        entry.requestId.substring(0, 8),
+                        style: TextStyle(
+                            fontSize: 10,
+                            color: cs.onSurface.withValues(alpha: 0.35),
+                            fontFamily: 'monospace'),
+                      ),
+                    ],
                   ),
-                  if (entry.description != null)
-                    Text(
-                      entry.description!,
-                      style: TextStyle(
-                          fontSize: 11,
-                          color: cs.onSurface.withValues(alpha: 0.6)),
+                ),
+                _StatusLabel(entry.status),
+                // Info button — visible only when there is an error detail.
+                if (hasErrorDetail) ...[
+                  const SizedBox(width: 4),
+                  GestureDetector(
+                    onTap: () => _showError(context),
+                    child: const Icon(
+                      Icons.info_outline,
+                      size: 16,
+                      color: Color(0xFFFF453A),
                     ),
-                  Text(
-                    entry.requestId.substring(0, 8),
-                    style: TextStyle(
-                        fontSize: 10,
-                        color: cs.onSurface.withValues(alpha: 0.35),
-                        fontFamily: 'monospace'),
+                  ),
+                ],
+              ],
+            ),
+            // Approve / Reject buttons — only for pending sign requests.
+            if (isSign && isPending) ...[
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: onReject,
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFFFF453A),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('Reject'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: onApprove,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF30D158),
+                      foregroundColor: Colors.black,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('Approve'),
                   ),
                 ],
               ),
-            ),
-            _StatusLabel(entry.status),
+            ],
           ],
         ),
       ),
@@ -308,10 +747,10 @@ class _StatusDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = switch (status) {
-      _RequestStatus.pending    => const Color(0xFFFF9F0A),
+      _RequestStatus.pending => const Color(0xFFFF9F0A),
       _RequestStatus.responding => const Color(0xFF0A84FF),
-      _RequestStatus.done       => const Color(0xFF30D158),
-      _RequestStatus.error      => const Color(0xFFFF453A),
+      _RequestStatus.done => const Color(0xFF30D158),
+      _RequestStatus.error => const Color(0xFFFF453A),
     };
     return Container(
       width: 8,
@@ -328,14 +767,32 @@ class _StatusLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (label, color) = switch (status) {
-      _RequestStatus.pending    => ('pending',    const Color(0xFFFF9F0A)),
+      _RequestStatus.pending => ('pending', const Color(0xFFFF9F0A)),
       _RequestStatus.responding => ('responding', const Color(0xFF0A84FF)),
-      _RequestStatus.done       => ('done',       const Color(0xFF30D158)),
-      _RequestStatus.error      => ('error',      const Color(0xFFFF453A)),
+      _RequestStatus.done => ('done', const Color(0xFF30D158)),
+      _RequestStatus.error => ('error', const Color(0xFFFF453A)),
     };
     return Text(label,
         style: TextStyle(fontSize: 10, color: color, fontFamily: 'monospace'));
   }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Build the display label for a key: `uid` optionally followed by
+/// `#<short-ident>` for each associated card.
+///
+/// Card ident strings are typically a long hex AID like
+/// `D2760001240102010006123456780000`.  We show only the last 8 characters
+/// (the serial-number portion) to keep the label compact:
+/// `Abels<<Meno#56780000`.  Multiple cards are separated by commas.
+String _keyLabel(String uid, List<String> cardIdents) {
+  if (cardIdents.isEmpty) return uid;
+  final shorts = cardIdents.map((id) {
+    final s = id.replaceAll(RegExp(r'\s+'), '');
+    return '#${s.length > 8 ? s.substring(s.length - 8) : s}';
+  });
+  return '$uid ${shorts.join(', ')}';
 }
 
 // ── Data model ────────────────────────────────────────────────────────────────
@@ -349,19 +806,38 @@ class _RequestEntry {
     required this.description,
     required this.fingerprint,
     required this.status,
+    this.keyName,
+    this.keyAlgo,
+    this.cardIdents = const [],
+    this.errorMessage,
   });
 
   final String type;
   final String requestId;
   final String? description;
   final String? fingerprint;
+  final String? keyName;
+  final String? keyAlgo;
+  final List<String> cardIdents;
   final _RequestStatus status;
+  final String? errorMessage;
 
-  _RequestEntry copyWith({_RequestStatus? status}) => _RequestEntry(
+  _RequestEntry copyWith({
+    _RequestStatus? status,
+    String? keyName,
+    String? keyAlgo,
+    List<String>? cardIdents,
+    String? errorMessage,
+  }) =>
+      _RequestEntry(
         type: type,
         requestId: requestId,
         description: description,
         fingerprint: fingerprint,
         status: status ?? this.status,
+        keyName: keyName ?? this.keyName,
+        keyAlgo: keyAlgo ?? this.keyAlgo,
+        cardIdents: cardIdents ?? this.cardIdents,
+        errorMessage: errorMessage ?? this.errorMessage,
       );
 }

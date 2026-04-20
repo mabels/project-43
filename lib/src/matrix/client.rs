@@ -39,6 +39,11 @@ pub struct SavedConfig {
     /// `p43 ssh-agent` reads this so `--room` is not required on every invocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_room: Option<String>,
+    /// The last `next_batch` sync token seen while the agent was listening in
+    /// `agent_room`.  Passed back as `since` on the next agent start so only
+    /// messages that arrived after the previous session are replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_since: Option<String>,
 }
 
 // ── MatrixConfig ──────────────────────────────────────────────────────────────
@@ -181,6 +186,7 @@ async fn do_login(
         user_id: response.user_id.to_string(),
         session: MatrixSession::from(&response),
         agent_room: None,
+        agent_since: None,
     };
 
     save_config(&saved, &cfg.config_path)

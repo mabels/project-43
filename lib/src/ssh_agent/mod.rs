@@ -1,13 +1,108 @@
 use anyhow::{bail, Context, Result};
 use openpgp::crypto::mpi;
+use openpgp::packet::key::SecretKeyMaterial;
 use openpgp::policy::StandardPolicy;
 use openpgp::types::Curve;
 use sequoia_openpgp as openpgp;
-use ssh_key::public::{Ed25519PublicKey, KeyData};
-use ssh_key::{HashAlg, Mpint};
+use signature::Signer as _; // Ed25519 PrivateKey::try_sign
+use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData, RsaKeypair, RsaPrivateKey};
+use ssh_key::public::{Ed25519PublicKey, KeyData, RsaPublicKey};
+use ssh_key::{HashAlg, Mpint, PrivateKey, Signature};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+// ── rsa-crate imports (direct RSA signing, bypasses ssh-key 0.6.7 bug) ───────
+// ssh-key 0.6.7 TryFrom<&RsaKeypair> passes [p, p] instead of [p, q] to
+// rsa::RsaPrivateKey::from_components, causing a cryptographic error on every
+// RSA sign attempt.  We construct the rsa::RsaPrivateKey directly instead.
+
+#[cfg(feature = "ssh")]
+use rsa::{
+    pkcs1v15::SigningKey as RsaPkcs1SigningKey,
+    signature::{SignatureEncoding as RsaSigEncoding, Signer as RsaSigner},
+    BigUint, RsaPrivateKey as RsaCrateKey,
+};
+#[cfg(feature = "ssh")]
+use sha2::Sha512;
+
+// ── RSA key cache ─────────────────────────────────────────────────────────────
+//
+// After the first passphrase-based RSA sign we keep the decrypted
+// `rsa::RsaPrivateKey` in memory (keyed by SSH SHA-256 fingerprint).
+// Subsequent signs call `sign_rsa_cached` and skip the KDF entirely —
+// the same behaviour as the Ed25519 keypair cache but for variable-length RSA.
+
+#[cfg(feature = "ssh")]
+static RSA_KEY_CACHE: OnceLock<Mutex<HashMap<String, RsaCrateKey>>> = OnceLock::new();
+
+#[cfg(feature = "ssh")]
+fn rsa_key_cache() -> &'static Mutex<HashMap<String, RsaCrateKey>> {
+    RSA_KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Returns `true` if a decrypted RSA key is cached for this SSH fingerprint.
+pub fn has_cached_rsa_key(ssh_fp: &str) -> bool {
+    #[cfg(feature = "ssh")]
+    {
+        rsa_key_cache()
+            .lock()
+            .map(|m| m.contains_key(ssh_fp))
+            .unwrap_or(false)
+    }
+    #[cfg(not(feature = "ssh"))]
+    {
+        let _ = ssh_fp;
+        false
+    }
+}
+
+/// Sign `data` using the cached RSA key for `ssh_fp`.
+/// Returns an error if no key is cached; the caller should fall back to the
+/// passphrase path.
+///
+/// Returns the base64-encoded SSH wire signature (same format as
+/// `sign_with_soft_key` / `sign_with_soft_key_and_extract`).
+pub fn sign_rsa_cached(ssh_fp: &str, data: &[u8]) -> Result<String> {
+    #[cfg(feature = "ssh")]
+    {
+        let rsa_key = rsa_key_cache()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("RSA key cache lock poisoned: {e}"))?
+            .get(ssh_fp)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No cached RSA key for {ssh_fp}"))?;
+
+        let sig_bytes = sign_with_rsa_key(&rsa_key, data)?;
+        // Wrap in SSH wire format (algorithm name + raw bytes) before encoding.
+        let ssh_sig = Signature::new(
+            ssh_key::Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512),
+            },
+            sig_bytes,
+        )
+        .map_err(|e| anyhow::anyhow!("SSH RSA signature encoding failed: {e}"))?;
+        let wire: Vec<u8> = ssh_sig
+            .try_into()
+            .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature wire encoding failed: {e}"))?;
+        Ok(B64.encode(wire))
+    }
+    #[cfg(not(feature = "ssh"))]
+    {
+        let _ = (ssh_fp, data);
+        anyhow::bail!("ssh feature not enabled")
+    }
+}
+
+/// Clear the RSA key cache.  Called from `mx_clear_caches`.
+pub fn clear_rsa_key_cache() {
+    #[cfg(feature = "ssh")]
+    if let Ok(mut cache) = rsa_key_cache().lock() {
+        cache.clear();
+    }
+}
 
 // ── pcsc-only imports ─────────────────────────────────────────────────────────
 
@@ -16,17 +111,13 @@ use crate::pkcs11::card::open_first_card;
 #[cfg(feature = "pcsc")]
 use crate::pkcs11::soft_ops::load_secret_cert;
 #[cfg(feature = "pcsc")]
-use openpgp::crypto::Signer as _;
-#[cfg(feature = "pcsc")]
-use openpgp::packet::key::SecretKeyMaterial;
+use openpgp::crypto::Signer as _OgpSigner;
 #[cfg(feature = "pcsc")]
 use openpgp::types::HashAlgorithm;
 #[cfg(feature = "pcsc")]
 use openpgp_card_sequoia::types::KeyType;
 #[cfg(feature = "pcsc")]
-use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData};
-#[cfg(feature = "pcsc")]
-use ssh_key::{Algorithm, PrivateKey, Signature};
+use ssh_key::Algorithm;
 
 // ── Key slot selection ────────────────────────────────────────────────────────
 
@@ -84,13 +175,15 @@ pub fn list_ssh_public_keys(store_dir: &Path) -> Vec<crate::protocol::SshKeyInfo
             Err(_) => continue,
         };
 
-        // Prefer auth subkey; fall back to signing subkey.
+        // Prefer auth subkey; fall back to signing subkey; then primary key
+        // (card-imported certs may have only a primary key with CERTIFY flags).
         let ka_opt = cert
             .keys()
             .with_policy(&policy, None)
             .for_authentication()
             .next()
-            .or_else(|| cert.keys().with_policy(&policy, None).for_signing().next());
+            .or_else(|| cert.keys().with_policy(&policy, None).for_signing().next())
+            .or_else(|| cert.keys().with_policy(&policy, None).next());
 
         let ka = match ka_opt {
             Some(ka) => ka,
@@ -120,9 +213,417 @@ pub fn list_ssh_public_keys(store_dir: &Path) -> Vec<crate::protocol::SshKeyInfo
     result
 }
 
+/// Return the OpenSSH `authorized_keys` line for the key at `fingerprint`.
+///
+/// Prefers the authentication subkey; falls back to the signing subkey.
+/// Returns an error if the key has no supported SSH subkey.
+pub fn get_openssh_pubkey_string(store_dir: &Path, fingerprint: &str) -> Result<String> {
+    use ssh_key::public::PublicKey;
+
+    let ks = crate::key_store::store::KeyStore::open(store_dir)?;
+    let cert = ks.find(fingerprint)?;
+    let policy = StandardPolicy::new();
+
+    let ka = cert
+        .keys()
+        .with_policy(&policy, None)
+        .for_authentication()
+        .next()
+        .or_else(|| cert.keys().with_policy(&policy, None).for_signing().next())
+        // Card-imported certs may have only a primary key with CERTIFY flags
+        // (old import path). Fall back to the primary key so we can still
+        // display the SSH public key representation.
+        .or_else(|| cert.keys().with_policy(&policy, None).next())
+        .ok_or_else(|| anyhow::anyhow!("No usable key found for {fingerprint}"))?;
+
+    let key_data = mpi_pubkey_to_ssh_keydata(ka.key().mpis())?;
+
+    // Use the first UID as the comment.
+    let comment = cert
+        .userids()
+        .next()
+        .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
+        .unwrap_or_else(|| fingerprint.to_string());
+
+    let pub_key = PublicKey::new(key_data, &comment);
+    pub_key
+        .to_openssh()
+        .map_err(|e| anyhow::anyhow!("OpenSSH encode failed: {e}"))
+}
+
+/// Details returned by [`get_ssh_key_details`] for a given SSH fingerprint.
+pub struct SshKeyMeta {
+    pub uid: String,
+    pub algo: String,
+    /// AID ident strings of any OpenPGP cards associated with this key entry.
+    pub card_idents: Vec<String>,
+}
+
+/// Resolve an SSH SHA-256 fingerprint to the key's human-readable UID,
+/// algorithm string, and associated card ident(s).
+///
+/// Returns `None` if no matching key is found.  Used by the UI to display key
+/// information in sign-request tiles and the passphrase dialog.
+pub fn get_ssh_key_meta(store_dir: &Path, ssh_fingerprint: &str) -> Option<SshKeyMeta> {
+    use ssh_key::public::PublicKey;
+
+    let ks = crate::key_store::store::KeyStore::open(store_dir).ok()?;
+    let entries = ks.list().ok()?;
+    let policy = StandardPolicy::new();
+
+    for entry in entries {
+        let cert = match ks.find(&entry.fingerprint) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let ka = cert
+            .keys()
+            .with_policy(&policy, None)
+            .for_authentication()
+            .next()
+            .or_else(|| cert.keys().with_policy(&policy, None).for_signing().next())
+            .or_else(|| cert.keys().with_policy(&policy, None).next());
+        let ka = match ka {
+            Some(ka) => ka,
+            None => continue,
+        };
+        let key_data = match mpi_pubkey_to_ssh_keydata(ka.key().mpis()) {
+            Ok(kd) => kd,
+            Err(_) => continue,
+        };
+        let computed_fp = PublicKey::new(key_data, "")
+            .fingerprint(HashAlg::Sha256)
+            .to_string();
+        if computed_fp == ssh_fingerprint {
+            return Some(SshKeyMeta {
+                uid: entry.uid,
+                algo: entry.algo,
+                card_idents: entry.card_idents,
+            });
+        }
+    }
+    None
+}
+
+/// Resolve an SSH SHA-256 fingerprint (e.g. `SHA256:AbCd…`) to the OpenPGP
+/// hex fingerprint used as the key-store lookup query.
+///
+/// Iterates every cert in the store, derives its SSH public key, and compares
+/// the SSH fingerprint.  Returns an error if no matching key is found.
+fn openpgp_fp_for_ssh_fp(store_dir: &Path, ssh_fingerprint: &str) -> Result<String> {
+    use ssh_key::public::PublicKey;
+
+    let ks = crate::key_store::store::KeyStore::open(store_dir)?;
+    let entries = ks.list()?;
+    let policy = StandardPolicy::new();
+
+    for entry in entries {
+        let cert = match ks.find(&entry.fingerprint) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let ka_opt = cert
+            .keys()
+            .with_policy(&policy, None)
+            .for_authentication()
+            .next()
+            .or_else(|| cert.keys().with_policy(&policy, None).for_signing().next())
+            .or_else(|| cert.keys().with_policy(&policy, None).next());
+        let ka = match ka_opt {
+            Some(ka) => ka,
+            None => continue,
+        };
+        let key_data = match mpi_pubkey_to_ssh_keydata(ka.key().mpis()) {
+            Ok(kd) => kd,
+            Err(_) => continue,
+        };
+        let ssh_fp = PublicKey::new(key_data, "")
+            .fingerprint(HashAlg::Sha256)
+            .to_string();
+        if ssh_fp == ssh_fingerprint {
+            return Ok(entry.fingerprint);
+        }
+    }
+
+    anyhow::bail!("No key found with SSH fingerprint {ssh_fingerprint}")
+}
+
+/// Sign `data` using the soft key whose SSH fingerprint matches `ssh_fingerprint`.
+///
+/// The sign request from the CLI carries the SSH SHA-256 fingerprint, which
+/// differs from the OpenPGP hex fingerprint used in the key store.  This
+/// function resolves the mapping automatically.
+///
+/// Decrypts the `.sec.asc` file using `passphrase`, then signs `data` with
+/// the auth subkey (falling back to the sign subkey).  Returns the SSH
+/// wire-encoded signature as a base64 string (the format expected by
+/// `SshSignResponse.signature`).
+pub fn sign_with_soft_key(
+    store_dir: &Path,
+    ssh_fingerprint: &str,
+    passphrase: &str,
+    data: &[u8],
+) -> Result<String> {
+    let openpgp_fp = openpgp_fp_for_ssh_fp(store_dir, ssh_fingerprint)?;
+    let ks = crate::key_store::store::KeyStore::open(store_dir)?;
+    let cert = ks.find_with_secret(&openpgp_fp, passphrase)?;
+
+    // For RSA keys: extract the decrypted key and cache it so subsequent
+    // signs skip the expensive S2K KDF entirely (same behaviour as the
+    // Ed25519 keypair cache but for variable-length RSA keys).
+    let policy = StandardPolicy::new();
+    let ka = cert
+        .keys()
+        .with_policy(&policy, None)
+        .for_authentication()
+        .secret()
+        .next()
+        .or_else(|| {
+            cert.keys()
+                .with_policy(&policy, None)
+                .for_signing()
+                .secret()
+                .next()
+        })
+        .or_else(|| cert.keys().with_policy(&policy, None).secret().next())
+        .context("No usable secret key found")?;
+
+    if matches!(ka.key().mpis(), mpi::PublicKey::RSA { .. }) {
+        let rsa_key = extract_rsa_key(&cert)?;
+        if let Ok(mut cache) = rsa_key_cache().lock() {
+            cache.insert(ssh_fingerprint.to_string(), rsa_key.clone());
+        }
+        let sig_bytes = sign_with_rsa_key(&rsa_key, data)?;
+        let ssh_sig = Signature::new(
+            ssh_key::Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512),
+            },
+            sig_bytes,
+        )
+        .map_err(|e| anyhow::anyhow!("SSH RSA signature encoding failed: {e}"))?;
+        let wire: Vec<u8> = ssh_sig
+            .try_into()
+            .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
+        return Ok(B64.encode(wire));
+    }
+
+    sign_cert_for_ssh(&cert, data)
+}
+
+/// Unified signing function: routes Ed25519 through ssh-key and RSA through
+/// the rsa crate directly (working around the ssh-key 0.6.7 RSA bug).
+fn sign_cert_for_ssh(cert: &openpgp::Cert, data: &[u8]) -> Result<String> {
+    let policy = StandardPolicy::new();
+
+    // Peek at the algorithm to decide which code path to take.
+    let ka = cert
+        .keys()
+        .with_policy(&policy, None)
+        .for_authentication()
+        .secret()
+        .next()
+        .or_else(|| {
+            cert.keys()
+                .with_policy(&policy, None)
+                .for_signing()
+                .secret()
+                .next()
+        })
+        .or_else(|| cert.keys().with_policy(&policy, None).secret().next())
+        .context("No usable secret key found")?;
+
+    let is_rsa = matches!(ka.key().mpis(), mpi::PublicKey::RSA { .. });
+
+    if is_rsa {
+        let sig = sign_rsa_direct(cert, data)?;
+        let sig_bytes: Vec<u8> = sig
+            .try_into()
+            .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
+        Ok(B64.encode(sig_bytes))
+    } else {
+        let private_key = cert_to_ssh_key(cert, SshKeySlot::Auth)?;
+        let sig: Signature = private_key
+            .try_sign(data)
+            .map_err(|e| anyhow::anyhow!("Signing failed: {e}"))?;
+        let sig_bytes: Vec<u8> = sig
+            .try_into()
+            .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
+        Ok(B64.encode(sig_bytes))
+    }
+}
+
+/// Like [`sign_with_soft_key`] but also returns the 64-byte Ed25519 keypair so
+/// the caller can cache it.  Returns `(signature_b64, Some(keypair_bytes))`
+/// where `keypair_bytes` is `private[32] || public[32]` (the SSH wire layout).
+///
+/// Returns `None` for the keypair bytes when the key is RSA (RSA keys are too
+/// large to cache in a fixed 64-byte slot; the passphrase cache is used instead).
+///
+/// Pass the returned bytes to [`sign_with_cached_keypair`] for zero-KDF
+/// subsequent signs.
+pub fn sign_with_soft_key_and_extract(
+    store_dir: &Path,
+    ssh_fingerprint: &str,
+    passphrase: &str,
+    data: &[u8],
+) -> Result<(String, Option<[u8; 64]>)> {
+    let openpgp_fp = openpgp_fp_for_ssh_fp(store_dir, ssh_fingerprint)?;
+    let ks = crate::key_store::store::KeyStore::open(store_dir)?;
+    let cert = ks.find_with_secret(&openpgp_fp, passphrase)?;
+
+    let policy = StandardPolicy::new();
+    let ka = cert
+        .keys()
+        .with_policy(&policy, None)
+        .for_authentication()
+        .secret()
+        .next()
+        .or_else(|| {
+            cert.keys()
+                .with_policy(&policy, None)
+                .for_signing()
+                .secret()
+                .next()
+        })
+        .or_else(|| cert.keys().with_policy(&policy, None).secret().next())
+        .context("No usable secret key found")?;
+
+    let is_rsa = matches!(ka.key().mpis(), mpi::PublicKey::RSA { .. });
+
+    if is_rsa {
+        // RSA: extract key, cache it for zero-KDF subsequent signs, then sign.
+        let rsa_key = extract_rsa_key(&cert)?;
+        if let Ok(mut cache) = rsa_key_cache().lock() {
+            cache.insert(ssh_fingerprint.to_string(), rsa_key.clone());
+        }
+        let sig_bytes = sign_with_rsa_key(&rsa_key, data)?;
+        let ssh_sig = Signature::new(
+            ssh_key::Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512),
+            },
+            sig_bytes,
+        )
+        .map_err(|e| anyhow::anyhow!("SSH RSA signature encoding failed: {e}"))?;
+        let wire: Vec<u8> = ssh_sig
+            .try_into()
+            .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
+        Ok((B64.encode(wire), None))
+    } else {
+        // Ed25519: use ssh-key, extract keypair bytes for the hot-path cache.
+        let private_key = cert_to_ssh_key(&cert, SshKeySlot::Auth)?;
+        let keypair_bytes: Option<[u8; 64]> = match private_key.key_data() {
+            KeypairData::Ed25519(kp) => Some(kp.to_bytes()),
+            _ => None,
+        };
+        let sig: Signature = private_key
+            .try_sign(data)
+            .map_err(|e| anyhow::anyhow!("Signing failed: {e}"))?;
+        let sig_bytes: Vec<u8> = sig
+            .try_into()
+            .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
+        Ok((B64.encode(sig_bytes), keypair_bytes))
+    }
+}
+
+/// Sign `data` with a pre-decrypted Ed25519 keypair (64 bytes: priv || pub).
+///
+/// Skips the expensive passphrase KDF entirely — typically completes in
+/// microseconds.  Call this on the hot path after caching the bytes from a
+/// first successful [`sign_with_soft_key_and_extract`].
+pub fn sign_with_cached_keypair(keypair_bytes: &[u8; 64], data: &[u8]) -> Result<String> {
+    let kp = Ed25519Keypair::from_bytes(keypair_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to reconstruct Ed25519 keypair: {e}"))?;
+    let private_key = PrivateKey::new(KeypairData::Ed25519(kp), "p43")
+        .map_err(|e| anyhow::anyhow!("Failed to build SSH PrivateKey: {e}"))?;
+
+    let sig: Signature = private_key
+        .try_sign(data)
+        .map_err(|e| anyhow::anyhow!("Signing failed: {e}"))?;
+
+    let sig_bytes: Vec<u8> = sig
+        .try_into()
+        .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
+
+    Ok(B64.encode(sig_bytes))
+}
+
+// ── Direct RSA signing (bypasses ssh-key 0.6.7 bug) ─────────────────────────
+
+/// Extract the decrypted `rsa::RsaPrivateKey` from a cert that has been loaded
+/// with its secret material already decrypted (via `find_with_secret`).
+///
+/// Sequoia convention: p < q, u = p⁻¹ mod q.
+/// The rsa crate accepts primes in any order and recomputes CRT parameters.
+fn extract_rsa_key(cert: &openpgp::Cert) -> Result<RsaCrateKey> {
+    let policy = StandardPolicy::new();
+
+    let ka = cert
+        .keys()
+        .with_policy(&policy, None)
+        .for_authentication()
+        .secret()
+        .next()
+        .or_else(|| {
+            cert.keys()
+                .with_policy(&policy, None)
+                .for_signing()
+                .secret()
+                .next()
+        })
+        .or_else(|| cert.keys().with_policy(&policy, None).secret().next())
+        .context("No usable RSA secret key found")?;
+
+    let key = ka.key();
+
+    let (e_val, n_val) = match key.mpis() {
+        mpi::PublicKey::RSA { e, n } => (e.value().to_vec(), n.value().to_vec()),
+        _ => bail!("extract_rsa_key called on non-RSA key"),
+    };
+
+    match key.optional_secret().context("No RSA secret material")? {
+        SecretKeyMaterial::Unencrypted(unenc) => unenc.map(|sec| match sec {
+            mpi::SecretKeyMaterial::RSA { d, p, q, .. } => RsaCrateKey::from_components(
+                BigUint::from_bytes_be(&n_val),
+                BigUint::from_bytes_be(&e_val),
+                BigUint::from_bytes_be(d.value()),
+                vec![
+                    BigUint::from_bytes_be(p.value()),
+                    BigUint::from_bytes_be(q.value()),
+                ],
+            )
+            .map_err(|err| anyhow::anyhow!("RSA key construction: {err}")),
+            _ => bail!("Expected RSA secret key material"),
+        }),
+        SecretKeyMaterial::Encrypted(_) => bail!("Key is still encrypted — wrong passphrase?"),
+    }
+}
+
+/// Sign `data` with an `rsa::RsaPrivateKey` using PKCS#1 v1.5 + SHA-512.
+/// Returns the raw SSH wire bytes (not base64-encoded).
+fn sign_with_rsa_key(rsa_key: &RsaCrateKey, data: &[u8]) -> Result<Vec<u8>> {
+    let signing_key = RsaPkcs1SigningKey::<Sha512>::new(rsa_key.clone());
+    let sig: rsa::pkcs1v15::Signature = RsaSigner::try_sign(&signing_key, data)
+        .map_err(|err| anyhow::anyhow!("RSA sign failed: {err}"))?;
+    Ok(RsaSigEncoding::to_vec(&sig))
+}
+
+/// Sign `data` with the RSA secret key held in `cert` and cache the key for
+/// subsequent zero-KDF signs.  Uses the `rsa` crate directly (ssh-key 0.6.7
+/// bug: passes `[p, p]` instead of `[p, q]` in `from_components`).
+fn sign_rsa_direct(cert: &openpgp::Cert, data: &[u8]) -> Result<Signature> {
+    let rsa_key = extract_rsa_key(cert)?;
+    let sig_bytes = sign_with_rsa_key(&rsa_key, data)?;
+    Signature::new(
+        ssh_key::Algorithm::Rsa {
+            hash: Some(HashAlg::Sha512),
+        },
+        sig_bytes,
+    )
+    .map_err(|err| anyhow::anyhow!("SSH RSA signature encoding failed: {err}"))
+}
+
 // ── Internal conversion ───────────────────────────────────────────────────────
 
-#[cfg(feature = "pcsc")]
 fn cert_to_ssh_key(cert: &openpgp::Cert, slot: SshKeySlot) -> Result<PrivateKey> {
     let policy = StandardPolicy::new();
 
@@ -193,10 +694,55 @@ fn cert_to_ssh_key(cert: &openpgp::Cert, slot: SshKeySlot) -> Result<PrivateKey>
             PrivateKey::new(KeypairData::Ed25519(keypair), "p43")
                 .map_err(|e| anyhow::anyhow!("Failed to build SSH PrivateKey: {e}"))
         }
-        _ => bail!(
-            "Unsupported key algorithm for SSH agent \
-             (only Ed25519 is currently supported; RSA support is planned)"
-        ),
+        mpi::PublicKey::RSA { e, n } => {
+            // OpenPGP RSA secret: p < q, u = p⁻¹ mod q.
+            // SSH RSA secret:     p > q, iqmp = q⁻¹ mod p.
+            // Swapping p↔q makes u equal iqmp algebraically — no big-int
+            // modular inverse needed.
+            match key
+                .optional_secret()
+                .context("No secret material in key (RSA)")?
+            {
+                SecretKeyMaterial::Unencrypted(unenc) => {
+                    unenc.map(|sec| match sec {
+                        mpi::SecretKeyMaterial::RSA { d, p, q, u } => {
+                            let pub_key = RsaPublicKey {
+                                e: Mpint::from_positive_bytes(e.value())
+                                    .map_err(|err| anyhow::anyhow!("RSA e: {err}"))?,
+                                n: Mpint::from_positive_bytes(n.value())
+                                    .map_err(|err| anyhow::anyhow!("RSA n: {err}"))?,
+                            };
+                            let priv_key = RsaPrivateKey {
+                                d: Mpint::from_positive_bytes(d.value())
+                                    .map_err(|err| anyhow::anyhow!("RSA d: {err}"))?,
+                                // Swapped p↔q → u is now q⁻¹ mod p = iqmp.
+                                iqmp: Mpint::from_positive_bytes(u.value())
+                                    .map_err(|err| anyhow::anyhow!("RSA iqmp: {err}"))?,
+                                p: Mpint::from_positive_bytes(q.value())
+                                    .map_err(|err| anyhow::anyhow!("RSA p: {err}"))?,
+                                q: Mpint::from_positive_bytes(p.value())
+                                    .map_err(|err| anyhow::anyhow!("RSA q: {err}"))?,
+                            };
+                            PrivateKey::new(
+                                KeypairData::Rsa(RsaKeypair {
+                                    public: pub_key,
+                                    private: priv_key,
+                                }),
+                                "p43",
+                            )
+                            .map_err(|err| {
+                                anyhow::anyhow!("Failed to build RSA SSH PrivateKey: {err}")
+                            })
+                        }
+                        _ => bail!("Expected RSA secret key material"),
+                    })
+                }
+                SecretKeyMaterial::Encrypted(_) => {
+                    bail!("Key is still encrypted — wrong passphrase?")
+                }
+            }
+        }
+        _ => bail!("Unsupported key algorithm for SSH agent (Ed25519 and RSA are supported)"),
     }
 }
 
@@ -271,8 +817,6 @@ pub fn card_auth_sign_ssh(data: &[u8], pin: &str, flags: u32, is_rsa: bool) -> R
         .context("Failed to obtain card authenticator")?;
 
     if is_rsa {
-        // RSA: pre-hash the SSH data on the host; the card receives a
-        // DigestInfo blob and returns the raw PKCS#1 v1.5 signature.
         let use_sha512 = flags & RSA_SHA2_512_FLAG != 0;
         let _ = RSA_SHA2_256_FLAG; // suppress unused-constant warning
         let (openpgp_hash, ssh_hash) = if use_sha512 {
@@ -286,7 +830,6 @@ pub fn card_auth_sign_ssh(data: &[u8], pin: &str, flags: u32, is_rsa: bool) -> R
             .context("Card RSA authentication signing failed")?;
         rsa_mpi_to_ssh_sig(mpi_sig, ssh_hash)
     } else {
-        // Ed25519: pass the raw SSH blob; the card hashes internally.
         let mpi_sig = auth
             .sign(HashAlgorithm::SHA512, data)
             .context("Card Ed25519 authentication signing failed")?;
@@ -328,8 +871,6 @@ fn mpi_pubkey_to_ssh_keydata(mpis: &mpi::PublicKey) -> Result<KeyData> {
         }
         mpi::PublicKey::RSA { e, n } => {
             use ssh_key::public::RsaPublicKey;
-            // `from_positive_bytes` strips leading zeros and adds a leading
-            // 0x00 when the MSB is set, matching the SSH Mpint wire format.
             let rsa_pub = RsaPublicKey {
                 e: Mpint::from_positive_bytes(e.value())
                     .map_err(|err| anyhow::anyhow!("RSA exponent conversion failed: {err}"))?,

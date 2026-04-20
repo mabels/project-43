@@ -358,28 +358,33 @@ fn run_matrix(args: SshAgentArgs, socket_path: PathBuf, store_dir: &Path) -> Res
             let dispatch_pending = Arc::clone(&pending);
             let listen_room_id = room_id.clone();
             tokio::spawn(async move {
-                let _ = p43::matrix::global::listen_room(&listen_room_id, move |_sender, body| {
-                    if let Ok(msg) = p43::protocol::Message::from_json(&body) {
-                        let request_id = match &msg {
-                            p43::protocol::Message::SshListKeysResponse(r) => {
-                                Some(r.request_id.clone())
-                            }
-                            p43::protocol::Message::SshSignResponse(r) => {
-                                Some(r.request_id.clone())
-                            }
-                            p43::protocol::Message::Error(e) => e.request_id.clone(),
-                            _ => None,
-                        };
-                        if let Some(id) = request_id {
-                            // Use try_lock to avoid blocking the sync thread.
-                            if let Ok(mut guard) = dispatch_pending.try_lock() {
-                                if let Some(tx) = guard.remove(&id) {
-                                    let _ = tx.send(msg);
+                let _ = p43::matrix::global::listen_room(
+                    &listen_room_id,
+                    None,
+                    |_| {},
+                    move |_sender, body| {
+                        if let Ok(msg) = p43::protocol::Message::from_json(&body) {
+                            let request_id = match &msg {
+                                p43::protocol::Message::SshListKeysResponse(r) => {
+                                    Some(r.request_id.clone())
+                                }
+                                p43::protocol::Message::SshSignResponse(r) => {
+                                    Some(r.request_id.clone())
+                                }
+                                p43::protocol::Message::Error(e) => e.request_id.clone(),
+                                _ => None,
+                            };
+                            if let Some(id) = request_id {
+                                // Use try_lock to avoid blocking the sync thread.
+                                if let Ok(mut guard) = dispatch_pending.try_lock() {
+                                    if let Some(tx) = guard.remove(&id) {
+                                        let _ = tx.send(msg);
+                                    }
                                 }
                             }
                         }
-                    }
-                })
+                    },
+                )
                 .await;
             });
 

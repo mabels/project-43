@@ -15,6 +15,19 @@ pub struct KeyEntry {
     pub uid: String,
     pub algo: String,
     pub has_secret: bool,
+    /// Application Identifier strings of YubiKeys (or other OpenPGP cards)
+    /// that carry the secret key for this entry.  Empty for soft keys.
+    /// Populated at read-time from the companion `<fp>.card.json` file;
+    /// not stored in `index.json`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub card_idents: Vec<String>,
+}
+
+/// On-disk format for `<fingerprint>.card.json`.
+#[derive(Debug, SerdeSerialize, Deserialize)]
+struct CardInfo {
+    version: u32,
+    idents: Vec<String>,
 }
 
 pub struct KeyStore {
@@ -58,7 +71,20 @@ impl KeyStore {
             return Ok(vec![]);
         }
         let data = fs::read_to_string(&index_path)?;
-        serde_json::from_str(&data).context("Failed to parse key store index")
+        let mut entries: Vec<KeyEntry> =
+            serde_json::from_str(&data).context("Failed to parse key store index")?;
+        // Populate card_idents from companion .card.json files (best-effort).
+        for entry in &mut entries {
+            let card_path = self.card_path(&entry.fingerprint);
+            if card_path.exists() {
+                if let Ok(raw) = fs::read_to_string(&card_path) {
+                    if let Ok(info) = serde_json::from_str::<CardInfo>(&raw) {
+                        entry.card_idents = info.idents;
+                    }
+                }
+            }
+        }
+        Ok(entries)
     }
 
     pub fn find(&self, query: &str) -> Result<Cert> {
@@ -86,7 +112,7 @@ impl KeyStore {
     pub fn delete(&self, query: &str) -> Result<String> {
         let entry = self.find_entry(query)?;
         let fp = &entry.fingerprint;
-        for path in [self.pub_path(fp), self.sec_path(fp)] {
+        for path in [self.pub_path(fp), self.sec_path(fp), self.card_path(fp)] {
             if path.exists() {
                 fs::remove_file(&path)?;
             }
@@ -104,11 +130,44 @@ impl KeyStore {
         self.sec_path(fingerprint)
     }
 
+    /// Register a YubiKey (or other OpenPGP card) AID with a key entry.
+    ///
+    /// Creates or updates `<fingerprint>.card.json` alongside the public-key
+    /// file.  The same `fingerprint` can accumulate multiple `card_ident`
+    /// strings — useful when the user has two identical-content YubiKeys.
+    ///
+    /// `card_ident` should be the string returned by
+    /// `tx.application_identifier()?.ident()` from `openpgp-card-sequoia`.
+    pub fn register_card(&self, fingerprint: &str, card_ident: &str) -> Result<()> {
+        // Ensure the key is known before creating any file.
+        let fp = &self.find_entry(fingerprint)?.fingerprint;
+        let card_path = self.card_path(fp);
+        let mut info = if card_path.exists() {
+            let raw = fs::read_to_string(&card_path)
+                .with_context(|| format!("Cannot read {:?}", card_path))?;
+            serde_json::from_str::<CardInfo>(&raw).context("Failed to parse card info")?
+        } else {
+            CardInfo {
+                version: 1,
+                idents: Vec::new(),
+            }
+        };
+        if !info.idents.iter().any(|id| id == card_ident) {
+            info.idents.push(card_ident.to_owned());
+            fs::write(&card_path, serde_json::to_string_pretty(&info)?)
+                .with_context(|| format!("Cannot write {:?}", card_path))?;
+        }
+        Ok(())
+    }
+
     fn pub_path(&self, fp: &str) -> PathBuf {
         self.dir.join(format!("{}.pub.asc", fp))
     }
     fn sec_path(&self, fp: &str) -> PathBuf {
         self.dir.join(format!("{}.sec.asc", fp))
+    }
+    fn card_path(&self, fp: &str) -> PathBuf {
+        self.dir.join(format!("{}.card.json", fp))
     }
     fn index_path(&self) -> PathBuf {
         self.dir.join("index.json")
@@ -145,6 +204,7 @@ impl KeyStore {
             uid,
             algo,
             has_secret: cert.is_tsk(),
+            card_idents: Vec::new(),
         });
         fs::write(self.index_path(), serde_json::to_string_pretty(&entries)?)?;
         Ok(())

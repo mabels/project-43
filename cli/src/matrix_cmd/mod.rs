@@ -206,11 +206,14 @@ async fn do_listen(args: ListenArgs, cfg: &MatrixConfig) -> Result<()> {
     let client = require_client(cfg).await?;
     let room_id = resolve_room_id(&client, &args.room).await?;
 
-    let pointer: ListenPointer =
-        listen(&client, &room_id, args.since.as_deref(), |sender, body| {
-            println!("[{sender}] {body}")
-        })
-        .await?;
+    let pointer: ListenPointer = listen(
+        &client,
+        &room_id,
+        args.since.as_deref(),
+        |sender, body| println!("[{sender}] {body}"),
+        |_| {},
+    )
+    .await?;
 
     // Print the pointer so the caller can capture it and pass it as
     // --since on the next invocation to resume from this position.

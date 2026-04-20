@@ -41,4 +41,30 @@ pub enum KeyCmd {
         #[arg(short, long)]
         key: String,
     },
+    /// Associate a YubiKey (or other OpenPGP card) AID with a key entry
+    RegisterCard {
+        /// Fingerprint or partial UID of the key to associate
+        #[arg(short, long)]
+        key: String,
+        /// Card Application Identifier string (e.g. from `p43 key list --verbose`
+        /// or printed by `p43 pgp card-info`)
+        #[arg(short, long)]
+        ident: String,
+    },
+    /// Import a key directly from a connected OpenPGP card (YubiKey etc.)
+    ///
+    /// Reads the signing-slot public key off the card, creates a self-signed
+    /// OpenPGP cert (the card signs the UID binding), saves the public cert to
+    /// the store, and records the card's AID in a companion .card.json file.
+    ImportCard {
+        /// Override the UID (default: cardholder name stored on card)
+        #[arg(long)]
+        uid: Option<String>,
+        /// Select card by AID ident string (default: first connected card).
+        /// Run `p43 key list-cards` to see available idents.
+        #[arg(long)]
+        card: Option<String>,
+    },
+    /// List all connected OpenPGP cards and their slot fingerprints
+    ListCards,
 }

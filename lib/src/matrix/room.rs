@@ -141,16 +141,22 @@ pub type ListenPointer = String;
 /// qualifying message — catch-up and live — oldest first.  The closure is
 /// required to be `Send + Sync + 'static` because it is shared with the
 /// event-handler thread.
-pub async fn listen<F>(
+pub async fn listen<F, P>(
     client: &Client,
     room_id: &RoomId,
     since: Option<&str>,
     on_message: F,
+    on_pointer: P,
 ) -> Result<ListenPointer>
 where
     F: Fn(OwnedUserId, String) + Send + Sync + 'static,
+    // Called with the latest `next_batch` token on every sync batch.
+    // Use this to persist the token so reconnects skip already-seen messages.
+    // Pass `|_| {}` to ignore.
+    P: Fn(String) + Send + Sync + 'static,
 {
     let on_message = Arc::new(on_message);
+    let on_pointer = Arc::new(on_pointer);
 
     // ── Catch-up ──────────────────────────────────────────────────────────
     let initial_token: String = match since {
@@ -259,17 +265,30 @@ where
     // Track the latest sync token so we can return it when the loop exits.
     let last_token = Arc::new(Mutex::new(initial_token.clone()));
 
+    // 2 s long-poll: server returns immediately on new events, timeout only
+    // applies when the room is idle.  Keeps worst-case receive latency ≤ 2 s.
     client
-        .sync_with_callback(SyncSettings::default().token(initial_token), {
-            let last_token = Arc::clone(&last_token);
-            move |resp| {
+        .sync_with_callback(
+            SyncSettings::default()
+                .token(initial_token)
+                .timeout(Duration::from_secs(2)),
+            {
                 let last_token = Arc::clone(&last_token);
-                async move {
-                    *last_token.lock().unwrap() = resp.next_batch;
-                    LoopCtrl::Continue
+                let on_pointer = Arc::clone(&on_pointer);
+                move |resp| {
+                    let last_token = Arc::clone(&last_token);
+                    let on_pointer = Arc::clone(&on_pointer);
+                    async move {
+                        let token = resp.next_batch.clone();
+                        *last_token.lock().unwrap() = resp.next_batch;
+                        // File I/O off the async path — the next poll starts
+                        // immediately without waiting for the write to finish.
+                        tokio::task::spawn_blocking(move || on_pointer(token));
+                        LoopCtrl::Continue
+                    }
                 }
-            }
-        })
+            },
+        )
         .await
         .context("Sync loop terminated unexpectedly")?;
 

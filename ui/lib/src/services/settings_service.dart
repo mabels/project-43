@@ -1,0 +1,164 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:p43/src/rust/api/simple.dart';
+import 'package:path_provider/path_provider.dart';
+
+// ── Model ─────────────────────────────────────────────────────────────────────
+
+class AgentSettings {
+  const AgentSettings({
+    this.autoApproveWhenCached = false,
+    this.cacheDecryptedKey = false,
+    this.cacheTimeoutMinutes = 15,
+    this.notifyOnSignRequest = true,
+  });
+
+  /// When `true` and credentials for the requested key are cached, sign
+  /// requests are approved automatically without showing an approval tile.
+  ///
+  /// When biometric approval is added, this flag will also gate whether a
+  /// biometric prompt is shown (true → biometric, false → passphrase dialog).
+  final bool autoApproveWhenCached;
+
+  /// When `true`, the decrypted Ed25519 keypair is cached in memory after the
+  /// first passphrase-based sign.  Subsequent auto-approve signs skip the
+  /// expensive KDF (~9 s on a Mac) entirely, completing in microseconds.
+  ///
+  /// Security trade-off: the private key bytes live in process memory for the
+  /// session.  Disable to re-run the KDF on every sign (slower but no
+  /// in-memory key material).
+  final bool cacheDecryptedKey;
+
+  /// How many minutes after the last successful sign the in-memory credential
+  /// caches are automatically cleared.  `null` means the caches never expire
+  /// on their own (they are still cleared on screen-lock / app background).
+  final int? cacheTimeoutMinutes;
+
+  /// When `true`, a system notification is shown for every incoming sign
+  /// request (pending or auto-approved).  Useful so the phone vibrates /
+  /// banners appear even when the app is in the background.
+  final bool notifyOnSignRequest;
+
+  AgentSettings copyWith({
+    bool? autoApproveWhenCached,
+    bool? cacheDecryptedKey,
+    Object? cacheTimeoutMinutes = _sentinel,
+    bool? notifyOnSignRequest,
+  }) =>
+      AgentSettings(
+        autoApproveWhenCached:
+            autoApproveWhenCached ?? this.autoApproveWhenCached,
+        cacheDecryptedKey: cacheDecryptedKey ?? this.cacheDecryptedKey,
+        cacheTimeoutMinutes: cacheTimeoutMinutes == _sentinel
+            ? this.cacheTimeoutMinutes
+            : cacheTimeoutMinutes as int?,
+        notifyOnSignRequest: notifyOnSignRequest ?? this.notifyOnSignRequest,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'autoApproveWhenCached': autoApproveWhenCached,
+        'cacheDecryptedKey': cacheDecryptedKey,
+        'cacheTimeoutMinutes': cacheTimeoutMinutes,
+        'notifyOnSignRequest': notifyOnSignRequest,
+      };
+
+  factory AgentSettings.fromJson(Map<String, dynamic> json) => AgentSettings(
+        autoApproveWhenCached:
+            json['autoApproveWhenCached'] as bool? ?? false,
+        cacheDecryptedKey: json['cacheDecryptedKey'] as bool? ?? false,
+        cacheTimeoutMinutes: json['cacheTimeoutMinutes'] as int? ?? 15,
+        notifyOnSignRequest: json['notifyOnSignRequest'] as bool? ?? true,
+      );
+}
+
+// Sentinel used to distinguish "not passed" from explicit null in copyWith.
+const Object _sentinel = Object();
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+/// Singleton that loads/persists app settings to `settings.json` in the
+/// application support directory.
+///
+/// Call [load] once at startup (before `runApp`), then read [settings] from
+/// anywhere.  Widgets that need to rebuild on changes should listen via
+/// [ListenableBuilder] or [AnimatedBuilder].
+class SettingsService extends ChangeNotifier {
+  SettingsService._();
+
+  static final SettingsService instance = SettingsService._();
+
+  AgentSettings _settings = const AgentSettings();
+  AgentSettings get settings => _settings;
+
+  File? _file;
+  Timer? _cacheTimer;
+
+  Future<void> load() async {
+    final dir = await getApplicationSupportDirectory();
+    _file = File('${dir.path}/settings.json');
+    if (_file!.existsSync()) {
+      try {
+        final raw = await _file!.readAsString();
+        _settings = AgentSettings.fromJson(
+          jsonDecode(raw) as Map<String, dynamic>,
+        );
+      } catch (_) {
+        // Corrupt file — fall back to defaults.
+      }
+    }
+    // Sync the key-cache flag to Rust at startup.
+    mxSetCacheKeyEnabled(enabled: _settings.cacheDecryptedKey);
+    notifyListeners();
+  }
+
+  Future<void> save(AgentSettings updated) async {
+    final prev = _settings;
+    _settings = updated;
+    notifyListeners();
+    if (updated.cacheDecryptedKey != prev.cacheDecryptedKey) {
+      mxSetCacheKeyEnabled(enabled: updated.cacheDecryptedKey);
+    }
+    // If the timeout changed, restart the timer with the new value so the
+    // change takes effect immediately rather than on the next sign.
+    if (updated.cacheTimeoutMinutes != prev.cacheTimeoutMinutes &&
+        _cacheTimer?.isActive == true) {
+      resetCacheTimer();
+    }
+    await _file?.writeAsString(jsonEncode(_settings.toJson()));
+  }
+
+  /// Call after every successful sign to (re)start the session timeout.
+  ///
+  /// If [AgentSettings.cacheTimeoutMinutes] is `null` no timer is started and
+  /// the caches live until the screen locks or the app is killed.
+  void resetCacheTimer() {
+    _cacheTimer?.cancel();
+    final minutes = _settings.cacheTimeoutMinutes;
+    if (minutes != null && minutes > 0) {
+      _cacheTimer = Timer(Duration(minutes: minutes), _onCacheExpired);
+    }
+  }
+
+  /// Clear caches immediately and cancel any pending timer.
+  ///
+  /// Call on screen-lock / app-background events.
+  void invalidateCache() {
+    _cacheTimer?.cancel();
+    _cacheTimer = null;
+    mxClearCaches();
+  }
+
+  void _onCacheExpired() {
+    _cacheTimer = null;
+    mxClearCaches();
+  }
+
+  @override
+  void dispose() {
+    _cacheTimer?.cancel();
+    super.dispose();
+  }
+}

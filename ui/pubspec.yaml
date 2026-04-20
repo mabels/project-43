@@ -39,6 +39,7 @@ dependencies:
   path_provider: ^2.1.5
   rust_lib_p43:
     path: rust_builder
+  flutter_local_notifications: ^21.0.0
 
 dev_dependencies:
   flutter_test:

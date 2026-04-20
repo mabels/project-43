@@ -8,7 +8,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'simple.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `default_store_dir`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `to_key_info`, `tokio_rt`
+// These functions are ignored because they are not marked as `pub`: `default_store_dir`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_signs`, `signing_key_cache`, `to_key_info`, `tokio_rt`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
 
 /// Must be called once from Dart before any key operation.
@@ -20,6 +21,46 @@ Future<void> setStoreDir({required String dir}) =>
 Future<List<KeyInfo>> listKeys() =>
     RustLib.instance.api.crateApiSimpleListKeys();
 
+/// Verify that `passphrase` correctly decrypts the secret key at `fingerprint`.
+///
+/// Returns `Ok(())` on success, or an error whose message can be shown to
+/// the user (e.g. "Failed to decrypt secret keys — wrong passphrase?").
+Future<void> verifyKeyPassphrase({
+  required String fingerprint,
+  required String passphrase,
+}) => RustLib.instance.api.crateApiSimpleVerifyKeyPassphrase(
+  fingerprint: fingerprint,
+  passphrase: passphrase,
+);
+
+/// Delete a key (public + secret files + index entry) from the local store.
+Future<void> deleteKey({required String fingerprint}) =>
+    RustLib.instance.api.crateApiSimpleDeleteKey(fingerprint: fingerprint);
+
+/// Returns the armored OpenPGP public key for the given fingerprint.
+Future<String> getPublicKeyArmored({required String fingerprint}) => RustLib
+    .instance
+    .api
+    .crateApiSimpleGetPublicKeyArmored(fingerprint: fingerprint);
+
+/// Returns the OpenSSH `authorized_keys` line for the given fingerprint.
+///
+/// Uses the authentication subkey (falling back to the signing subkey).
+Future<String> getPublicKeyOpenssh({required String fingerprint}) => RustLib
+    .instance
+    .api
+    .crateApiSimpleGetPublicKeyOpenssh(fingerprint: fingerprint);
+
+/// Resolve an SSH SHA-256 fingerprint (e.g. `SHA256:AbCd…`) to the key's
+/// human-readable UID, algorithm, and associated card ident(s).
+///
+/// Returns `None` if no matching key is found.  Used by sign-request tiles and
+/// the passphrase dialog to display key identity alongside the fingerprint.
+Future<SshKeyDetails?> getSshKeyDetails({required String fingerprint}) =>
+    RustLib.instance.api.crateApiSimpleGetSshKeyDetails(
+      fingerprint: fingerprint,
+    );
+
 /// Generates a new soft key, saves it, and returns the updated key list.
 /// `passphrase: None` skips encryption (not recommended).
 Future<List<KeyInfo>> generateKey({
@@ -30,6 +71,49 @@ Future<List<KeyInfo>> generateKey({
   uid: uid,
   algo: algo,
   passphrase: passphrase,
+);
+
+/// Return a summary of every connected OpenPGP card (no PIN required).
+///
+/// On macOS the system PC/SC daemon handles the transport; no additional
+/// setup is needed.  Returns an empty list when no cards are present.
+Future<List<ConnectedCardInfo>> listConnectedCards() =>
+    RustLib.instance.api.crateApiSimpleListConnectedCards();
+
+/// Import a key from a connected OpenPGP card into the local key store.
+///
+/// Reads the signing-slot public key, uses the card to self-certify the UID
+/// binding, saves `<fingerprint>.pub.asc` and `<fingerprint>.card.json`, and
+/// returns the updated key list.
+///
+/// - `card_ident`: AID ident string from [list_connected_cards].
+/// - `uid`: user ID string for the cert (e.g. `"Alice <alice@example.com>"`).
+///   Pass the empty string to fall back to the cardholder name on the card.
+/// - `pin`: card User Signing PIN (unlocks the SIG slot).
+Future<List<KeyInfo>> importCard({
+  required String cardIdent,
+  required String uid,
+  required String pin,
+}) => RustLib.instance.api.crateApiSimpleImportCard(
+  cardIdent: cardIdent,
+  uid: uid,
+  pin: pin,
+);
+
+/// Register a YubiKey (or other OpenPGP card) AID with a key entry.
+///
+/// Creates or updates `<fingerprint>.card.json` in the key store.  The same
+/// key can be associated with multiple card AIDs — useful when a user has two
+/// identical-content YubiKeys.
+///
+/// `card_ident` should be the AID string shown by `p43 key list --verbose`
+/// or returned by `tx.application_identifier()?.ident()` in the card layer.
+Future<void> registerCardIdent({
+  required String fingerprint,
+  required String cardIdent,
+}) => RustLib.instance.api.crateApiSimpleRegisterCardIdent(
+  fingerprint: fingerprint,
+  cardIdent: cardIdent,
 );
 
 /// Password login.  Persists session under the app support directory.
@@ -80,16 +164,103 @@ Future<void> mxSetAgentRoom({required String roomId}) =>
 ///
 /// Only `ssh.list_keys_request` and `ssh.sign_request` events are forwarded;
 /// all other room traffic is silently ignored.
+///
+/// On startup the last persisted `agent_since` token (if any) is loaded from
+/// `matrix-config.json` and passed to the sync so old messages are not replayed.
+/// The token is saved on **every** sync batch so it survives process kills and
+/// crashes — no history replay on reconnect regardless of how the app exited.
 Stream<AgentRequest> mxListenAgent({required String roomId}) =>
     RustLib.instance.api.crateApiSimpleMxListenAgent(roomId: roomId);
 
 /// Respond to an `ssh.list_keys_request` with the keys held in the local store.
-///
-/// The key list is currently empty — wired to the key store in a follow-up.
 Future<void> mxRespondListKeys({
   required String roomId,
   required String requestId,
 }) => RustLib.instance.api.crateApiSimpleMxRespondListKeys(
+  roomId: roomId,
+  requestId: requestId,
+);
+
+/// Returns `true` if cached credentials exist for the given SSH fingerprint,
+/// meaning `mx_respond_sign_cached` can proceed without a passphrase dialog.
+///
+/// Returns `true` when either:
+/// - A decrypted keypair is cached (key-cache enabled) → fast, microseconds.
+/// - A passphrase is cached (key-cache disabled) → slow, re-runs KDF (~9 s).
+///
+/// Dart uses this to decide whether to auto-approve or show the dialog.
+/// When biometric approval is added, this is also the gate for whether
+/// biometric confirmation suffices or the user must type their passphrase.
+Future<bool> hasCachedPassphrase({required String fingerprint}) => RustLib
+    .instance
+    .api
+    .crateApiSimpleHasCachedPassphrase(fingerprint: fingerprint);
+
+/// Enable or disable the in-memory signing-key cache.
+///
+/// When `enabled`:
+/// - `mx_respond_sign` extracts and caches the decrypted Ed25519 keypair bytes
+///   so subsequent `mx_respond_sign_cached` calls skip the KDF entirely.
+///
+/// When `disabled`:
+/// - The signing-key cache is cleared immediately.
+/// - `mx_respond_sign_cached` falls back to the passphrase cache + KDF.
+///
+/// Call at startup with the persisted setting value, and again whenever the
+/// user toggles the setting.
+Future<void> mxSetCacheKeyEnabled({required bool enabled}) =>
+    RustLib.instance.api.crateApiSimpleMxSetCacheKeyEnabled(enabled: enabled);
+
+/// Clear all in-memory credential caches (passphrase + signing key).
+///
+/// Does **not** affect the `KEY_CACHE_ENABLED` flag — the next successful
+/// `mx_respond_sign` will repopulate the caches if caching is still enabled.
+///
+/// Call when the configured session timeout expires or the screen locks.
+Future<void> mxClearCaches() =>
+    RustLib.instance.api.crateApiSimpleMxClearCaches();
+
+/// Approve an `ssh.sign_request` using an explicitly supplied passphrase.
+///
+/// On success:
+/// - The passphrase is stored in the in-memory cache (slow fallback path).
+/// - If "cache decrypted key" is enabled, the decrypted Ed25519 keypair bytes
+///   are also cached so subsequent auto-approve signs skip the KDF entirely.
+Future<void> mxRespondSign({
+  required String roomId,
+  required String requestId,
+  required String passphrase,
+}) => RustLib.instance.api.crateApiSimpleMxRespondSign(
+  roomId: roomId,
+  requestId: requestId,
+  passphrase: passphrase,
+);
+
+/// Approve an `ssh.sign_request` without a passphrase dialog.
+///
+/// Fast path: if a decrypted keypair is cached (key-cache enabled and at least
+/// one prior `mx_respond_sign` succeeded), signs in microseconds.
+///
+/// Slow fallback: if only the passphrase is cached, re-runs the KDF (~9 s on
+/// a Mac; same cost as a fresh `mx_respond_sign`).
+///
+/// Returns an error if neither cache has an entry for this key.
+///
+/// This is also the entry point for biometric-gated approval: once the
+/// platform biometric check succeeds, call this directly.
+Future<void> mxRespondSignCached({
+  required String roomId,
+  required String requestId,
+}) => RustLib.instance.api.crateApiSimpleMxRespondSignCached(
+  roomId: roomId,
+  requestId: requestId,
+);
+
+/// Reject an `ssh.sign_request`: send an error response and discard the request.
+Future<void> mxRejectSign({
+  required String roomId,
+  required String requestId,
+}) => RustLib.instance.api.crateApiSimpleMxRejectSign(
   roomId: roomId,
   requestId: requestId,
 );
@@ -129,6 +300,38 @@ sealed class AgentRequest with _$AgentRequest {
   }) = AgentRequest_Sign;
 }
 
+/// Summary of a connected OpenPGP card returned by [list_connected_cards].
+class ConnectedCardInfo {
+  final String ident;
+  final String cardholderName;
+  final String? sigFingerprint;
+  final String? authFingerprint;
+
+  const ConnectedCardInfo({
+    required this.ident,
+    required this.cardholderName,
+    this.sigFingerprint,
+    this.authFingerprint,
+  });
+
+  @override
+  int get hashCode =>
+      ident.hashCode ^
+      cardholderName.hashCode ^
+      sigFingerprint.hashCode ^
+      authFingerprint.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConnectedCardInfo &&
+          runtimeType == other.runtimeType &&
+          ident == other.ident &&
+          cardholderName == other.cardholderName &&
+          sigFingerprint == other.sigFingerprint &&
+          authFingerprint == other.authFingerprint;
+}
+
 /// A key entry returned to Dart — mirrors p43::key_store::store::KeyEntry.
 class KeyInfo {
   final String fingerprint;
@@ -136,16 +339,25 @@ class KeyInfo {
   final String algo;
   final bool hasSecret;
 
+  /// Application Identifier strings of YubiKeys registered against this key.
+  /// Empty for pure soft keys.
+  final List<String> cardIdents;
+
   const KeyInfo({
     required this.fingerprint,
     required this.uid,
     required this.algo,
     required this.hasSecret,
+    required this.cardIdents,
   });
 
   @override
   int get hashCode =>
-      fingerprint.hashCode ^ uid.hashCode ^ algo.hashCode ^ hasSecret.hashCode;
+      fingerprint.hashCode ^
+      uid.hashCode ^
+      algo.hashCode ^
+      hasSecret.hashCode ^
+      cardIdents.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -155,7 +367,8 @@ class KeyInfo {
           fingerprint == other.fingerprint &&
           uid == other.uid &&
           algo == other.algo &&
-          hasSecret == other.hasSecret;
+          hasSecret == other.hasSecret &&
+          cardIdents == other.cardIdents;
 }
 
 class MxDeviceInfo {
@@ -254,4 +467,35 @@ sealed class MxVerifyEvent with _$MxVerifyEvent {
   const factory MxVerifyEvent.done() = MxVerifyEvent_Done;
   const factory MxVerifyEvent.cancelled({required String reason}) =
       MxVerifyEvent_Cancelled;
+}
+
+/// Key identity returned by [`get_ssh_key_details`].
+class SshKeyDetails {
+  /// Human-readable UID, e.g. `"Alice <alice@example.com>"`.
+  final String name;
+
+  /// Algorithm string, e.g. `"ed25519"`, `"rsa4096"`.
+  final String algo;
+
+  /// AID ident strings of any OpenPGP cards (YubiKeys, etc.) associated
+  /// with this key entry.  Empty for pure soft keys.
+  final List<String> cardIdents;
+
+  const SshKeyDetails({
+    required this.name,
+    required this.algo,
+    required this.cardIdents,
+  });
+
+  @override
+  int get hashCode => name.hashCode ^ algo.hashCode ^ cardIdents.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SshKeyDetails &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          algo == other.algo &&
+          cardIdents == other.cardIdents;
 }

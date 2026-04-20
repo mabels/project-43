@@ -14,6 +14,7 @@ p43 = { path = "../../lib", default-features = false, features = [
     "matrix",
     "e2e-encryption",
     "ssh",
+    "pcsc",
 ] }
 base64 = "0.22"
 dirs   = "5"

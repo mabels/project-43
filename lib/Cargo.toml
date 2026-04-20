@@ -26,7 +26,7 @@ matrix = ["dep:matrix-sdk", "dep:tokio", "dep:futures-util"]
 pcsc = ["dep:openpgp-card-sequoia", "dep:card-backend-pcsc"]
 
 # SSH agent support.
-ssh = ["dep:ssh-key"]
+ssh = ["dep:ssh-key", "dep:signature", "dep:rsa", "dep:sha2"]
 
 # End-to-end encryption for the Matrix session.
 e2e-encryption = ["matrix-sdk/e2e-encryption", "matrix-sdk/sqlite"]
@@ -42,7 +42,7 @@ serde_json      = "1"
 typeshare       = "1"
 
 # pcsc feature
-openpgp-card-sequoia = { version = "0.2", optional = true }
+openpgp-card-sequoia = { version = "0.2", default-features = false, optional = true }
 card-backend-pcsc    = { version = "0.5", optional = true }
 
 # matrix feature
@@ -51,7 +51,12 @@ tokio        = { version = "1", features = ["sync", "rt", "time"], optional = tr
 futures-util = { version = "0.3", optional = true }
 
 # ssh feature
-ssh-key = { version = "0.6", features = ["alloc", "ed25519"], optional = true }
+ssh-key   = { version = "0.6", features = ["alloc", "ed25519", "rsa"], optional = true }
+signature = { version = "2", optional = true }
+# rsa crate used directly for RSA signing (ssh-key 0.6.7 has a bug that passes
+# [p, p] instead of [p, q] when constructing rsa::RsaPrivateKey).
+rsa       = { version = "0.9", features = ["sha2"], optional = true }
+sha2      = { version = "0.10", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -46,7 +46,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  SshKeyDetails dco_decode_box_autoadd_ssh_key_details(dynamic raw);
+
+  @protected
+  ConnectedCardInfo dco_decode_connected_card_info(dynamic raw);
+
+  @protected
   KeyInfo dco_decode_key_info(dynamic raw);
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<ConnectedCardInfo> dco_decode_list_connected_card_info(dynamic raw);
 
   @protected
   List<KeyInfo> dco_decode_list_key_info(dynamic raw);
@@ -82,6 +94,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  SshKeyDetails? dco_decode_opt_box_autoadd_ssh_key_details(dynamic raw);
+
+  @protected
+  SshKeyDetails dco_decode_ssh_key_details(dynamic raw);
+
+  @protected
   int dco_decode_u_8(dynamic raw);
 
   @protected
@@ -115,7 +133,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  SshKeyDetails sse_decode_box_autoadd_ssh_key_details(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConnectedCardInfo sse_decode_connected_card_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   KeyInfo sse_decode_key_info(SseDeserializer deserializer);
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<ConnectedCardInfo> sse_decode_list_connected_card_info(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<KeyInfo> sse_decode_list_key_info(SseDeserializer deserializer);
@@ -151,6 +187,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  SshKeyDetails? sse_decode_opt_box_autoadd_ssh_key_details(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SshKeyDetails sse_decode_ssh_key_details(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_8(SseDeserializer deserializer);
@@ -195,7 +239,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_ssh_key_details(
+    SshKeyDetails self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_connected_card_info(
+    ConnectedCardInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_key_info(KeyInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_connected_card_info(
+    List<ConnectedCardInfo> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_key_info(List<KeyInfo> self, SseSerializer serializer);
@@ -241,6 +306,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_ssh_key_details(
+    SshKeyDetails? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_ssh_key_details(SshKeyDetails self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_8(int self, SseSerializer serializer);

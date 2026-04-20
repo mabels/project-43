@@ -453,8 +453,6 @@ version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db26bf1f092fd5e05b5ab3be2f290915aeb6f3f20c4e9f86ce0f07f336c2412f"
 dependencies = [
- "bzip2",
- "flate2",
  "libc",
 ]
 
@@ -493,25 +491,6 @@ name = "bytesize"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bd91ee7b2422bcb158d90ef4d14f75ef67f340943fc4149891dcce8f8b972a3"
-
-[[package]]
-name = "bzip2"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49ecfb22d906f800d4fe833b6282cf4dc1c298f5057ca0b5445e5c209735ca47"
-dependencies = [
- "bzip2-sys",
-]
-
-[[package]]
-name = "bzip2-sys"
-version = "0.1.13+1.0.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "225bff33b2141874fe80d71e07d6eec4f85c5c216453dd96388240f96e1acc14"
-dependencies = [
- "cc",
- "pkg-config",
-]
 
 [[package]]
 name = "camellia"
@@ -3099,9 +3078,12 @@ dependencies = [
  "hex",
  "matrix-sdk",
  "openpgp-card-sequoia",
+ "rsa 0.9.10",
  "sequoia-openpgp",
  "serde",
  "serde_json",
+ "sha2",
+ "signature",
  "ssh-key",
  "tempfile",
  "tokio",
@@ -4200,7 +4182,6 @@ dependencies = [
  "block-padding",
  "blowfish",
  "buffered-reader",
- "bzip2",
  "camellia",
  "cast5",
  "cfb-mode",
@@ -4215,7 +4196,6 @@ dependencies = [
  "ecdsa",
  "ed25519",
  "ed25519-dalek",
- "flate2",
  "getrandom 0.2.17",
  "idea",
  "idna",

@@ -141,17 +141,38 @@ pub async fn list_devices() -> Result<Vec<BridgeDeviceInfo>> {
 
 /// Subscribe to messages in `room_id`, calling `on_message(sender, body)` for
 /// each one (catch-up history then live).  Blocks until the sync loop breaks.
-pub async fn listen_room<F>(room_id: &str, on_message: F) -> Result<()>
+///
+/// `since` is an optional Matrix `next_batch` token; when provided only messages
+/// that arrived after that token are delivered (no full-history replay).
+///
+/// `on_pointer` is called with the latest sync token on **every** sync batch.
+/// Pass `|_| {}` to ignore.  The agent bridge uses this to persist the token to
+/// disk on every cycle so reconnects never replay old messages.
+///
+/// Returns the last [`super::room::ListenPointer`] observed so the caller can
+/// use it as a final `since` on the next invocation.
+pub async fn listen_room<F, P>(
+    room_id: &str,
+    since: Option<&str>,
+    on_pointer: P,
+    on_message: F,
+) -> Result<super::room::ListenPointer>
 where
     F: Fn(String, String) + Send + Sync + 'static,
+    P: Fn(String) + Send + Sync + 'static,
 {
     let client = take_client().await.context("Not logged in to Matrix")?;
     let rid = RoomId::parse(room_id).with_context(|| format!("Invalid room ID: {room_id}"))?;
-    super::room::listen(&client, &rid, None, move |sender, body| {
-        on_message(sender.to_string(), body);
-    })
-    .await?;
-    Ok(())
+    super::room::listen(
+        &client,
+        &rid,
+        since,
+        move |sender, body| {
+            on_message(sender.to_string(), body);
+        },
+        on_pointer,
+    )
+    .await
 }
 
 // ── Background sync ───────────────────────────────────────────────────────────

@@ -6,12 +6,19 @@ import 'src/screens/agent_screen.dart';
 import 'src/screens/key_list_screen.dart';
 import 'src/screens/matrix_login_screen.dart';
 import 'src/screens/matrix_room_list_screen.dart';
+import 'src/screens/settings_screen.dart';
+import 'src/services/notification_service.dart';
+import 'src/services/settings_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
   final appDir = await getApplicationSupportDirectory();
   await setStoreDir(dir: appDir.path);
+  // Load persisted settings before the UI starts.
+  await SettingsService.instance.load();
+  // Initialise notification service (requests OS permission on first run).
+  await NotificationService.instance.init();
   // Attempt to restore a previously saved Matrix session.
   final loggedIn = await mxRestore();
   runApp(P43App(initiallyLoggedIn: loggedIn));
@@ -52,7 +59,7 @@ class _RootShell extends StatefulWidget {
   State<_RootShell> createState() => _RootShellState();
 }
 
-class _RootShellState extends State<_RootShell> {
+class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   int _tabIndex = 0;
   late bool _loggedIn;
 
@@ -60,6 +67,24 @@ class _RootShellState extends State<_RootShell> {
   void initState() {
     super.initState();
     _loggedIn = widget.initiallyLoggedIn;
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// Clear credential caches when the screen locks or the app goes to the
+  /// background.  On mobile [paused] fires on screen-lock; on macOS/desktop
+  /// [hidden] fires when the window is hidden (including screen-saver lock).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      SettingsService.instance.invalidateCache();
+    }
   }
 
   void _onLoggedIn() => setState(() => _loggedIn = true);
@@ -77,7 +102,12 @@ class _RootShellState extends State<_RootShell> {
         children: [
           const KeyListScreen(),
           chatScreen,
-          const AgentScreen(),
+          AgentScreen(
+            onSignRequest: () {
+              if (_tabIndex != 2) setState(() => _tabIndex = 2);
+            },
+          ),
+          const SettingsScreen(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -99,6 +129,11 @@ class _RootShellState extends State<_RootShell> {
             icon: Icon(Icons.terminal_outlined),
             selectedIcon: Icon(Icons.terminal),
             label: 'Agent',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.settings_outlined),
+            selectedIcon: Icon(Icons.settings),
+            label: 'Settings',
           ),
         ],
       ),

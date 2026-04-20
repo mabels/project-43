@@ -2,6 +2,7 @@
 members = [
     "lib",
     "cli",
+    "ui/rust",
 ]
 resolver = "2"
 

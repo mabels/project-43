@@ -1,18 +1,32 @@
 use anyhow::{bail, Context, Result};
 use openpgp::crypto::mpi;
-use openpgp::crypto::Signer as _;
-use openpgp::packet::key::SecretKeyMaterial;
 use openpgp::policy::StandardPolicy;
-use openpgp::types::{Curve, HashAlgorithm};
-use openpgp_card_sequoia::types::KeyType;
+use openpgp::types::Curve;
 use sequoia_openpgp as openpgp;
-use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData};
 use ssh_key::public::{Ed25519PublicKey, KeyData};
-use ssh_key::{Algorithm, HashAlg, Mpint, PrivateKey, Signature};
+use ssh_key::{HashAlg, Mpint};
 use std::path::Path;
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+// ── pcsc-only imports ─────────────────────────────────────────────────────────
+
+#[cfg(feature = "pcsc")]
 use crate::pkcs11::card::open_first_card;
+#[cfg(feature = "pcsc")]
 use crate::pkcs11::soft_ops::load_secret_cert;
+#[cfg(feature = "pcsc")]
+use openpgp::crypto::Signer as _;
+#[cfg(feature = "pcsc")]
+use openpgp::packet::key::SecretKeyMaterial;
+#[cfg(feature = "pcsc")]
+use openpgp::types::HashAlgorithm;
+#[cfg(feature = "pcsc")]
+use openpgp_card_sequoia::types::KeyType;
+#[cfg(feature = "pcsc")]
+use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData};
+#[cfg(feature = "pcsc")]
+use ssh_key::{Algorithm, PrivateKey, Signature};
 
 // ── Key slot selection ────────────────────────────────────────────────────────
 
@@ -39,13 +53,76 @@ pub enum SshKeySlot {
 /// exists, the signing subkey is used as a fallback.
 ///
 /// Only Ed25519 keys are currently supported.
+#[cfg(feature = "pcsc")]
 pub fn load_ssh_key(key_file: &Path, passphrase: &str, slot: SshKeySlot) -> Result<PrivateKey> {
     let cert = load_secret_cert(key_file, passphrase)?;
     cert_to_ssh_key(&cert, slot)
 }
 
+/// Extract SSH public key info for every key in the store.
+///
+/// Reads only the public parts — no passphrase is required.  Prefers the
+/// authentication subkey; falls back to the signing subkey when no auth
+/// subkey is present.  Keys with unsupported algorithms are silently skipped.
+pub fn list_ssh_public_keys(store_dir: &Path) -> Vec<crate::protocol::SshKeyInfo> {
+    use ssh_key::public::PublicKey;
+
+    let ks = match crate::key_store::store::KeyStore::open(store_dir) {
+        Ok(ks) => ks,
+        Err(_) => return vec![],
+    };
+    let entries = match ks.list() {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+    let policy = StandardPolicy::new();
+    let mut result = Vec::new();
+
+    for entry in entries {
+        let cert = match ks.find(&entry.fingerprint) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Prefer auth subkey; fall back to signing subkey.
+        let ka_opt = cert
+            .keys()
+            .with_policy(&policy, None)
+            .for_authentication()
+            .next()
+            .or_else(|| cert.keys().with_policy(&policy, None).for_signing().next());
+
+        let ka = match ka_opt {
+            Some(ka) => ka,
+            None => continue,
+        };
+
+        let key_data = match mpi_pubkey_to_ssh_keydata(ka.key().mpis()) {
+            Ok(kd) => kd,
+            Err(_) => continue,
+        };
+
+        let pub_key = PublicKey::new(key_data, &entry.uid);
+        let fingerprint = pub_key.fingerprint(HashAlg::Sha256).to_string();
+        let ssh_wire = match pub_key.to_bytes() {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let public_key_b64 = B64.encode(&ssh_wire);
+
+        result.push(crate::protocol::SshKeyInfo {
+            public_key: public_key_b64,
+            fingerprint,
+            comment: entry.uid,
+        });
+    }
+
+    result
+}
+
 // ── Internal conversion ───────────────────────────────────────────────────────
 
+#[cfg(feature = "pcsc")]
 fn cert_to_ssh_key(cert: &openpgp::Cert, slot: SshKeySlot) -> Result<PrivateKey> {
     let policy = StandardPolicy::new();
 
@@ -127,10 +204,13 @@ fn cert_to_ssh_key(cert: &openpgp::Cert, slot: SshKeySlot) -> Result<PrivateKey>
 
 /// SSH agent flags for RSA hash-algorithm selection
 /// (OpenSSH `SSH_AGENT_RSA_SHA2_*` constants).
+#[cfg(feature = "pcsc")]
 const RSA_SHA2_256_FLAG: u32 = 0x02;
+#[cfg(feature = "pcsc")]
 const RSA_SHA2_512_FLAG: u32 = 0x04;
 
 /// Info returned when reading the YubiKey authentication key at startup.
+#[cfg(feature = "pcsc")]
 pub struct CardKeyInfo {
     pub pubkey: KeyData,
     pub comment: String,
@@ -142,6 +222,7 @@ pub struct CardKeyInfo {
 ///
 /// No PIN is required — the card serves the public key in its base
 /// (transaction) state via a plain GET DATA command.
+#[cfg(feature = "pcsc")]
 pub fn load_card_auth_key_info() -> Result<CardKeyInfo> {
     let mut card = open_first_card()?;
     let mut tx = card.transaction()?;
@@ -172,6 +253,7 @@ pub fn load_card_auth_key_info() -> Result<CardKeyInfo> {
 /// For RSA keys the SSH `flags` field selects the hash algorithm:
 /// `0x04` → SHA-512 (`rsa-sha2-512`), otherwise SHA-256 (`rsa-sha2-256`).
 /// For Ed25519 keys `flags` is ignored — the card runs PureEdDSA internally.
+#[cfg(feature = "pcsc")]
 pub fn card_auth_sign_ssh(data: &[u8], pin: &str, flags: u32, is_rsa: bool) -> Result<Signature> {
     let mut card = open_first_card()?;
     let mut tx = card.transaction()?;
@@ -214,6 +296,7 @@ pub fn card_auth_sign_ssh(data: &[u8], pin: &str, flags: u32, is_rsa: bool) -> R
 
 // ── Hash helper ───────────────────────────────────────────────────────────────
 
+#[cfg(feature = "pcsc")]
 fn hash_data(algo: HashAlgorithm, data: &[u8]) -> Result<Vec<u8>> {
     use openpgp::crypto::hash::Digest;
     let mut ctx = algo
@@ -262,6 +345,7 @@ fn mpi_pubkey_to_ssh_keydata(mpis: &mpi::PublicKey) -> Result<KeyData> {
     }
 }
 
+#[cfg(feature = "pcsc")]
 fn ed25519_mpi_to_ssh_sig(sig: mpi::Signature) -> Result<Signature> {
     match sig {
         mpi::Signature::EdDSA { r, s } => {
@@ -281,6 +365,7 @@ fn ed25519_mpi_to_ssh_sig(sig: mpi::Signature) -> Result<Signature> {
     }
 }
 
+#[cfg(feature = "pcsc")]
 fn rsa_mpi_to_ssh_sig(sig: mpi::Signature, hash: HashAlg) -> Result<Signature> {
     match sig {
         mpi::Signature::RSA { s } => {

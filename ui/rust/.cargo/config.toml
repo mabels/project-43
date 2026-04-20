@@ -1,0 +1,6 @@
+# Force use of rustup's managed rustc instead of the Homebrew standalone binary.
+# Homebrew installs its own rustc (without iOS/Android targets) alongside rustup,
+# and Homebrew's bin dir is typically first in PATH. Setting [build].rustc here
+# bypasses PATH lookup entirely so cross-compilation targets always work.
+[build]
+rustc = "/Users/menabe/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"

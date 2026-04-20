@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use matrix_sdk::{
-    authentication::matrix::MatrixSession,
-    config::SyncSettings,
-    store::RoomLoadSettings,
-    Client,
+    authentication::matrix::MatrixSession, config::SyncSettings, store::RoomLoadSettings, Client,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 // ── Sync helpers ──────────────────────────────────────────────────────────────
 
@@ -33,6 +33,12 @@ pub struct SavedConfig {
     pub user_id: String,
     /// SDK session tokens (access token, device ID, etc.).
     pub session: MatrixSession,
+    /// The Matrix room ID used by `p43 ssh-agent` for proxying requests.
+    ///
+    /// Set by `p43 matrix join` unless `--skip-session` is passed.
+    /// `p43 ssh-agent` reads this so `--room` is not required on every invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_room: Option<String>,
 }
 
 // ── MatrixConfig ──────────────────────────────────────────────────────────────
@@ -63,8 +69,7 @@ impl MatrixConfig {
 
 /// Persist a [`SavedConfig`] to disk as pretty-printed JSON.
 pub fn save_config(config: &SavedConfig, path: &Path) -> Result<()> {
-    let json =
-        serde_json::to_string_pretty(config).context("Failed to serialise Matrix config")?;
+    let json = serde_json::to_string_pretty(config).context("Failed to serialise Matrix config")?;
     std::fs::write(path, json)
         .with_context(|| format!("Failed to write Matrix config to {}", path.display()))
 }
@@ -115,8 +120,11 @@ async fn build_client(homeserver_url: &str, cfg: &MatrixConfig) -> Result<Client
 /// `anyhow::Error::to_string()` returns only the *outermost* context string,
 /// so we must walk the full `chain()` to find the message that lives deeper.
 fn stale_crypto_store(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|cause| cause.to_string().contains("account in the store doesn't match"))
+    e.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("account in the store doesn't match")
+    })
 }
 
 /// Full password login.
@@ -172,6 +180,7 @@ async fn do_login(
         homeserver: homeserver_url.to_owned(),
         user_id: response.user_id.to_string(),
         session: MatrixSession::from(&response),
+        agent_room: None,
     };
 
     save_config(&saved, &cfg.config_path)
@@ -207,10 +216,12 @@ pub async fn logout(cfg: &MatrixConfig) -> Result<()> {
         .await
         .context("Homeserver rejected logout request")?;
 
-    std::fs::remove_file(&cfg.config_path)
-        .with_context(|| {
-            format!("Logged out but could not remove {}", cfg.config_path.display())
-        })?;
+    std::fs::remove_file(&cfg.config_path).with_context(|| {
+        format!(
+            "Logged out but could not remove {}",
+            cfg.config_path.display()
+        )
+    })?;
 
     // Remove the crypto store so a subsequent login starts with a clean
     // store matching the new device ID.

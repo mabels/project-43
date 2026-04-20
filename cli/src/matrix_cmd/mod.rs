@@ -1,19 +1,19 @@
 pub mod subcmd;
 
 use anyhow::{Context, Result};
-use p43::matrix::{
-    client as mx_client, delete_devices, join_room, list_devices, list_joined_rooms, listen,
-    logout, resolve_room_id, send_message, set_room_alias, verify_own_device, MatrixConfig,
-};
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::ruma::OwnedDeviceId;
+use p43::matrix::{
+    client as mx_client, delete_devices, join_room, list_devices, list_joined_rooms, listen,
+    logout, resolve_room_id, send_message, set_room_alias, verify_own_device, ListenPointer,
+    MatrixConfig,
+};
 use rpassword::prompt_password;
 use std::path::Path;
 use subcmd::{
-    DeleteDeviceArgs, DevicesArgs, JoinArgs, ListenArgs, LoginArgs, MatrixCmd, RoomsArgs,
-    SendArgs, SetAliasArgs,
+    DeleteDeviceArgs, DevicesArgs, JoinArgs, ListenArgs, LoginArgs, MatrixCmd, RoomsArgs, SendArgs,
+    SetAliasArgs,
 };
-
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
@@ -26,16 +26,16 @@ pub fn run(cmd: MatrixCmd, store_dir: &Path) -> Result<()> {
         .context("Failed to build Tokio runtime")?;
 
     match cmd {
-        MatrixCmd::Login(args)   => rt.block_on(do_login(args, &cfg)),
-        MatrixCmd::Logout        => rt.block_on(do_logout(&cfg)),
-        MatrixCmd::Devices(args)      => rt.block_on(do_devices(args, &cfg)),
+        MatrixCmd::Login(args) => rt.block_on(do_login(args, &cfg)),
+        MatrixCmd::Logout => rt.block_on(do_logout(&cfg)),
+        MatrixCmd::Devices(args) => rt.block_on(do_devices(args, &cfg)),
         MatrixCmd::DeleteDevice(args) => rt.block_on(do_delete_device(args, &cfg)),
-        MatrixCmd::Rooms(args)   => rt.block_on(do_rooms(args, &cfg)),
-        MatrixCmd::Join(args)    => rt.block_on(do_join(args, &cfg)),
+        MatrixCmd::Rooms(args) => rt.block_on(do_rooms(args, &cfg)),
+        MatrixCmd::Join(args) => rt.block_on(do_join(args, &cfg)),
         MatrixCmd::SetAlias(args) => rt.block_on(do_set_alias(args, &cfg)),
-        MatrixCmd::Send(args)     => rt.block_on(do_send(args, &cfg)),
-        MatrixCmd::Listen(args)  => rt.block_on(do_listen(args, &cfg)),
-        MatrixCmd::Verify        => rt.block_on(do_verify(&cfg)),
+        MatrixCmd::Send(args) => rt.block_on(do_send(args, &cfg)),
+        MatrixCmd::Listen(args) => rt.block_on(do_listen(args, &cfg)),
+        MatrixCmd::Verify => rt.block_on(do_verify(&cfg)),
     }
 }
 
@@ -52,7 +52,10 @@ async fn do_login(args: LoginArgs, cfg: &MatrixConfig) -> Result<()> {
 
 async fn do_logout(cfg: &MatrixConfig) -> Result<()> {
     logout(cfg).await?;
-    eprintln!("Logged out. Session removed from {}.", cfg.config_path.display());
+    eprintln!(
+        "Logged out. Session removed from {}.",
+        cfg.config_path.display()
+    );
     Ok(())
 }
 
@@ -67,13 +70,20 @@ async fn do_devices(_args: DevicesArgs, cfg: &MatrixConfig) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<25}  {:<30}  {:<15}  {}", "DEVICE ID", "DISPLAY NAME", "LAST SEEN IP", "");
+    println!(
+        "{:<25}  {:<30}  {:<15}  {}",
+        "DEVICE ID", "DISPLAY NAME", "LAST SEEN IP", ""
+    );
     println!("{}", "-".repeat(80));
 
     for d in devices {
         let name = d.display_name.as_deref().unwrap_or("-");
-        let ip   = d.last_seen_ip.as_deref().unwrap_or("-");
-        let flag = if d.is_current { " ← this session" } else { "" };
+        let ip = d.last_seen_ip.as_deref().unwrap_or("-");
+        let flag = if d.is_current {
+            " ← this session"
+        } else {
+            ""
+        };
         println!("{:<25}  {:<30}  {:<15}  {}", d.device_id, name, ip, flag);
     }
 
@@ -136,7 +146,7 @@ async fn do_rooms(_args: RoomsArgs, cfg: &MatrixConfig) -> Result<()> {
 
     for r in rooms {
         let alias = r.alias.as_deref().unwrap_or("-");
-        let name  = r.name.as_deref().unwrap_or("-");
+        let name = r.name.as_deref().unwrap_or("-");
         println!("{:<40}  {:<35}  {}", r.room_id, alias, name);
     }
     Ok(())
@@ -156,6 +166,18 @@ async fn do_join(args: JoinArgs, cfg: &MatrixConfig) -> Result<()> {
         eprintln!("  alias:     {alias}");
     }
     eprintln!("  encrypted: {}", result.is_encrypted);
+
+    if !args.skip_session {
+        // Persist this room as the default agent room so `p43 ssh-agent`
+        // can find it without a --room flag.
+        let mut saved = mx_client::load_config(&cfg.config_path)?
+            .context("Session config disappeared after join — this should not happen")?;
+        saved.agent_room = Some(result.room_id.to_string());
+        mx_client::save_config(&saved, &cfg.config_path)
+            .context("Joined room but failed to update matrix-config.json")?;
+        eprintln!("  agent_room saved to {}", cfg.config_path.display());
+    }
+
     Ok(())
 }
 
@@ -183,7 +205,16 @@ async fn do_send(args: SendArgs, cfg: &MatrixConfig) -> Result<()> {
 async fn do_listen(args: ListenArgs, cfg: &MatrixConfig) -> Result<()> {
     let client = require_client(cfg).await?;
     let room_id = resolve_room_id(&client, &args.room).await?;
-    listen(&client, &room_id, args.history).await?;
+
+    let pointer: ListenPointer =
+        listen(&client, &room_id, args.since.as_deref(), |sender, body| {
+            println!("[{sender}] {body}")
+        })
+        .await?;
+
+    // Print the pointer so the caller can capture it and pass it as
+    // --since on the next invocation to resume from this position.
+    eprintln!("pointer: {pointer}");
     Ok(())
 }
 
@@ -215,11 +246,9 @@ async fn do_verify(cfg: &MatrixConfig) -> Result<()> {
 
 /// Restore the saved session, or error with instructions to log in first.
 async fn require_client(cfg: &MatrixConfig) -> Result<matrix_sdk::Client> {
-    mx_client::restore(cfg)
-        .await?
-        .context(
-            "No saved session found. Run `p43 matrix login --homeserver URL --user USER` first.",
-        )
+    mx_client::restore(cfg).await?.context(
+        "No saved session found. Run `p43 matrix login --homeserver URL --user USER` first.",
+    )
 }
 
 /// Return the password from the CLI arg, or prompt interactively.

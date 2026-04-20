@@ -1,3 +1,5 @@
 [env]
+# macOS SDK paths — needed by sequoia-openpgp's crypto-nettle C build on macOS.
+# Not used for the Flutter bridge (crypto-rust, no C deps) or Android builds.
 SDKROOT = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
-CPATH = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include"
+CPATH   = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include"

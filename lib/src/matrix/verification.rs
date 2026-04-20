@@ -2,10 +2,8 @@ use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use matrix_sdk::{
     encryption::verification::{SasState, SasVerification, VerificationRequest},
-    ruma::{
-        events::key::{
-            verification::{request::ToDeviceKeyVerificationRequestEvent, VerificationMethod},
-        },
+    ruma::events::key::verification::{
+        request::ToDeviceKeyVerificationRequestEvent, VerificationMethod,
     },
     Client,
 };
@@ -14,6 +12,14 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
+
+// ── EmojiItem ─────────────────────────────────────────────────────────────────
+
+/// A single emoji from an SAS verification exchange.
+pub struct EmojiItem {
+    pub symbol: String,
+    pub description: String,
+}
 
 // ── verify_own_device ─────────────────────────────────────────────────────────
 
@@ -218,10 +224,120 @@ async fn wait_for_done(sas: &SasVerification) -> Result<()> {
         match state {
             SasState::Done { .. } => return Ok(()),
             SasState::Cancelled(info) => {
-                bail!("Verification cancelled after confirmation: {}", info.reason())
+                bail!(
+                    "Verification cancelled after confirmation: {}",
+                    info.reason()
+                )
             }
             _ => {}
         }
     }
     bail!("SAS state stream closed before Done.")
+}
+
+// ── verify_non_interactive ────────────────────────────────────────────────────
+
+/// Non-interactive SAS verification — same flow as [`verify_own_device`] but
+/// without stdin/stderr interaction.
+///
+/// - `on_emojis` is called once with the seven emojis when they are ready;
+///   the UI should display them and wait for the user's decision.
+/// - `confirm_rx` receives `true` (emojis match) or `false` (mismatch) from
+///   the UI once the user has decided.
+///
+/// A background sync loop must be running while this is awaited (see
+/// [`crate::matrix::global::start_background_sync`]).
+pub async fn verify_non_interactive<F>(
+    client: &Client,
+    on_emojis: F,
+    confirm_rx: tokio::sync::oneshot::Receiver<bool>,
+) -> Result<()>
+where
+    F: FnOnce(Vec<EmojiItem>) + Send + 'static,
+{
+    let own_user_id = client.user_id().context("Not logged in")?.to_owned();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<VerificationRequest>();
+    let tx_slot: Arc<Mutex<Option<tokio::sync::oneshot::Sender<VerificationRequest>>>> =
+        Arc::new(Mutex::new(Some(tx)));
+
+    client.add_event_handler({
+        let tx_slot = tx_slot.clone();
+        let own_user = own_user_id.clone();
+        move |ev: ToDeviceKeyVerificationRequestEvent, client: Client| {
+            let tx_slot = tx_slot.clone();
+            let own_user = own_user.clone();
+            async move {
+                if ev.sender != own_user {
+                    return;
+                }
+                let flow_id = ev.content.transaction_id.as_str().to_owned();
+                if let Some(request) = client
+                    .encryption()
+                    .get_verification_request(&ev.sender, &flow_id)
+                    .await
+                {
+                    let mut guard = tx_slot.lock().await;
+                    if let Some(sender) = guard.take() {
+                        let _ = sender.send(request);
+                    }
+                }
+            }
+        }
+    });
+
+    let request = tokio::time::timeout(tokio::time::Duration::from_secs(120), rx)
+        .await
+        .context("Timed out waiting for verification request (120 s)")?
+        .context("Internal channel closed")?;
+
+    request
+        .accept_with_methods(vec![VerificationMethod::SasV1])
+        .await
+        .context("Failed to accept verification request")?;
+
+    let sas = wait_for_sas(&request).await?;
+
+    let emojis = wait_for_emojis(&sas).await?;
+    on_emojis(emojis);
+
+    let confirmed = confirm_rx
+        .await
+        .context("Confirmation channel dropped before user responded")?;
+
+    if confirmed {
+        sas.confirm()
+            .await
+            .context("Failed to send SAS confirmation")?;
+    } else {
+        sas.mismatch()
+            .await
+            .context("Failed to send SAS mismatch")?;
+        bail!("Verification cancelled: emojis did not match.");
+    }
+
+    wait_for_done(&sas).await?;
+    Ok(())
+}
+
+async fn wait_for_emojis(sas: &SasVerification) -> Result<Vec<EmojiItem>> {
+    loop {
+        match sas.state() {
+            SasState::KeysExchanged { .. } => {
+                let emojis = sas
+                    .emoji()
+                    .context("Other device does not support emoji verification")?;
+                return Ok(emojis
+                    .iter()
+                    .map(|e| EmojiItem {
+                        symbol: e.symbol.to_owned(),
+                        description: e.description.to_owned(),
+                    })
+                    .collect());
+            }
+            SasState::Done { .. } => bail!("SAS completed before emoji confirmation"),
+            SasState::Cancelled(info) => bail!("SAS cancelled: {}", info.reason()),
+            _ => tokio::time::sleep(tokio::time::Duration::from_millis(200)).await,
+        }
+    }
 }

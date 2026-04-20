@@ -90,6 +90,13 @@ pub struct JoinArgs {
     /// Bare names are resolved as aliases on the saved homeserver domain.
     #[arg(long)]
     pub room: String,
+
+    /// Do not store the joined room as the default agent room in matrix-config.json.
+    ///
+    /// Useful when joining an auxiliary room that `p43 ssh-agent` should not
+    /// use by default.
+    #[arg(long)]
+    pub skip_session: bool,
 }
 
 // ── SetAlias ──────────────────────────────────────────────────────────────────
@@ -131,8 +138,13 @@ pub struct ListenArgs {
     #[arg(long)]
     pub room: String,
 
-    /// Print the last N messages before tailing live messages.
-    /// 0 (default) skips history entirely.
-    #[arg(long, default_value_t = 0)]
-    pub history: u64,
+    /// Resume from a previously saved read-until pointer (sync token).
+    ///
+    /// Omit to receive the full room history before going live.
+    /// When the listener exits it prints the current pointer to stderr
+    /// so you can capture it and pass it back next time:
+    ///
+    ///   p43 matrix listen --room #my-room --since <TOKEN>
+    #[arg(long)]
+    pub since: Option<String>,
 }

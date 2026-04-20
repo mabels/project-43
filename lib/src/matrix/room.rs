@@ -1,20 +1,23 @@
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
 use anyhow::{Context, Result};
 use matrix_sdk::{
     config::SyncSettings,
     deserialized_responses::TimelineEventKind,
-    room::Room,
+    room::{MessagesOptions, Room},
     ruma::{
         events::{
-            room::message::{
-                MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
-            },
+            room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
             AnyMessageLikeEvent, AnyTimelineEvent,
         },
-        OwnedRoomAliasId, OwnedRoomId, RoomAliasId, RoomId, RoomOrAliasId, UInt,
+        OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomAliasId, RoomId, RoomOrAliasId, UInt,
     },
-    Client,
+    Client, LoopCtrl,
 };
-use matrix_sdk::room::MessagesOptions;
+use tokio::sync::mpsc;
 
 // ── JoinResult ────────────────────────────────────────────────────────────────
 
@@ -44,8 +47,7 @@ pub struct JoinResult {
 pub async fn resolve_room_id(client: &Client, room: &str) -> Result<OwnedRoomId> {
     // Canonical room ID — return immediately.
     if room.starts_with('!') {
-        return RoomId::parse(room)
-            .with_context(|| format!("Invalid room ID: {room}"));
+        return RoomId::parse(room).with_context(|| format!("Invalid room ID: {room}"));
     }
 
     // Build a qualified alias string.
@@ -112,92 +114,171 @@ pub async fn send_message(client: &Client, room_id: &RoomId, text: &str) -> Resu
 
 // ── Listen ────────────────────────────────────────────────────────────────────
 
-/// Stream incoming plain-text messages from `room_id` to stdout, blocking
-/// until the process is interrupted (Ctrl-C / SIGINT).
+/// A sync token that marks how far through the room timeline the caller has
+/// read.  Persist this between runs and pass it back as `since` to receive
+/// only new messages.
+pub type ListenPointer = String;
+
+/// Subscribe to plain-text messages in `room_id`, blocking until interrupted.
 ///
-/// If `history > 0` the last `history` messages are printed oldest-first
-/// before the live tail begins.
+/// ## Catch-up behaviour
 ///
-/// Each message (history and live) is printed as:
-/// ```text
-/// [sender] body
-/// ```
-pub async fn listen(client: &Client, room_id: &RoomId, history: u64) -> Result<()> {
-    let room = get_room(client, room_id)?;
+/// - `since = None` — paginate the full room history from the beginning,
+///   emit every plain-text message oldest-first via `on_message`, then go
+///   live.
+/// - `since = Some(token)` — perform a single forward sync from `token`,
+///   emit any messages that arrived since that token, then go live.
+///
+/// ## Return value
+///
+/// Returns the last [`ListenPointer`] observed before the sync loop exits
+/// (Ctrl-C or error).  Persist this and pass it back as `since` on the
+/// next invocation so only new messages are delivered.
+///
+/// ## Callback
+///
+/// `on_message(sender: OwnedUserId, body: String)` is called for every
+/// qualifying message — catch-up and live — oldest first.  The closure is
+/// required to be `Send + Sync + 'static` because it is shared with the
+/// event-handler thread.
+pub async fn listen<F>(
+    client: &Client,
+    room_id: &RoomId,
+    since: Option<&str>,
+    on_message: F,
+) -> Result<ListenPointer>
+where
+    F: Fn(OwnedUserId, String) + Send + Sync + 'static,
+{
+    let on_message = Arc::new(on_message);
 
-    // ── History ───────────────────────────────────────────────────────────
-    if history > 0 {
-        let limit = UInt::try_from(history).unwrap_or(UInt::MAX);
-        // MessagesOptions is #[non_exhaustive] so we can't use struct literal syntax.
-        let mut opts = MessagesOptions::backward();
-        opts.limit = limit;
+    // ── Catch-up ──────────────────────────────────────────────────────────
+    let initial_token: String = match since {
+        // ── Full history ─────────────────────────────────────────────────
+        // Anchor current position with a quick sync, then backward-paginate
+        // the entire timeline.  The sync token from this initial sync is
+        // used to start the live loop so no events fall through the gap.
+        None => {
+            let sync_resp = client
+                .sync_once(SyncSettings::default().timeout(Duration::ZERO))
+                .await
+                .context("Initial sync before history pagination failed")?;
 
-        let messages = room
-            .messages(opts)
-            .await
-            .context("Failed to fetch message history")?;
+            let room = get_room(client, room_id)?;
+            let mut all: Vec<(OwnedUserId, String)> = Vec::new();
+            let mut from: Option<String> = None;
 
-        // `backward()` returns newest-first; reverse for chronological display.
-        let mut history_events: Vec<_> = messages
-            .chunk
-            .into_iter()
-            .filter_map(|ev| {
-                // Deserialise the raw event.
-                // PlainText holds Raw<AnySyncTimelineEvent> (no JsonCastable to
-                // AnyTimelineEvent), so go via the raw JSON string instead.
-                let parsed: Option<AnyTimelineEvent> = match ev.kind {
-                    TimelineEventKind::PlainText { event } => {
-                        serde_json::from_str(event.json().get()).ok()
-                    }
-                    TimelineEventKind::Decrypted(dec) => dec.event.deserialize().ok(),
-                    _ => None,
-                };
-                // Only keep plain-text room messages.
-                if let Some(AnyTimelineEvent::MessageLike(AnyMessageLikeEvent::RoomMessage(
-                    msg,
-                ))) = parsed
-                {
-                    if let Some(orig) = msg.as_original() {
-                        if let MessageType::Text(ref text) = orig.content.msgtype {
-                            return Some((msg.sender().to_owned(), text.body.clone()));
-                        }
+            // Paginate backward until the server signals we've reached the
+            // beginning (end == None).  The server caps `limit` per page;
+            // we use 100 and loop.
+            loop {
+                // MessagesOptions is #[non_exhaustive].
+                let mut opts = MessagesOptions::backward();
+                opts.limit = UInt::try_from(100u64).unwrap_or(UInt::MAX);
+                opts.from = from.clone();
+
+                let page = room
+                    .messages(opts)
+                    .await
+                    .context("Failed to fetch message history page")?;
+
+                for ev in page.chunk {
+                    if let Some(pair) = extract_text_event(&ev) {
+                        all.push(pair);
                     }
                 }
-                None
-            })
-            .collect();
 
-        history_events.reverse(); // oldest first
-
-        if !history_events.is_empty() {
-            eprintln!("── history ─────────────────────────────────────────────");
-            for (sender, body) in history_events {
-                println!("[{sender}] {body}");
+                match page.end {
+                    None => break, // beginning of room reached
+                    Some(t) => from = Some(t),
+                }
             }
-            eprintln!("── live ────────────────────────────────────────────────");
+
+            // `backward()` yields newest-first; reverse to oldest-first.
+            all.reverse();
+            for (sender, body) in all {
+                on_message(sender, body);
+            }
+
+            sync_resp.next_batch
         }
-    }
+
+        // ── Since a previous pointer ──────────────────────────────────────
+        // Register a temporary event handler to collect catch-up events,
+        // then do a single zero-timeout sync from `token`.  This fires the
+        // handler for every event that arrived after `token` was issued.
+        Some(token) => {
+            let (tx, mut rx) = mpsc::channel::<(OwnedUserId, String)>(256);
+            let tx = Arc::new(tx);
+
+            let handle = client.add_room_event_handler(room_id, {
+                let tx = Arc::clone(&tx);
+                move |ev: OriginalSyncRoomMessageEvent, _room: Room| {
+                    let tx = Arc::clone(&tx);
+                    async move {
+                        let MessageType::Text(ref text) = ev.content.msgtype else {
+                            return;
+                        };
+                        let _ = tx.send((ev.sender.clone(), text.body.clone())).await;
+                    }
+                }
+            });
+
+            let resp = client
+                .sync_once(SyncSettings::default().token(token).timeout(Duration::ZERO))
+                .await
+                .context("Catch-up sync failed")?;
+
+            // Remove the temporary handler before draining the channel so
+            // the live handler registered below does not overlap with it.
+            client.remove_event_handler(handle);
+            drop(tx); // close sender; rx.recv() will return None once drained
+
+            while let Some((sender, body)) = rx.recv().await {
+                on_message(sender, body);
+            }
+
+            resp.next_batch
+        }
+    };
 
     // ── Live tail ─────────────────────────────────────────────────────────
-    // `add_room_event_handler` already filters by room_id for us.
-    client.add_room_event_handler(
-        room_id,
-        |event: OriginalSyncRoomMessageEvent, _room: Room| async move {
-            let MessageType::Text(text_content) = &event.content.msgtype else {
-                return;
-            };
-            println!("[{}] {}", event.sender, text_content.body);
-        },
-    );
+    client.add_room_event_handler(room_id, {
+        let cb = Arc::clone(&on_message);
+        move |ev: OriginalSyncRoomMessageEvent, _room: Room| {
+            let cb = Arc::clone(&cb);
+            async move {
+                let MessageType::Text(ref text) = ev.content.msgtype else {
+                    return;
+                };
+                cb(ev.sender.clone(), text.body.clone());
+            }
+        }
+    });
 
-    eprintln!("Listening for messages in {room_id} — press Ctrl-C to stop.");
+    // Track the latest sync token so we can return it when the loop exits.
+    let last_token = Arc::new(Mutex::new(initial_token.clone()));
 
     client
-        .sync(SyncSettings::default())
+        .sync_with_callback(SyncSettings::default().token(initial_token), {
+            let last_token = Arc::clone(&last_token);
+            move |resp| {
+                let last_token = Arc::clone(&last_token);
+                async move {
+                    *last_token.lock().unwrap() = resp.next_batch;
+                    LoopCtrl::Continue
+                }
+            }
+        })
         .await
         .context("Sync loop terminated unexpectedly")?;
 
-    Ok(())
+    let token = Arc::try_unwrap(last_token)
+        .map_err(|_| anyhow::anyhow!("last_token Arc still shared after sync exit"))?
+        .into_inner()
+        .unwrap();
+
+    Ok(token)
 }
 
 // ── Join ──────────────────────────────────────────────────────────────────────
@@ -308,4 +389,33 @@ fn get_room(client: &Client, room_id: &RoomId) -> Result<Room> {
     client
         .get_room(room_id)
         .with_context(|| format!("Room {room_id} not found — are you a member?"))
+}
+
+/// Try to extract a `(sender, body)` pair from a [`TimelineEvent`].
+///
+/// Returns `Some` only for plain-text `m.room.message` events; silently
+/// drops state events, redactions, reactions, and encrypted messages that
+/// cannot be decrypted.
+///
+/// [`TimelineEvent`]: matrix_sdk::deserialized_responses::TimelineEvent
+fn extract_text_event(
+    ev: &matrix_sdk::deserialized_responses::TimelineEvent,
+) -> Option<(OwnedUserId, String)> {
+    // PlainText events carry a Raw<AnySyncTimelineEvent>; the outer
+    // TimelineEvent wrapper does not implement AnyTimelineEvent directly,
+    // so we round-trip via the raw JSON string.
+    let parsed: AnyTimelineEvent = match &ev.kind {
+        TimelineEventKind::PlainText { event } => serde_json::from_str(event.json().get()).ok()?,
+        TimelineEventKind::Decrypted(dec) => dec.event.deserialize().ok()?,
+        _ => return None,
+    };
+
+    if let AnyTimelineEvent::MessageLike(AnyMessageLikeEvent::RoomMessage(msg)) = parsed {
+        if let Some(orig) = msg.as_original() {
+            if let MessageType::Text(ref text) = orig.content.msgtype {
+                return Some((msg.sender().to_owned(), text.body.clone()));
+            }
+        }
+    }
+    None
 }

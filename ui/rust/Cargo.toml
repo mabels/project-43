@@ -1,0 +1,27 @@
+[package]
+name = "rust_lib_p43"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.12.0"
+p43 = { path = "../../lib", default-features = false, features = [
+    "crypto-rust",
+    "crypto-experimental",
+    "matrix",
+    "e2e-encryption",
+    "ssh",
+] }
+base64 = "0.22"
+dirs   = "5"
+anyhow = "1"
+# tokio for spawning tasks from StreamSink bridge functions
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+# Force bundled SQLite so Android doesn't need a system libsqlite3
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

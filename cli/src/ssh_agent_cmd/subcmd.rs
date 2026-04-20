@@ -41,23 +41,35 @@ pub struct SshAgentArgs {
     #[arg(long)]
     pub socket: Option<String>,
 
+    /// Sign locally using --card or --key-file instead of proxying through Matrix.
+    ///
+    /// Without this flag the agent forwards every SSH request as a p43 protocol
+    /// message into a Matrix room and waits for a response from the phone.
+    #[arg(long)]
+    pub local: bool,
+
+    /// Matrix room to proxy requests through (Matrix mode only).
+    ///
+    /// May be a room ID (!abc:matrix.org), alias (#room:matrix.org), or bare
+    /// name.  If omitted and exactly one room is joined, that room is used.
+    #[arg(long)]
+    pub room: Option<String>,
+
     /// Which subkey to expose: `auth` (default, falls back to `sign`) or `sign`.
     ///
-    /// Only used for software-key mode (--key-file).
+    /// Only used in local software-key mode (--local --key-file).
     #[arg(long, default_value_t = KeySlot::Auth)]
     pub key_slot: KeySlot,
 
     /// Use a YubiKey (OpenPGP card) instead of a software key file.
     ///
-    /// Requires --pin / YK_PIN.  The signing slot (PSO:CDS) is used.
+    /// Only used in local mode (--local).  Requires --pin / YK_PIN.
     #[arg(long)]
     pub card: bool,
 
     /// Maximum number of card operations allowed to run in parallel.
     ///
-    /// A YubiKey can only process one PC/SC command at a time, so the default
-    /// of 1 serialises all requests through an in-memory queue.  Raise this
-    /// only if you have multiple cards that can be addressed simultaneously.
+    /// Only used in local YubiKey mode (--local --card).
     #[arg(long, default_value_t = 1)]
     pub concurrency: usize,
 }

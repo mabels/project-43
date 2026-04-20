@@ -1,0 +1,16 @@
+[package]
+name = "p43-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "flutter_rust_bridge FFI layer — exposes p43 lib to Flutter"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "2"
+p43 = { path = "../lib" }
+dirs = "5"
+
+[build-dependencies]
+flutter_rust_bridge_codegen_tools = "2"

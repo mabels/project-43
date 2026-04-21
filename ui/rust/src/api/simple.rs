@@ -31,6 +31,54 @@ pub fn init_app() {
     let _ = tokio_rt();
 }
 
+// ── Telemetry ─────────────────────────────────────────────────────────────────
+
+/// Initialise tracing.
+///
+/// Pass an empty string for **local mode** (fmt output, zero network overhead).
+/// Pass `"https://otel.adviser.com"` to export spans to the OTel Collector.
+///
+/// If the endpoint is unreachable the SDK retries silently and drops spans
+/// after the retry budget — the app is never blocked.
+///
+/// Compiled as a no-op when the `p43` library is built without
+/// `--features telemetry`.
+#[frb]
+pub fn init_telemetry(endpoint: String) -> anyhow::Result<()> {
+    // Enter our static runtime so the OTel batch exporter can spawn its
+    // background task inside it.
+    let _guard = tokio_rt().enter();
+    p43::telemetry::init(&endpoint)
+}
+
+/// Shut down the OTel provider and flush all pending spans.
+/// Call before the app exits.
+#[frb]
+pub fn shutdown_telemetry() {
+    p43::telemetry::shutdown();
+}
+
+/// Inject a W3C `traceparent` header for the current thread.
+///
+/// Dart should call this **immediately before** any FRB function that creates
+/// a tracing span, then call [clearActiveTraceparent] once the call returns.
+/// This stitches the Flutter span tree and the Rust span tree into a single
+/// distributed trace in Jaeger.
+///
+/// The value must follow the W3C Trace Context format:
+/// `00-<trace-id-32hex>-<parent-id-16hex>-<flags-2hex>`
+#[frb]
+pub fn set_active_traceparent(traceparent: String) {
+    p43::telemetry::set_active_traceparent(traceparent);
+}
+
+/// Clear the stored traceparent for the current thread.
+/// Call after every FRB call that was preceded by [setActiveTraceparent].
+#[frb]
+pub fn clear_active_traceparent() {
+    p43::telemetry::clear_active_traceparent();
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// One subkey inside an OpenPGP cert — role + algorithm + SSH key for display.
@@ -184,6 +232,7 @@ fn to_key_info(e: p43::key_store::store::KeyEntry, store_dir: &std::path::Path) 
 
 /// Returns all keys in the local store (~/.config/project-43/keys).
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument)]
 pub fn list_keys() -> anyhow::Result<Vec<KeyInfo>> {
     let store_dir = default_store_dir();
     Ok(open_store()?
@@ -264,6 +313,7 @@ pub fn get_ssh_key_details(fingerprint: String) -> Option<SshKeyDetails> {
 /// Generates a new soft key, saves it, and returns the updated key list.
 /// `passphrase: None` skips encryption (not recommended).
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(passphrase), fields(uid, algo)))]
 pub fn generate_key(
     uid: String,
     algo: String,
@@ -461,6 +511,7 @@ fn mx_verify_slot() -> &'static tokio::sync::Mutex<Option<tokio::sync::oneshot::
 
 /// Password login.  Persists session under the app support directory.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(password), fields(homeserver, username)))]
 pub async fn mx_login(
     homeserver: String,
     username: String,
@@ -472,12 +523,14 @@ pub async fn mx_login(
 /// Restore a previously saved session.  Returns `true` if one was found.
 /// Call at startup before showing the chat UI.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument)]
 pub async fn mx_restore() -> anyhow::Result<bool> {
     p43::matrix::global::restore(&mx_store_dir()?).await
 }
 
 /// Logout and delete the local session.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument)]
 pub async fn mx_logout() -> anyhow::Result<()> {
     p43::matrix::global::logout(&mx_store_dir()?).await
 }
@@ -650,6 +703,7 @@ pub fn mx_listen_agent(room_id: String, sink: StreamSink<AgentRequest>) {
 
 /// Respond to an `ssh.list_keys_request` with the keys held in the local store.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument(fields(request_id, room_id)))]
 pub async fn mx_respond_list_keys(room_id: String, request_id: String) -> anyhow::Result<()> {
     let store_dir = default_store_dir();
     let keys = p43::ssh_agent::list_ssh_public_keys(&store_dir);
@@ -735,6 +789,7 @@ pub fn mx_clear_caches() {
 /// - If "cache decrypted key" is enabled, the decrypted Ed25519 keypair bytes
 ///   are also cached so subsequent auto-approve signs skip the KDF entirely.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(passphrase), fields(request_id, room_id)))]
 pub async fn mx_respond_sign(
     room_id: String,
     request_id: String,
@@ -792,6 +847,7 @@ pub async fn mx_respond_sign(
 /// On success the PIN is cached in memory keyed by card AID ident so that
 /// `mx_respond_sign_card_cached` can skip the PIN dialog for subsequent requests.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(pin), fields(request_id, room_id)))]
 pub async fn mx_respond_sign_card(
     room_id: String,
     request_id: String,
@@ -850,6 +906,7 @@ pub fn has_cached_card_pin(card_ident: String) -> bool {
 /// Returns an error if no PIN is cached for any card associated with this key.
 /// This is the auto-approve path after the first successful `mx_respond_sign_card`.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument(fields(request_id, room_id)))]
 pub async fn mx_respond_sign_card_cached(
     room_id: String,
     request_id: String,
@@ -919,6 +976,7 @@ pub fn get_card_pin_retries(card_ident: String) -> anyhow::Result<u8> {
 /// This is also the entry point for biometric-gated approval: once the
 /// platform biometric check succeeds, call this directly.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument(fields(request_id, room_id)))]
 pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyhow::Result<()> {
     let pending = pending_signs()
         .lock()
@@ -973,6 +1031,7 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
 
 /// Reject an `ssh.sign_request`: send an error response and discard the request.
 #[frb]
+#[cfg_attr(feature = "telemetry", tracing::instrument(fields(request_id, room_id)))]
 pub async fn mx_reject_sign(room_id: String, request_id: String) -> anyhow::Result<()> {
     // Discard from pending map.
     let _ = pending_signs()

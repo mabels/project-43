@@ -13,3 +13,6 @@ pub mod pkcs11;
 
 #[cfg(feature = "ssh")]
 pub mod ssh_agent;
+
+
+pub mod telemetry;

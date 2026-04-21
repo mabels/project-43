@@ -65,6 +65,7 @@ pub fn has_cached_rsa_key(ssh_fp: &str) -> bool {
 ///
 /// Returns the base64-encoded SSH wire signature (same format as
 /// `sign_with_soft_key` / `sign_with_soft_key_and_extract`).
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(data), fields(ssh_fp)))]
 pub fn sign_rsa_cached(ssh_fp: &str, data: &[u8]) -> Result<String> {
     #[cfg(feature = "ssh")]
     {
@@ -155,6 +156,7 @@ pub fn load_ssh_key(key_file: &Path, passphrase: &str, slot: SshKeySlot) -> Resu
 /// Reads only the public parts — no passphrase is required.  Prefers the
 /// authentication subkey; falls back to the signing subkey when no auth
 /// subkey is present.  Keys with unsupported algorithms are silently skipped.
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(store_dir)))]
 pub fn list_ssh_public_keys(store_dir: &Path) -> Vec<crate::protocol::SshKeyInfo> {
     use ssh_key::public::PublicKey;
 
@@ -302,6 +304,7 @@ pub struct SshKeyMeta {
 ///
 /// Returns `None` if no matching key is found.  Used by the UI to display key
 /// information in sign-request tiles and the passphrase dialog.
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(store_dir), fields(ssh_fingerprint)))]
 pub fn get_ssh_key_meta(store_dir: &Path, ssh_fingerprint: &str) -> Option<SshKeyMeta> {
     use ssh_key::public::PublicKey;
 
@@ -396,6 +399,7 @@ fn openpgp_fp_for_ssh_fp(store_dir: &Path, ssh_fingerprint: &str) -> Result<Stri
 ///
 /// Returns the SSH wire-encoded signature as base64.
 #[cfg(feature = "pcsc")]
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(pin, data), fields(ssh_fingerprint)))]
 pub fn sign_with_card_key(
     store_dir: &Path,
     ssh_fingerprint: &str,
@@ -541,6 +545,7 @@ pub fn sign_with_card_key(
 /// the auth subkey (falling back to the sign subkey).  Returns the SSH
 /// wire-encoded signature as a base64 string (the format expected by
 /// `SshSignResponse.signature`).
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(passphrase, data), fields(ssh_fingerprint)))]
 pub fn sign_with_soft_key(
     store_dir: &Path,
     ssh_fingerprint: &str,
@@ -644,6 +649,7 @@ fn sign_cert_for_ssh(cert: &openpgp::Cert, data: &[u8]) -> Result<String> {
 ///
 /// Pass the returned bytes to [`sign_with_cached_keypair`] for zero-KDF
 /// subsequent signs.
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(passphrase, data), fields(ssh_fingerprint)))]
 pub fn sign_with_soft_key_and_extract(
     store_dir: &Path,
     ssh_fingerprint: &str,
@@ -713,6 +719,7 @@ pub fn sign_with_soft_key_and_extract(
 /// Skips the expensive passphrase KDF entirely — typically completes in
 /// microseconds.  Call this on the hot path after caching the bytes from a
 /// first successful [`sign_with_soft_key_and_extract`].
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(keypair_bytes, data)))]
 pub fn sign_with_cached_keypair(keypair_bytes: &[u8; 64], data: &[u8]) -> Result<String> {
     let kp = Ed25519Keypair::from_bytes(keypair_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to reconstruct Ed25519 keypair: {e}"))?;
@@ -983,6 +990,7 @@ pub fn load_card_auth_key_info() -> Result<CardKeyInfo> {
 /// `0x04` → SHA-512 (`rsa-sha2-512`), otherwise SHA-256 (`rsa-sha2-256`).
 /// For Ed25519 keys `flags` is ignored — the card runs PureEdDSA internally.
 #[cfg(feature = "pcsc")]
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip(data, pin), fields(is_rsa)))]
 pub fn card_auth_sign_ssh(data: &[u8], pin: &str, flags: u32, is_rsa: bool) -> Result<Signature> {
     let mut card = open_first_card()?;
     let mut tx = card.transaction()?;

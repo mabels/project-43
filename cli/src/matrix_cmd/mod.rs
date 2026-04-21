@@ -17,13 +17,8 @@ use subcmd::{
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
-pub fn run(cmd: MatrixCmd, store_dir: &Path) -> Result<()> {
+pub fn run(cmd: MatrixCmd, store_dir: &Path, rt: &tokio::runtime::Runtime) -> Result<()> {
     let cfg = MatrixConfig::from_store_dir(store_dir);
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build Tokio runtime")?;
 
     match cmd {
         MatrixCmd::Login(args) => rt.block_on(do_login(args, &cfg)),

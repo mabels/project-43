@@ -34,6 +34,14 @@ struct Cli {
     #[arg(long, global = true)]
     passphrase: Option<String>,
 
+    /// OpenTelemetry collector endpoint [env: P43_OTEL_ENDPOINT]
+    ///
+    /// Empty string (default) enables local fmt mode — spans go to stderr
+    /// via RUST_LOG, zero network traffic.  Set to a URL to export spans
+    /// via OTLP HTTP (e.g. https://otel.adviser.com).
+    #[arg(long, global = true, env = "P43_OTEL_ENDPOINT", default_value = "")]
+    otel_endpoint: String,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -71,20 +79,40 @@ fn main() -> Result<()> {
         .key_file
         .or_else(|| std::env::var("YK_KEY_FILE").ok().map(PathBuf::from));
 
+    // Sync commands (key, pgp) don't need a Tokio runtime.
+    // Build one only for async subcommands, and use it for telemetry init
+    // so the OTLP batch exporter has the runtime context it requires.
     match cli.command {
         Command::Key(cmd) => {
+            // Sync — local fmt tracing only (no runtime needed for OTLP).
+            p43::telemetry::init("")?;
             let ks = KeyStore::open(&store_dir)?;
             key_mgmt::run(cmd, &ks)
         }
-        Command::Pgp(cmd) => pgp::run(cmd, soft_key, cli.passphrase, cli.pin),
+        Command::Pgp(cmd) => {
+            p43::telemetry::init("")?;
+            pgp::run(cmd, soft_key, cli.passphrase, cli.pin)
+        }
         Command::SshAgent(args) => {
             let passphrase = cli
                 .passphrase
                 .or_else(|| std::env::var("YK_PASSPHRASE").ok())
                 .unwrap_or_default();
             let pin = cli.pin.or_else(|| std::env::var("YK_PIN").ok());
-            ssh_agent_cmd::run(args, &store_dir, soft_key, passphrase, pin)
+            // Build the runtime first so telemetry::init (OTLP batch exporter)
+            // has a live Tokio context when a non-empty endpoint is provided.
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async { p43::telemetry::init(&cli.otel_endpoint) })?;
+            ssh_agent_cmd::run(args, &store_dir, soft_key, passphrase, pin, &rt)
         }
-        Command::Matrix(cmd) => matrix_cmd::run(cmd, &store_dir),
+        Command::Matrix(cmd) => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async { p43::telemetry::init(&cli.otel_endpoint) })?;
+            matrix_cmd::run(cmd, &store_dir, &rt)
+        }
     }
 }

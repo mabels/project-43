@@ -66,6 +66,7 @@ impl KeyStore {
         })
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self, cert, _passphrase), fields(fp)))]
     pub fn save(&self, cert: &Cert, _passphrase: Option<&str>) -> Result<()> {
         let fp = cert.fingerprint().to_hex();
 
@@ -91,6 +92,7 @@ impl KeyStore {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
     pub fn list(&self) -> Result<Vec<KeyEntry>> {
         let index_path = self.index_path();
         if !index_path.exists() {
@@ -113,12 +115,14 @@ impl KeyStore {
         Ok(entries)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
     pub fn find(&self, query: &str) -> Result<Cert> {
         let entry = self.find_entry(query)?;
         Cert::from_file(self.pub_path(&entry.fingerprint))
             .with_context(|| format!("Cannot load public key for '{}'", query))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self, passphrase)))]
     pub fn find_with_secret(&self, query: &str, passphrase: &str) -> Result<Cert> {
         let entry = self.find_entry(query)?;
         anyhow::ensure!(entry.has_secret, "No secret key found for '{}'", query);
@@ -135,6 +139,7 @@ impl KeyStore {
         Ok(cert)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
     pub fn delete(&self, query: &str) -> Result<String> {
         let entry = self.find_entry(query)?;
         let fp = &entry.fingerprint;
@@ -164,6 +169,7 @@ impl KeyStore {
     ///
     /// `card_ident` should be the string returned by
     /// `tx.application_identifier()?.ident()` from `openpgp-card-sequoia`.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
     pub fn register_card(&self, fingerprint: &str, card_ident: &str) -> Result<()> {
         // Ensure the key is known before creating any file.
         let fp = &self.find_entry(fingerprint)?.fingerprint;
@@ -219,6 +225,7 @@ impl KeyStore {
     ///
     /// Disabled keys are not advertised by `ssh-add -l` and cannot be used for
     /// signing until re-enabled.  The key files are not modified.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
     pub fn set_key_enabled(&self, query: &str, enabled: bool) -> Result<()> {
         let fp = self.find_entry(query)?.fingerprint;
         let mut entries = self.list()?;

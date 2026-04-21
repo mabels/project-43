@@ -12,8 +12,6 @@ default = ["matrix", "pcsc", "ssh", "e2e-encryption", "crypto-nettle"]
 # crypto-rust:   pure Rust, no C deps; required for iOS and the Flutter bridge.
 crypto-nettle      = ["sequoia-openpgp/crypto-nettle"]
 crypto-rust        = ["sequoia-openpgp/crypto-rust"]
-# sequoia-openpgp requires this opt-in when using crypto-rust
-# sequoia-openpgp requires both opt-ins when using crypto-rust
 crypto-experimental = [
     "sequoia-openpgp/allow-experimental-crypto",
     "sequoia-openpgp/allow-variable-time-crypto",
@@ -30,6 +28,19 @@ ssh = ["dep:ssh-key", "dep:signature", "dep:rsa", "dep:sha2"]
 
 # End-to-end encryption for the Matrix session.
 e2e-encryption = ["matrix-sdk/e2e-encryption", "matrix-sdk/sqlite"]
+
+# OpenTelemetry tracing — export spans via OTLP HTTP to the cluster collector.
+# Empty endpoint → local fmt mode, zero network overhead.
+telemetry = [
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry-semantic-conventions",
+    "dep:tokio",
+]
 
 [dependencies]
 # Always required
@@ -53,10 +64,17 @@ futures-util = { version = "0.3", optional = true }
 # ssh feature
 ssh-key   = { version = "0.6", features = ["alloc", "ed25519", "rsa", "encryption"], optional = true }
 signature = { version = "2", optional = true }
-# rsa crate used directly for RSA signing (ssh-key 0.6.7 has a bug that passes
-# [p, p] instead of [p, q] when constructing rsa::RsaPrivateKey).
 rsa       = { version = "0.9", features = ["sha2"], optional = true }
 sha2      = { version = "0.10", optional = true }
+
+# telemetry feature
+tracing                            = { version = "0.1", optional = true }
+tracing-subscriber                 = { version = "0.3", features = ["env-filter"], optional = true }
+tracing-opentelemetry              = { version = "0.28", optional = true }
+opentelemetry                      = { version = "0.27", optional = true }
+opentelemetry_sdk                  = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp                 = { version = "0.27", features = ["http-proto", "reqwest-client"], optional = true }
+opentelemetry-semantic-conventions = { version = "0.27", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

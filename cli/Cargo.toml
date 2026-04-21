@@ -10,10 +10,11 @@ path = "src/main.rs"
 [features]
 default = ["e2e-encryption"]
 e2e-encryption = ["p43/e2e-encryption"]
+telemetry     = ["p43/telemetry", "dep:tracing"]
 
 [dependencies]
 p43            = { path = "../lib" }
-clap           = { version = "4", features = ["derive"] }
+clap           = { version = "4", features = ["derive", "env"] }
 anyhow         = "1"
 rpassword      = "7"
 dirs           = "6.0.0"
@@ -24,3 +25,4 @@ tokio          = { version = "1", features = ["rt-multi-thread", "macros", "net"
 matrix-sdk     = { version = "0.16.0", default-features = false, features = ["rustls-tls"] }
 uuid           = { version = "1", features = ["v4"] }
 base64         = "0.22"
+tracing        = { version = "0.1", optional = true }

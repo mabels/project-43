@@ -1,0 +1,36 @@
+# Strategic-merge patch — adds the p43 dashboard ConfigMaps to the Grafana deployment.
+# Apply once, same as grafana-deployment-patch.yaml:
+#
+#   kubectl apply -f infra/otel/grafana-dashboard-p43-traces.yaml
+#   kubectl patch deployment grafana -n grafana \
+#     --patch-file infra/otel/grafana-dashboard-patch.yaml
+#   kubectl rollout restart deployment/grafana -n grafana
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: grafana
+spec:
+  template:
+    spec:
+      containers:
+        - name: grafana
+          volumeMounts:
+            # Dashboard provisioner — tells Grafana where to find dashboard JSON files
+            - name: otel-dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards/p43.yaml
+              subPath: p43.yaml
+              readOnly: true
+            # Dashboard JSON — the actual p43-traces.json
+            - name: otel-dashboard-p43
+              mountPath: /var/lib/grafana/dashboards/p43/p43-traces.json
+              subPath: p43-traces.json
+              readOnly: true
+      volumes:
+        - name: otel-dashboard-provider
+          configMap:
+            name: grafana-otel-dashboard-provider
+        - name: otel-dashboard-p43
+          configMap:
+            name: grafana-otel-dashboard-p43

@@ -1,0 +1,44 @@
+# ── Grafana — OTel ClickHouse datasource provisioning ────────────────────────
+# Mounts into the existing Grafana deployment at
+#   /etc/grafana/provisioning/datasources/otel-clickhouse.yaml
+# via the patch in grafana-deployment-patch.yaml.
+#
+# Requires the grafana-clickhouse-datasource plugin; the patch adds
+# GF_INSTALL_PLUGINS so Grafana downloads it on startup (persisted to PVC).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-otel-datasources
+  namespace: grafana
+data:
+  otel-clickhouse.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: ClickHouse (OTel Traces)
+        type: grafana-clickhouse-datasource
+        uid: clickhouse-otel-traces
+        access: proxy
+        isDefault: false
+        jsonData:
+          # Native protocol — faster for trace queries.
+          protocol: native
+          server: clickhouse.clickhouse.svc.cluster.local
+          port: 9000
+          username: default
+          defaultDatabase: otel
+          # Tell the plugin this database follows OTel semantic conventions
+          # so the Explore → Traces view renders correctly.
+          traces:
+            defaultDatabase: otel
+            defaultTable: otel_traces
+            otelEnabled: true
+            otelVersion: latest
+            durationUnit: nanoseconds
+          logs:
+            defaultDatabase: otel
+            defaultTable: otel_logs
+            otelEnabled: true
+            otelVersion: latest
+        secureJsonData:
+          password: ""
+        editable: false

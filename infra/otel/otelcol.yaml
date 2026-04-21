@@ -1,0 +1,77 @@
+# ── OTel Collector — Deployment ───────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otelcol
+  namespace: telemetry
+  labels:
+    app: otelcol
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otelcol
+  template:
+    metadata:
+      labels:
+        app: otelcol
+    spec:
+      containers:
+        - name: otelcol
+          # collector-contrib includes the clickhouse exporter
+          image: otel/opentelemetry-collector-contrib:0.104.0
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+            - name: otlp-http
+              containerPort: 4318
+            - name: health
+              containerPort: 13133
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: otelcol-config
+---
+# ── OTel Collector — Service ──────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: otelcol
+  namespace: telemetry
+  labels:
+    app: otelcol
+spec:
+  selector:
+    app: otelcol
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+  type: ClusterIP

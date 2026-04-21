@@ -14,6 +14,7 @@ class AgentSettings {
     this.cacheDecryptedKey = false,
     this.cacheTimeoutMinutes = 15,
     this.notifyOnSignRequest = true,
+    this.otelEndpoint = '',
   });
 
   /// When `true` and credentials for the requested key are cached, sign
@@ -42,11 +43,20 @@ class AgentSettings {
   /// banners appear even when the app is in the background.
   final bool notifyOnSignRequest;
 
+  /// OpenTelemetry collector endpoint.
+  ///
+  /// Empty string (default) → local/no-op mode: spans are never exported and
+  /// no network connection is attempted.  Set to a URL (e.g.
+  /// `https://otel.adviser.com`) to export traces to the cluster collector.
+  /// Changes take effect on the next app launch.
+  final String otelEndpoint;
+
   AgentSettings copyWith({
     bool? autoApproveWhenCached,
     bool? cacheDecryptedKey,
     Object? cacheTimeoutMinutes = _sentinel,
     bool? notifyOnSignRequest,
+    String? otelEndpoint,
   }) =>
       AgentSettings(
         autoApproveWhenCached:
@@ -56,6 +66,7 @@ class AgentSettings {
             ? this.cacheTimeoutMinutes
             : cacheTimeoutMinutes as int?,
         notifyOnSignRequest: notifyOnSignRequest ?? this.notifyOnSignRequest,
+        otelEndpoint: otelEndpoint ?? this.otelEndpoint,
       );
 
   Map<String, dynamic> toJson() => {
@@ -63,6 +74,7 @@ class AgentSettings {
         'cacheDecryptedKey': cacheDecryptedKey,
         'cacheTimeoutMinutes': cacheTimeoutMinutes,
         'notifyOnSignRequest': notifyOnSignRequest,
+        'otelEndpoint': otelEndpoint,
       };
 
   factory AgentSettings.fromJson(Map<String, dynamic> json) => AgentSettings(
@@ -71,6 +83,7 @@ class AgentSettings {
         cacheDecryptedKey: json['cacheDecryptedKey'] as bool? ?? false,
         cacheTimeoutMinutes: json['cacheTimeoutMinutes'] as int? ?? 15,
         notifyOnSignRequest: json['notifyOnSignRequest'] as bool? ?? true,
+        otelEndpoint: json['otelEndpoint'] as String? ?? '',
       );
 }
 

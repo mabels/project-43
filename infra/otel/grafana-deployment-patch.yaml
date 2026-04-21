@@ -1,0 +1,28 @@
+# Strategic-merge patch applied to the existing Grafana deployment.
+# Adds two things:
+#   1. GF_INSTALL_PLUGINS — installs the ClickHouse datasource plugin on startup
+#      (written to the PVC at /var/lib/grafana/plugins, so only downloaded once).
+#   2. Volume + volumeMount — mounts grafana-otel-datasources ConfigMap into
+#      the provisioning directory so Grafana auto-configures the datasource.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: grafana
+spec:
+  template:
+    spec:
+      containers:
+        - name: grafana
+          env:
+            - name: GF_INSTALL_PLUGINS
+              value: grafana-clickhouse-datasource
+          volumeMounts:
+            - name: otel-datasources
+              mountPath: /etc/grafana/provisioning/datasources/otel-clickhouse.yaml
+              subPath: otel-clickhouse.yaml
+              readOnly: true
+      volumes:
+        - name: otel-datasources
+          configMap:
+            name: grafana-otel-datasources

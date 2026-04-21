@@ -12,6 +12,43 @@ part 'simple.freezed.dart';
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
 
+/// Initialise tracing.
+///
+/// Pass an empty string for **local mode** (fmt output, zero network overhead).
+/// Pass `"https://otel.adviser.com"` to export spans to the OTel Collector.
+///
+/// If the endpoint is unreachable the SDK retries silently and drops spans
+/// after the retry budget — the app is never blocked.
+///
+/// Compiled as a no-op when the `p43` library is built without
+/// `--features telemetry`.
+Future<void> initTelemetry({required String endpoint}) =>
+    RustLib.instance.api.crateApiSimpleInitTelemetry(endpoint: endpoint);
+
+/// Shut down the OTel provider and flush all pending spans.
+/// Call before the app exits.
+Future<void> shutdownTelemetry() =>
+    RustLib.instance.api.crateApiSimpleShutdownTelemetry();
+
+/// Inject a W3C `traceparent` header for the current thread.
+///
+/// Dart should call this **immediately before** any FRB function that creates
+/// a tracing span, then call [clearActiveTraceparent] once the call returns.
+/// This stitches the Flutter span tree and the Rust span tree into a single
+/// distributed trace in Jaeger.
+///
+/// The value must follow the W3C Trace Context format:
+/// `00-<trace-id-32hex>-<parent-id-16hex>-<flags-2hex>`
+Future<void> setActiveTraceparent({required String traceparent}) => RustLib
+    .instance
+    .api
+    .crateApiSimpleSetActiveTraceparent(traceparent: traceparent);
+
+/// Clear the stored traceparent for the current thread.
+/// Call after every FRB call that was preceded by [setActiveTraceparent].
+Future<void> clearActiveTraceparent() =>
+    RustLib.instance.api.crateApiSimpleClearActiveTraceparent();
+
 /// Must be called once from Dart before any key operation.
 /// Pass `getApplicationSupportDirectory().path` (or equivalent).
 Future<void> setStoreDir({required String dir}) =>

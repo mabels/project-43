@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use subcmd::SshAgentArgs;
+#[cfg(feature = "telemetry")]
+use tracing::Instrument as _;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
@@ -55,6 +57,7 @@ impl ssh_agent_lib::agent::Session for P43SshSession {
         }])
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self, request), fields(mode = "soft_key", comment = %self.comment)))]
     async fn sign(&mut self, request: SignRequest) -> std::result::Result<Signature, AgentError> {
         self.private_key
             .try_sign(request.data.as_ref())
@@ -103,6 +106,7 @@ impl ssh_agent_lib::agent::Session for P43CardSession {
         }])
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self, request), fields(mode = "card", is_rsa = self.is_rsa)))]
     async fn sign(&mut self, request: SignRequest) -> std::result::Result<Signature, AgentError> {
         let pin = Arc::clone(&self.pin);
         let data = request.data.to_vec();
@@ -150,11 +154,22 @@ impl MatrixProxySession {
         self.pending.lock().await.insert(request_id, tx);
 
         let json = msg.to_json().map_err(|e| aerr(e.to_string()))?;
-        p43::matrix::global::send_message(&self.room_id, &json)
-            .await
-            .map_err(|e| aerr(e.to_string()))?;
 
-        tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+        // Span: time to deliver the request to the Matrix homeserver.
+        #[cfg(feature = "telemetry")]
+        let send_fut = p43::matrix::global::send_message(&self.room_id, &json)
+            .instrument(tracing::info_span!("ssh_agent.matrix_send", room_id = %self.room_id));
+        #[cfg(not(feature = "telemetry"))]
+        let send_fut = p43::matrix::global::send_message(&self.room_id, &json);
+        send_fut.await.map_err(|e| aerr(e.to_string()))?;
+
+        // Span: time waiting for the phone to respond (phone round-trip latency).
+        #[cfg(feature = "telemetry")]
+        let wait_fut = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+            .instrument(tracing::info_span!("ssh_agent.matrix_wait", timeout_secs = 30));
+        #[cfg(not(feature = "telemetry"))]
+        let wait_fut = tokio::time::timeout(std::time::Duration::from_secs(30), rx);
+        wait_fut
             .await
             .map_err(|_| aerr("p43 request timed out (30 s) — is the phone online?"))?
             .map_err(|_| aerr("response channel closed"))
@@ -195,10 +210,23 @@ impl ssh_agent_lib::agent::Session for MatrixProxySession {
         }
     }
 
+    #[cfg_attr(
+        feature = "telemetry",
+        tracing::instrument(
+            skip(self, request),
+            fields(
+                data_len = request.data.len(),
+                room_id  = %self.room_id,
+                fingerprint = tracing::field::Empty,
+            )
+        )
+    )]
     async fn sign(&mut self, request: SignRequest) -> std::result::Result<Signature, AgentError> {
         // Derive fingerprint from the KeyData so the phone knows which key to use.
         let pk = ssh_key::public::PublicKey::new(request.pubkey.clone(), "");
         let fingerprint = pk.fingerprint(HashAlg::Sha256).to_string();
+        #[cfg(feature = "telemetry")]
+        tracing::Span::current().record("fingerprint", fingerprint.as_str());
 
         // Encode the raw data as base64 for the JSON payload.
         let data_b64 = B64.encode(request.data.as_slice());
@@ -254,14 +282,32 @@ pub fn run(
     key_file: Option<PathBuf>,
     passphrase: String,
     pin: Option<String>,
+    rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
     let socket_path = resolve_socket(args.socket.as_deref(), store_dir);
     let _ = std::fs::remove_file(&socket_path);
 
+    // A synchronous span that closes immediately — confirms the OTel pipeline
+    // is live within the first batch flush (≤5 s) without waiting for a sign.
+    #[cfg(feature = "telemetry")]
+    {
+        eprintln!("[p43::ssh_agent] creating startup span");
+        {
+            let _s = tracing::info_span!(
+                "ssh_agent.started",
+                socket = %socket_path.display(),
+                local  = args.local,
+                card   = args.card,
+            ).entered();
+            // _s drops here → span complete → enqueued for export
+        }
+        eprintln!("[p43::ssh_agent] startup span dropped");
+    }
+
     if args.local {
-        run_local(args, socket_path, key_file, passphrase, pin)
+        run_local(args, socket_path, key_file, passphrase, pin, rt)
     } else {
-        run_matrix(args, socket_path, store_dir)
+        run_matrix(args, socket_path, store_dir, rt)
     }
 }
 
@@ -273,6 +319,7 @@ fn run_local(
     key_file: Option<PathBuf>,
     passphrase: String,
     pin: Option<String>,
+    rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
     if args.card {
         let pin = match pin.or_else(|| std::env::var("YK_PIN").ok()) {
@@ -289,10 +336,7 @@ fn run_local(
             socket_path.display(),
             socket_path.display(),
         );
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(async move {
+        rt.block_on(async move {
                 let listener = UnixListener::bind(&socket_path)
                     .with_context(|| format!("Failed to bind to {}", socket_path.display()))?;
                 listen(listener, session).await?;
@@ -311,10 +355,7 @@ fn run_local(
             socket_path.display(),
             socket_path.display(),
         );
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(async move {
+        rt.block_on(async move {
                 let listener = UnixListener::bind(&socket_path)
                     .with_context(|| format!("Failed to bind to {}", socket_path.display()))?;
                 listen(listener, session).await?;
@@ -325,13 +366,10 @@ fn run_local(
 
 // ── Matrix proxy mode ─────────────────────────────────────────────────────────
 
-fn run_matrix(args: SshAgentArgs, socket_path: PathBuf, store_dir: &Path) -> Result<()> {
+fn run_matrix(args: SshAgentArgs, socket_path: PathBuf, store_dir: &Path, rt: &tokio::runtime::Runtime) -> Result<()> {
     let store_dir = store_dir.to_path_buf();
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async move {
+    rt.block_on(async move {
             // 1. Restore saved Matrix session.
             let logged_in = p43::matrix::global::restore(&store_dir)
                 .await

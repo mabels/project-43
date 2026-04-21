@@ -1,0 +1,27 @@
+# One-shot Job that creates the `otel` database in ClickHouse.
+# Runs before the Collector starts — the Collector's create_schema:true
+# handles the individual tables once the database exists.
+#
+# Safe to re-apply: CREATE DATABASE IF NOT EXISTS is idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: clickhouse-create-otel-db
+  namespace: telemetry
+  annotations:
+    # Re-run on every apply with: kubectl delete job clickhouse-create-otel-db -n telemetry
+    "helm.sh/hook": pre-install,pre-upgrade
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: clickhouse/clickhouse-client:24.5
+          command:
+            - clickhouse-client
+            - --host=clickhouse.clickhouse.svc.cluster.local
+            - --port=9000
+            - --user=default
+            - --query=CREATE DATABASE IF NOT EXISTS otel

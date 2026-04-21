@@ -1,0 +1,44 @@
+# Apply the full telemetry stack with:
+#   kubectl apply -k infra/otel/
+#
+# What this does:
+#   1. Creates the `telemetry` namespace
+#   2. Deploys the OTel Collector (receives OTLP, writes to ClickHouse)
+#   3. Exposes the Collector at https://otel.adviser.com via Traefik + Let's Encrypt
+#   4. Adds a ClickHouse OTel datasource to the existing Grafana at mam-mon.adviser.com
+#      (plugin installed on first pod start, persisted to Grafana's PVC)
+#
+# App configuration after apply:
+#   Rust / Flutter OTLP endpoint:  https://otel.adviser.com/v1/traces
+#   Trace browser:                 https://mam-mon.adviser.com → Explore → ClickHouse (OTel Traces)
+#
+# Tear down (does NOT touch the Grafana deployment or ClickHouse data):
+#   kubectl delete -k infra/otel/
+#   kubectl patch deployment grafana -n grafana --type=json \
+#     -p='[{"op":"remove","path":"/spec/template/spec/volumes/-"},{"op":"remove","path":"/spec/template/spec/containers/0/volumeMounts/-"}]'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - clickhouse-init-job.yaml
+  - otelcol-configmap.yaml
+  - otelcol.yaml
+  - ingress.yaml
+  - grafana-clickhouse-datasource.yaml   # ConfigMap in grafana namespace
+  - grafana-dashboard-p43-traces.yaml     # ConfigMaps in grafana namespace
+
+# NOTE: kustomize cannot patch resources in a different namespace from the
+# kustomization root.  The grafana-deployment-patch.yaml is applied once with:
+#   kubectl patch deployment grafana -n grafana \
+#     --patch-file infra/otel/grafana-deployment-patch.yaml
+# It is kept here for documentation and manual re-application only.
+#
+# patches:
+#   - path: grafana-deployment-patch.yaml
+#     target:
+#       group: apps
+#       version: v1
+#       kind: Deployment
+#       name: grafana
+#       namespace: grafana

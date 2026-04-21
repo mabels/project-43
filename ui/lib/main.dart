@@ -7,6 +7,7 @@ import 'src/screens/key_list_screen.dart';
 import 'src/screens/settings_screen.dart';
 import 'src/services/notification_service.dart';
 import 'src/services/settings_service.dart';
+import 'src/services/telemetry_service.dart';
 import 'src/services/window_service.dart';
 
 Future<void> main() async {
@@ -16,6 +17,10 @@ Future<void> main() async {
   await setStoreDir(dir: appDir.path);
   // Load persisted settings before the UI starts.
   await SettingsService.instance.load();
+  // Initialise telemetry using the persisted endpoint.
+  // Empty string → local/no-op mode (no network).  Non-empty → OTLP export.
+  await TelemetryService.instance
+      .init(endpoint: SettingsService.instance.settings.otelEndpoint);
   // Initialise notification service (requests OS permission on first run).
   await NotificationService.instance.init();
   // Initialise window management (desktop only — no-op on mobile).

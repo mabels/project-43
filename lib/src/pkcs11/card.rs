@@ -135,6 +135,20 @@ pub fn list_connected_cards() -> Result<Vec<ConnectedCard>> {
     Ok(out)
 }
 
+/// Return the number of User PIN (PW1) verification attempts remaining for
+/// the given card.  Requires no PIN.  Returns an error if the card cannot be
+/// opened or does not expose PW status bytes.
+pub fn card_pin_retries(ident: Option<&str>) -> Result<u8> {
+    let mut card = open_card(ident)?;
+    let mut tx = card
+        .transaction()
+        .context("Failed to open card transaction")?;
+    let pw = tx
+        .pw_status_bytes()
+        .context("Failed to read PW status bytes from card")?;
+    Ok(pw.err_count_pw1())
+}
+
 pub fn open_first_card() -> Result<Card<Open>> {
     let mut backends =
         PcscBackend::cards(None).context("Failed to list PC/SC cards — is pcscd running?")?;

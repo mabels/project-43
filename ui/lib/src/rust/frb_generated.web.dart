@@ -73,7 +73,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MxRoomInfo> dco_decode_list_mx_room_info(dynamic raw);
 
   @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<SubkeyInfo> dco_decode_list_subkey_info(dynamic raw);
 
   @protected
   MxDeviceInfo dco_decode_mx_device_info(dynamic raw);
@@ -98,6 +104,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SshKeyDetails dco_decode_ssh_key_details(dynamic raw);
+
+  @protected
+  SubkeyInfo dco_decode_subkey_info(dynamic raw);
 
   @protected
   int dco_decode_u_8(dynamic raw);
@@ -168,7 +177,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MxRoomInfo> sse_decode_list_mx_room_info(SseDeserializer deserializer);
 
   @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<SubkeyInfo> sse_decode_list_subkey_info(SseDeserializer deserializer);
 
   @protected
   MxDeviceInfo sse_decode_mx_device_info(SseDeserializer deserializer);
@@ -195,6 +210,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SshKeyDetails sse_decode_ssh_key_details(SseDeserializer deserializer);
+
+  @protected
+  SubkeyInfo sse_decode_subkey_info(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_8(SseDeserializer deserializer);
@@ -284,8 +302,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_subkey_info(
+    List<SubkeyInfo> self,
     SseSerializer serializer,
   );
 
@@ -315,6 +342,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_ssh_key_details(SshKeyDetails self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_subkey_info(SubkeyInfo self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_8(int self, SseSerializer serializer);

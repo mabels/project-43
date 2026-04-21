@@ -1,8 +1,30 @@
 import 'package:flutter/material.dart';
 import '../services/settings_service.dart';
+import 'matrix_login_screen.dart';
+import 'matrix_room_list_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
+  const SettingsScreen({
+    super.key,
+    required this.loggedIn,
+    required this.onLoggedIn,
+    required this.onLoggedOut,
+  });
+
+  final bool loggedIn;
+  final VoidCallback onLoggedIn;
+  final VoidCallback onLoggedOut;
+
+  void _openMatrix(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => loggedIn
+            ? MatrixRoomListScreen(onLoggedOut: onLoggedOut)
+            : MatrixLoginScreen(onLoggedIn: onLoggedIn),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -17,6 +39,33 @@ class SettingsScreen extends StatelessWidget {
           final s = SettingsService.instance.settings;
           return ListView(
             children: [
+              _SectionHeader('Matrix'),
+              ListTile(
+                tileColor: const Color(0xFF2C2C2E),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                leading: Icon(
+                  Icons.chat_bubble_outline,
+                  color: loggedIn
+                      ? const Color(0xFF30D158)
+                      : const Color(0xFF8E8E93),
+                  size: 20,
+                ),
+                title: const Text('Matrix', style: TextStyle(fontSize: 15)),
+                subtitle: Text(
+                  loggedIn ? 'Connected' : 'Not connected',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: loggedIn
+                        ? const Color(0xFF30D158)
+                        : const Color(0xFF8E8E93),
+                  ),
+                ),
+                trailing: const Icon(Icons.chevron_right,
+                    size: 18, color: Color(0xFF8E8E93)),
+                onTap: () => _openMatrix(context),
+              ),
+              const Divider(height: 32),
               _SectionHeader('Agent'),
               _SettingsTile(
                 title: 'Auto-approve cached keys',

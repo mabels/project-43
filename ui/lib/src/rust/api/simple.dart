@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'simple.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `default_store_dir`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_signs`, `signing_key_cache`, `to_key_info`, `tokio_rt`
+// These functions are ignored because they are not marked as `pub`: `card_pin_cache`, `default_store_dir`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_signs`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
 
@@ -36,6 +36,18 @@ Future<void> verifyKeyPassphrase({
 /// Delete a key (public + secret files + index entry) from the local store.
 Future<void> deleteKey({required String fingerprint}) =>
     RustLib.instance.api.crateApiSimpleDeleteKey(fingerprint: fingerprint);
+
+/// Enable or disable a key in the SSH agent.
+///
+/// Disabled keys are not advertised by `ssh-add -l` and cannot be used
+/// for signing.  The key files are not modified.
+Future<void> setKeyEnabled({
+  required String fingerprint,
+  required bool enabled,
+}) => RustLib.instance.api.crateApiSimpleSetKeyEnabled(
+  fingerprint: fingerprint,
+  enabled: enabled,
+);
 
 /// Returns the armored OpenPGP public key for the given fingerprint.
 Future<String> getPublicKeyArmored({required String fingerprint}) => RustLib
@@ -99,6 +111,39 @@ Future<List<KeyInfo>> importCard({
   uid: uid,
   pin: pin,
 );
+
+/// Import an OpenSSH private key file into the local key store as an OpenPGP
+/// cert.
+///
+/// - `pem_bytes`: raw contents of the `id_ed25519` / `id_rsa` file.
+/// - `uid_override`: UID string (e.g. `"Alice <alice@example.com>"`).  Pass the
+///   empty string to derive from the SSH key's comment field.
+/// - `ssh_passphrase`: passphrase that protects the SSH file itself (if any).
+/// - `openpgp_passphrase`: passphrase to encrypt the stored OpenPGP secret key.
+///   Pass `None` to store the key unencrypted (only do this on a secure device).
+///
+/// Returns the hex fingerprint of the newly imported cert and the updated key
+/// list.
+Future<List<KeyInfo>> importSshKey({
+  required List<int> pemBytes,
+  required String uidOverride,
+  String? sshPassphrase,
+  String? openpgpPassphrase,
+}) => RustLib.instance.api.crateApiSimpleImportSshKey(
+  pemBytes: pemBytes,
+  uidOverride: uidOverride,
+  sshPassphrase: sshPassphrase,
+  openpgpPassphrase: openpgpPassphrase,
+);
+
+/// Import an armored OpenPGP private key (TSK) into the local key store.
+///
+/// `armored` is the full text of a `-----BEGIN PGP PRIVATE KEY BLOCK-----`
+/// message.  The passphrase (if any) is not required at import time.
+///
+/// Returns the updated key list.
+Future<List<KeyInfo>> importOpenpgpKey({required String armored}) =>
+    RustLib.instance.api.crateApiSimpleImportOpenpgpKey(armored: armored);
 
 /// Register a YubiKey (or other OpenPGP card) AID with a key entry.
 ///
@@ -236,6 +281,52 @@ Future<void> mxRespondSign({
   passphrase: passphrase,
 );
 
+/// Approve an `ssh.sign_request` for a card-backed key using the card's User PIN.
+///
+/// The card's AUTH slot is used for signing (same slot the SSH agent uses).
+/// The User PIN (typically 6+ digits on YubiKey) unlocks the AUTH slot — it
+/// is NOT the Admin PIN or the Signing PIN.
+///
+/// On success the PIN is cached in memory keyed by card AID ident so that
+/// `mx_respond_sign_card_cached` can skip the PIN dialog for subsequent requests.
+Future<void> mxRespondSignCard({
+  required String roomId,
+  required String requestId,
+  required String pin,
+}) => RustLib.instance.api.crateApiSimpleMxRespondSignCard(
+  roomId: roomId,
+  requestId: requestId,
+  pin: pin,
+);
+
+/// Returns `true` if a cached PIN exists for the given card AID ident,
+/// meaning `mx_respond_sign_card_cached` can proceed without a PIN dialog.
+///
+/// `card_ident` is one of the strings from `KeyInfo.cardIdents`.
+Future<bool> hasCachedCardPin({required String cardIdent}) =>
+    RustLib.instance.api.crateApiSimpleHasCachedCardPin(cardIdent: cardIdent);
+
+/// Approve an `ssh.sign_request` for a card-backed key using a cached PIN.
+///
+/// Returns an error if no PIN is cached for any card associated with this key.
+/// This is the auto-approve path after the first successful `mx_respond_sign_card`.
+Future<void> mxRespondSignCardCached({
+  required String roomId,
+  required String requestId,
+}) => RustLib.instance.api.crateApiSimpleMxRespondSignCardCached(
+  roomId: roomId,
+  requestId: requestId,
+);
+
+/// Return the number of User PIN attempts remaining for a connected YubiKey /
+/// OpenPGP card.  No PIN is required — this only reads PW status bytes.
+///
+/// `card_ident` is one of the strings from `KeyInfo.cardIdents`
+/// (e.g. `"0006:17684870"`).  Returns an error if no card with that ident is
+/// currently connected or accessible.
+Future<int> getCardPinRetries({required String cardIdent}) =>
+    RustLib.instance.api.crateApiSimpleGetCardPinRetries(cardIdent: cardIdent);
+
 /// Approve an `ssh.sign_request` without a passphrase dialog.
 ///
 /// Fast path: if a decrypted keypair is cached (key-cache enabled and at least
@@ -339,16 +430,24 @@ class KeyInfo {
   final String algo;
   final bool hasSecret;
 
+  /// Whether this key is active in the SSH agent.
+  final bool enabled;
+
   /// Application Identifier strings of YubiKeys registered against this key.
   /// Empty for pure soft keys.
   final List<String> cardIdents;
+
+  /// All subkeys (including primary) with their roles and algorithms.
+  final List<SubkeyInfo> subkeys;
 
   const KeyInfo({
     required this.fingerprint,
     required this.uid,
     required this.algo,
     required this.hasSecret,
+    required this.enabled,
     required this.cardIdents,
+    required this.subkeys,
   });
 
   @override
@@ -357,7 +456,9 @@ class KeyInfo {
       uid.hashCode ^
       algo.hashCode ^
       hasSecret.hashCode ^
-      cardIdents.hashCode;
+      enabled.hashCode ^
+      cardIdents.hashCode ^
+      subkeys.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -368,7 +469,9 @@ class KeyInfo {
           uid == other.uid &&
           algo == other.algo &&
           hasSecret == other.hasSecret &&
-          cardIdents == other.cardIdents;
+          enabled == other.enabled &&
+          cardIdents == other.cardIdents &&
+          subkeys == other.subkeys;
 }
 
 class MxDeviceInfo {
@@ -498,4 +601,32 @@ class SshKeyDetails {
           name == other.name &&
           algo == other.algo &&
           cardIdents == other.cardIdents;
+}
+
+/// One subkey inside an OpenPGP cert — role + algorithm + SSH key for display.
+class SubkeyInfo {
+  /// Human-readable role string: "certify", "sign", "auth", "encrypt",
+  /// "certify+sign", or combinations thereof.
+  final String role;
+
+  /// Algorithm name from OpenPGP, e.g. "RSA4096", "EdDSA", "ECDH".
+  final String algo;
+
+  /// OpenSSH `authorized_keys` line for this subkey, or `None` when the
+  /// algorithm has no SSH equivalent (e.g. ECDH encryption keys).
+  final String? opensshKey;
+
+  const SubkeyInfo({required this.role, required this.algo, this.opensshKey});
+
+  @override
+  int get hashCode => role.hashCode ^ algo.hashCode ^ opensshKey.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SubkeyInfo &&
+          runtimeType == other.runtimeType &&
+          role == other.role &&
+          algo == other.algo &&
+          opensshKey == other.opensshKey;
 }

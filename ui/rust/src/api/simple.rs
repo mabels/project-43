@@ -33,15 +33,31 @@ pub fn init_app() {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/// One subkey inside an OpenPGP cert — role + algorithm + SSH key for display.
+pub struct SubkeyInfo {
+    /// Human-readable role string: "certify", "sign", "auth", "encrypt",
+    /// "certify+sign", or combinations thereof.
+    pub role: String,
+    /// Algorithm name from OpenPGP, e.g. "RSA4096", "EdDSA", "ECDH".
+    pub algo: String,
+    /// OpenSSH `authorized_keys` line for this subkey, or `None` when the
+    /// algorithm has no SSH equivalent (e.g. ECDH encryption keys).
+    pub openssh_key: Option<String>,
+}
+
 /// A key entry returned to Dart — mirrors p43::key_store::store::KeyEntry.
 pub struct KeyInfo {
     pub fingerprint: String,
     pub uid: String,
     pub algo: String,
     pub has_secret: bool,
+    /// Whether this key is active in the SSH agent.
+    pub enabled: bool,
     /// Application Identifier strings of YubiKeys registered against this key.
     /// Empty for pure soft keys.
     pub card_idents: Vec<String>,
+    /// All subkeys (including primary) with their roles and algorithms.
+    pub subkeys: Vec<SubkeyInfo>,
 }
 
 // ── Store-dir initialisation ──────────────────────────────────────────────────
@@ -58,7 +74,6 @@ static STORE_DIR: OnceLock<PathBuf> = OnceLock::new();
 struct PendingSign {
     fingerprint: String,
     data_b64: String,
-    #[allow(dead_code)]
     flags: u32,
 }
 
@@ -81,6 +96,17 @@ static PASSPHRASE_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::ne
 
 fn passphrase_cache() -> &'static Mutex<HashMap<String, String>> {
     PASSPHRASE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// ── Card PIN cache ────────────────────────────────────────────────────────────
+//
+// Keyed by card AID ident string (e.g. `"0006:17684870"`).  Populated on a
+// successful `mx_respond_sign_card`; cleared by `mx_clear_caches`.
+
+static CARD_PIN_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn card_pin_cache() -> &'static Mutex<HashMap<String, String>> {
+    CARD_PIN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ── Signing-key cache ─────────────────────────────────────────────────────────
@@ -126,13 +152,31 @@ fn open_store() -> anyhow::Result<KeyStore> {
     KeyStore::open(&default_store_dir())
 }
 
-fn to_key_info(e: p43::key_store::store::KeyEntry) -> KeyInfo {
+fn subkeys_for(fingerprint: &str, store_dir: &std::path::Path) -> Vec<SubkeyInfo> {
+    let ks = match p43::key_store::store::KeyStore::open(store_dir) {
+        Ok(ks) => ks,
+        Err(_) => return vec![],
+    };
+    ks.list_subkeys(fingerprint)
+        .into_iter()
+        .map(|m| SubkeyInfo {
+            role: m.role,
+            algo: m.algo,
+            openssh_key: m.openssh_key,
+        })
+        .collect()
+}
+
+fn to_key_info(e: p43::key_store::store::KeyEntry, store_dir: &std::path::Path) -> KeyInfo {
+    let subkeys = subkeys_for(&e.fingerprint, store_dir);
     KeyInfo {
         fingerprint: e.fingerprint,
         uid: e.uid,
         algo: e.algo,
         has_secret: e.has_secret,
+        enabled: e.enabled,
         card_idents: e.card_idents,
+        subkeys,
     }
 }
 
@@ -141,7 +185,12 @@ fn to_key_info(e: p43::key_store::store::KeyEntry) -> KeyInfo {
 /// Returns all keys in the local store (~/.config/project-43/keys).
 #[frb]
 pub fn list_keys() -> anyhow::Result<Vec<KeyInfo>> {
-    Ok(open_store()?.list()?.into_iter().map(to_key_info).collect())
+    let store_dir = default_store_dir();
+    Ok(open_store()?
+        .list()?
+        .into_iter()
+        .map(|e| to_key_info(e, &store_dir))
+        .collect())
 }
 
 /// Verify that `passphrase` correctly decrypts the secret key at `fingerprint`.
@@ -158,6 +207,16 @@ pub fn verify_key_passphrase(fingerprint: String, passphrase: String) -> anyhow:
 #[frb]
 pub fn delete_key(fingerprint: String) -> anyhow::Result<()> {
     open_store()?.delete(&fingerprint)?;
+    Ok(())
+}
+
+/// Enable or disable a key in the SSH agent.
+///
+/// Disabled keys are not advertised by `ssh-add -l` and cannot be used
+/// for signing.  The key files are not modified.
+#[frb]
+pub fn set_key_enabled(fingerprint: String, enabled: bool) -> anyhow::Result<()> {
+    open_store()?.set_key_enabled(&fingerprint, enabled)?;
     Ok(())
 }
 
@@ -213,7 +272,12 @@ pub fn generate_key(
     let ks = open_store()?;
     let cert = keygen::generate(&uid, &algo, passphrase.as_deref())?;
     ks.save(&cert, None)?;
-    Ok(ks.list()?.into_iter().map(to_key_info).collect())
+    let store_dir = default_store_dir();
+    Ok(ks
+        .list()?
+        .into_iter()
+        .map(|e| to_key_info(e, &store_dir))
+        .collect())
 }
 
 // ── Card (PC/SC) ──────────────────────────────────────────────────────────────
@@ -262,7 +326,70 @@ pub fn import_card(card_ident: String, uid: String, pin: String) -> anyhow::Resu
         Some(uid.as_str())
     };
     p43::pkcs11::import_card::import_card_cert(&ks, Some(&card_ident), uid_opt, &pin)?;
-    Ok(ks.list()?.into_iter().map(to_key_info).collect())
+    let store_dir = default_store_dir();
+    Ok(ks
+        .list()?
+        .into_iter()
+        .map(|e| to_key_info(e, &store_dir))
+        .collect())
+}
+
+/// Import an OpenSSH private key file into the local key store as an OpenPGP
+/// cert.
+///
+/// - `pem_bytes`: raw contents of the `id_ed25519` / `id_rsa` file.
+/// - `uid_override`: UID string (e.g. `"Alice <alice@example.com>"`).  Pass the
+///   empty string to derive from the SSH key's comment field.
+/// - `ssh_passphrase`: passphrase that protects the SSH file itself (if any).
+/// - `openpgp_passphrase`: passphrase to encrypt the stored OpenPGP secret key.
+///   Pass `None` to store the key unencrypted (only do this on a secure device).
+///
+/// Returns the hex fingerprint of the newly imported cert and the updated key
+/// list.
+#[frb]
+pub fn import_ssh_key(
+    pem_bytes: Vec<u8>,
+    uid_override: String,
+    ssh_passphrase: Option<String>,
+    openpgp_passphrase: Option<String>,
+) -> anyhow::Result<Vec<KeyInfo>> {
+    let ks = open_store()?;
+    let uid_opt = if uid_override.is_empty() {
+        None
+    } else {
+        Some(uid_override.as_str())
+    };
+    p43::key_store::import_ssh::import_ssh_private_key(
+        &ks,
+        &pem_bytes,
+        uid_opt,
+        ssh_passphrase.as_deref(),
+        openpgp_passphrase.as_deref(),
+    )?;
+    let store_dir = default_store_dir();
+    Ok(ks
+        .list()?
+        .into_iter()
+        .map(|e| to_key_info(e, &store_dir))
+        .collect())
+}
+
+/// Import an armored OpenPGP private key (TSK) into the local key store.
+///
+/// `armored` is the full text of a `-----BEGIN PGP PRIVATE KEY BLOCK-----`
+/// message.  The passphrase (if any) is not required at import time.
+///
+/// Returns the updated key list.
+#[frb]
+pub fn import_openpgp_key(armored: String) -> anyhow::Result<Vec<KeyInfo>> {
+    let ks = open_store()?;
+    p43::key_store::import_ssh::import_openpgp_private_key(&ks, armored.as_bytes())?;
+    let store_dir = default_store_dir();
+    Ok(ks
+        .list()?
+        .into_iter()
+        .map(|e| to_key_info(e, &store_dir))
+        .collect())
 }
 
 /// Register a YubiKey (or other OpenPGP card) AID with a key entry.
@@ -595,6 +722,9 @@ pub fn mx_clear_caches() {
     if let Ok(mut cache) = signing_key_cache().lock() {
         cache.clear();
     }
+    if let Ok(mut cache) = card_pin_cache().lock() {
+        cache.clear();
+    }
     p43::ssh_agent::clear_rsa_key_cache();
 }
 
@@ -651,6 +781,129 @@ pub async fn mx_respond_sign(
     })
     .to_json()?;
     p43::matrix::global::send_message(&room_id, &json).await
+}
+
+/// Approve an `ssh.sign_request` for a card-backed key using the card's User PIN.
+///
+/// The card's AUTH slot is used for signing (same slot the SSH agent uses).
+/// The User PIN (typically 6+ digits on YubiKey) unlocks the AUTH slot — it
+/// is NOT the Admin PIN or the Signing PIN.
+///
+/// On success the PIN is cached in memory keyed by card AID ident so that
+/// `mx_respond_sign_card_cached` can skip the PIN dialog for subsequent requests.
+#[frb]
+pub async fn mx_respond_sign_card(
+    room_id: String,
+    request_id: String,
+    pin: String,
+) -> anyhow::Result<()> {
+    let pending = pending_signs()
+        .lock()
+        .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
+        .remove(&request_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
+
+    let store_dir = default_store_dir();
+    let data = B64
+        .decode(&pending.data_b64)
+        .map_err(|e| anyhow::anyhow!("Bad base64 in sign request: {e}"))?;
+
+    let signature_b64 = p43::ssh_agent::sign_with_card_key(
+        &store_dir,
+        &pending.fingerprint,
+        &pin,
+        &data,
+        pending.flags,
+    )?;
+
+    // Cache the PIN keyed by each card AID associated with this fingerprint.
+    if let Some(meta) = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint) {
+        if let Ok(mut cache) = card_pin_cache().lock() {
+            for ident in &meta.card_idents {
+                cache.insert(ident.clone(), pin.clone());
+            }
+        }
+    }
+
+    let json = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+        request_id,
+        signature: signature_b64,
+    })
+    .to_json()?;
+    p43::matrix::global::send_message(&room_id, &json).await
+}
+
+/// Returns `true` if a cached PIN exists for the given card AID ident,
+/// meaning `mx_respond_sign_card_cached` can proceed without a PIN dialog.
+///
+/// `card_ident` is one of the strings from `KeyInfo.cardIdents`.
+#[frb]
+pub fn has_cached_card_pin(card_ident: String) -> bool {
+    card_pin_cache()
+        .lock()
+        .map(|m| m.contains_key(&card_ident))
+        .unwrap_or(false)
+}
+
+/// Approve an `ssh.sign_request` for a card-backed key using a cached PIN.
+///
+/// Returns an error if no PIN is cached for any card associated with this key.
+/// This is the auto-approve path after the first successful `mx_respond_sign_card`.
+#[frb]
+pub async fn mx_respond_sign_card_cached(
+    room_id: String,
+    request_id: String,
+) -> anyhow::Result<()> {
+    let pending = pending_signs()
+        .lock()
+        .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
+        .remove(&request_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
+
+    let store_dir = default_store_dir();
+    let data = B64
+        .decode(&pending.data_b64)
+        .map_err(|e| anyhow::anyhow!("Bad base64 in sign request: {e}"))?;
+
+    // Resolve card idents for this fingerprint, then look up a cached PIN.
+    let meta = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint)
+        .ok_or_else(|| anyhow::anyhow!("No key metadata found for fingerprint"))?;
+
+    let pin = {
+        let cache = card_pin_cache()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("card PIN cache lock poisoned: {e}"))?;
+        meta.card_idents
+            .iter()
+            .find_map(|id| cache.get(id).cloned())
+            .ok_or_else(|| anyhow::anyhow!("No cached PIN for this card — enter PIN first"))?
+    };
+
+    let signature_b64 = p43::ssh_agent::sign_with_card_key(
+        &store_dir,
+        &pending.fingerprint,
+        &pin,
+        &data,
+        pending.flags,
+    )?;
+
+    let json = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+        request_id,
+        signature: signature_b64,
+    })
+    .to_json()?;
+    p43::matrix::global::send_message(&room_id, &json).await
+}
+
+/// Return the number of User PIN attempts remaining for a connected YubiKey /
+/// OpenPGP card.  No PIN is required — this only reads PW status bytes.
+///
+/// `card_ident` is one of the strings from `KeyInfo.cardIdents`
+/// (e.g. `"0006:17684870"`).  Returns an error if no card with that ident is
+/// currently connected or accessible.
+#[frb]
+pub fn get_card_pin_retries(card_ident: String) -> anyhow::Result<u8> {
+    p43::pkcs11::card::card_pin_retries(Some(&card_ident))
 }
 
 /// Approve an `ssh.sign_request` without a passphrase dialog.

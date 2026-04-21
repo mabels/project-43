@@ -51,7 +51,7 @@ tokio        = { version = "1", features = ["sync", "rt", "time"], optional = tr
 futures-util = { version = "0.3", optional = true }
 
 # ssh feature
-ssh-key   = { version = "0.6", features = ["alloc", "ed25519", "rsa"], optional = true }
+ssh-key   = { version = "0.6", features = ["alloc", "ed25519", "rsa", "encryption"], optional = true }
 signature = { version = "2", optional = true }
 # rsa crate used directly for RSA signing (ssh-key 0.6.7 has a bug that passes
 # [p, p] instead of [p, q] when constructing rsa::RsaPrivateKey).

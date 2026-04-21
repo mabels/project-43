@@ -4,11 +4,10 @@ import 'package:p43/src/rust/frb_generated.dart';
 import 'package:path_provider/path_provider.dart';
 import 'src/screens/agent_screen.dart';
 import 'src/screens/key_list_screen.dart';
-import 'src/screens/matrix_login_screen.dart';
-import 'src/screens/matrix_room_list_screen.dart';
 import 'src/screens/settings_screen.dart';
 import 'src/services/notification_service.dart';
 import 'src/services/settings_service.dart';
+import 'src/services/window_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,6 +18,8 @@ Future<void> main() async {
   await SettingsService.instance.load();
   // Initialise notification service (requests OS permission on first run).
   await NotificationService.instance.init();
+  // Initialise window management (desktop only — no-op on mobile).
+  await WindowService.instance.init();
   // Attempt to restore a previously saved Matrix session.
   final loggedIn = await mxRestore();
   runApp(P43App(initiallyLoggedIn: loggedIn));
@@ -92,22 +93,21 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final chatScreen = _loggedIn
-        ? MatrixRoomListScreen(onLoggedOut: _onLoggedOut)
-        : MatrixLoginScreen(onLoggedIn: _onLoggedIn);
-
     return Scaffold(
       body: IndexedStack(
         index: _tabIndex,
         children: [
           const KeyListScreen(),
-          chatScreen,
           AgentScreen(
             onSignRequest: () {
-              if (_tabIndex != 2) setState(() => _tabIndex = 2);
+              if (_tabIndex != 1) setState(() => _tabIndex = 1);
             },
           ),
-          const SettingsScreen(),
+          SettingsScreen(
+            loggedIn: _loggedIn,
+            onLoggedIn: _onLoggedIn,
+            onLoggedOut: _onLoggedOut,
+          ),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -119,11 +119,6 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
             icon: Icon(Icons.key_outlined),
             selectedIcon: Icon(Icons.key),
             label: 'Keys',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.chat_bubble_outline),
-            selectedIcon: Icon(Icons.chat_bubble),
-            label: 'Chat',
           ),
           NavigationDestination(
             icon: Icon(Icons.terminal_outlined),

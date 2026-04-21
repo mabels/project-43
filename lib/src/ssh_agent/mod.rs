@@ -170,6 +170,9 @@ pub fn list_ssh_public_keys(store_dir: &Path) -> Vec<crate::protocol::SshKeyInfo
     let mut result = Vec::new();
 
     for entry in entries {
+        if !entry.enabled {
+            continue;
+        }
         let cert = match ks.find(&entry.fingerprint) {
             Ok(c) => c,
             Err(_) => continue,
@@ -203,14 +206,49 @@ pub fn list_ssh_public_keys(store_dir: &Path) -> Vec<crate::protocol::SshKeyInfo
         };
         let public_key_b64 = B64.encode(&ssh_wire);
 
+        let comment = ssh_comment(&entry.uid, &entry.card_idents);
         result.push(crate::protocol::SshKeyInfo {
             public_key: public_key_b64,
             fingerprint,
-            comment: entry.uid,
+            comment,
         });
     }
 
     result
+}
+
+/// Build the SSH identity comment shown by `ssh-add -l`.
+///
+/// For soft keys this is just the UID.  For card-backed keys each AID ident
+/// (format `"XXXX:YYYYYYYY"` from openpgp-card-sequoia) is formatted as
+/// `cardno:Y_YYY_YYY` and appended, e.g.:
+///
+/// ```text
+/// Abels<<Meno cardno:17_684_870
+/// ```
+fn ssh_comment(uid: &str, card_idents: &[String]) -> String {
+    if card_idents.is_empty() {
+        return uid.to_owned();
+    }
+    let labels: Vec<String> = card_idents.iter().map(|id| cardno_label(id)).collect();
+    format!("{} {}", uid, labels.join(", "))
+}
+
+/// Convert an AID ident string like `"0006:17684870"` to `"cardno:17_684_870"`.
+///
+/// Strips the manufacturer prefix before the colon, then groups the remaining
+/// digits in threes from the right with underscores.
+fn cardno_label(ident: &str) -> String {
+    let serial = ident.split(':').last().unwrap_or(ident);
+    let mut buf = String::with_capacity(serial.len() + 4);
+    for (i, ch) in serial.chars().enumerate() {
+        let from_right = serial.len() - i;
+        if i > 0 && from_right % 3 == 0 {
+            buf.push('_');
+        }
+        buf.push(ch);
+    }
+    format!("cardno:{buf}")
 }
 
 /// Return the OpenSSH `authorized_keys` line for the key at `fingerprint`.
@@ -346,6 +384,151 @@ fn openpgp_fp_for_ssh_fp(store_dir: &Path, ssh_fingerprint: &str) -> Result<Stri
     }
 
     anyhow::bail!("No key found with SSH fingerprint {ssh_fingerprint}")
+}
+
+/// Sign `data` using the OpenPGP card whose AID is registered against the key
+/// matching `ssh_fingerprint`.
+///
+/// Uses the card's AUTH slot via the User PIN (not the Signing PIN).
+/// Ed25519 cards perform PureEdDSA internally; RSA cards hash on-host and
+/// respect `flags` (SSH agent sign flags: 0x02 = SHA-256, 0x04 = SHA-512;
+/// anything else defaults to SHA-256).
+///
+/// Returns the SSH wire-encoded signature as base64.
+#[cfg(feature = "pcsc")]
+pub fn sign_with_card_key(
+    store_dir: &Path,
+    ssh_fingerprint: &str,
+    pin: &str,
+    data: &[u8],
+    flags: u32,
+) -> Result<String> {
+    use crate::pkcs11::card::open_card;
+    use openpgp_card_sequoia::types::KeyType;
+
+    // ── 1. Resolve SSH fp → OpenPGP fp → card ident ──────────────────────────
+    let openpgp_fp = openpgp_fp_for_ssh_fp(store_dir, ssh_fingerprint)?;
+    let ks = crate::key_store::store::KeyStore::open(store_dir)?;
+    let entry = ks
+        .list()?
+        .into_iter()
+        .find(|e| e.fingerprint == openpgp_fp)
+        .ok_or_else(|| anyhow::anyhow!("Key {} not found in index", openpgp_fp))?;
+
+    anyhow::ensure!(
+        !entry.card_idents.is_empty(),
+        "Key {} has no associated card — use the passphrase path",
+        openpgp_fp
+    );
+
+    // ── 2. Detect algorithm from cert's auth/sign key ─────────────────────────
+    let policy = StandardPolicy::new();
+    let cert = ks.find(&openpgp_fp)?;
+    let ka = cert
+        .keys()
+        .with_policy(&policy, None)
+        .for_authentication()
+        .next()
+        .or_else(|| cert.keys().with_policy(&policy, None).for_signing().next())
+        .or_else(|| cert.keys().with_policy(&policy, None).next())
+        .context("No usable key in cert")?;
+    let is_rsa = matches!(ka.key().mpis(), mpi::PublicKey::RSA { .. });
+
+    // ── 3. Open card and authenticate ─────────────────────────────────────────
+    let card_ident = entry.card_idents.first().unwrap();
+    let mut card =
+        open_card(Some(card_ident)).with_context(|| format!("Cannot open card {}", card_ident))?;
+    let mut tx = card
+        .transaction()
+        .context("Failed to open card transaction")?;
+
+    // Check that the auth slot is populated — surface a useful error if not.
+    let auth_present = tx
+        .public_key(KeyType::Authentication)
+        .ok()
+        .flatten()
+        .is_some();
+    anyhow::ensure!(
+        auth_present,
+        "Card {} has no key in the AUTH slot; import the card again",
+        card_ident
+    );
+
+    // User PIN unlocks the AUTH slot (distinct from the Signing PIN).
+    tx.verify_user_pin(pin)
+        .context("Card User PIN verification failed — wrong PIN?")?;
+
+    let mut user_card = tx
+        .to_user_card(None)
+        .context("Failed to enter user-card mode")?;
+
+    let mut auth = user_card
+        .authenticator(&|| eprintln!("Touch YubiKey now…"))
+        .context("Failed to acquire card authenticator")?;
+
+    // ── 4. Sign ───────────────────────────────────────────────────────────────
+    let (sig_bytes, algo) = if is_rsa {
+        // RSA: hash data on host, send digest to card.
+        // Mirror card_auth_sign_ssh: 0x04 → SHA-512, everything else → SHA-256.
+        let use_sha512 = flags & RSA_SHA2_512_FLAG != 0;
+        let (openpgp_hash, ssh_hash, digest_len) = if use_sha512 {
+            (
+                openpgp::types::HashAlgorithm::SHA512,
+                HashAlg::Sha512,
+                64usize,
+            )
+        } else {
+            (
+                openpgp::types::HashAlgorithm::SHA256,
+                HashAlg::Sha256,
+                32usize,
+            )
+        };
+        let mut ctx = openpgp_hash.context().context("Hash context unavailable")?;
+        ctx.update(data);
+        let mut digest = vec![0u8; digest_len];
+        ctx.digest(&mut digest)
+            .context("Failed to compute digest")?;
+
+        let sig_mpi = auth
+            .sign(openpgp_hash, &digest)
+            .context("Card RSA auth-slot signing failed")?;
+
+        let bytes = match &sig_mpi {
+            mpi::Signature::RSA { s } => s.value().to_vec(),
+            other => anyhow::bail!("Expected RSA signature from card, got {:?}", other),
+        };
+        (
+            bytes,
+            ssh_key::Algorithm::Rsa {
+                hash: Some(ssh_hash),
+            },
+        )
+    } else {
+        // Ed25519: PureEdDSA — card hashes internally; pass raw data.
+        let sig_mpi = auth
+            .sign(openpgp::types::HashAlgorithm::SHA512, data)
+            .context("Card Ed25519 auth-slot signing failed")?;
+
+        let bytes = match &sig_mpi {
+            mpi::Signature::EdDSA { r, s } => {
+                let mut v = Vec::with_capacity(64);
+                v.extend_from_slice(&r.value_padded(32).context("EdDSA r padding failed")?);
+                v.extend_from_slice(&s.value_padded(32).context("EdDSA s padding failed")?);
+                v
+            }
+            other => anyhow::bail!("Expected EdDSA signature from card, got {:?}", other),
+        };
+        (bytes, ssh_key::Algorithm::Ed25519)
+    };
+
+    // ── 5. Encode as SSH wire format ──────────────────────────────────────────
+    let ssh_sig = Signature::new(algo.clone(), sig_bytes)
+        .map_err(|e| anyhow::anyhow!("SSH signature encoding failed: {e}"))?;
+    let wire: Vec<u8> = ssh_sig
+        .try_into()
+        .map_err(|e: ssh_key::Error| anyhow::anyhow!("SSH wire encoding failed: {e}"))?;
+    Ok(B64.encode(wire))
 }
 
 /// Sign `data` using the soft key whose SSH fingerprint matches `ssh_fingerprint`.
@@ -851,6 +1034,17 @@ fn hash_data(algo: HashAlgorithm, data: &[u8]) -> Result<Vec<u8>> {
 }
 
 // ── MPI ↔ SSH conversion helpers ─────────────────────────────────────────────
+
+/// Convert an OpenPGP public-key MPI blob to an OpenSSH `authorized_keys`
+/// line.  Returns `None` for algorithms that have no SSH equivalent
+/// (e.g. ECDH encryption keys).  Used by the key-store to populate
+/// per-subkey SSH representations without duplicating the conversion logic.
+pub fn mpi_to_openssh_string(mpis: &mpi::PublicKey, comment: &str) -> Option<String> {
+    use ssh_key::public::PublicKey;
+    let key_data = mpi_pubkey_to_ssh_keydata(mpis).ok()?;
+    let pub_key = PublicKey::new(key_data, comment);
+    pub_key.to_openssh().ok()
+}
 
 fn mpi_pubkey_to_ssh_keydata(mpis: &mpi::PublicKey) -> Result<KeyData> {
     match mpis {

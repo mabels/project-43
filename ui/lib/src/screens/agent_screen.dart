@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:p43/src/rust/api/simple.dart';
 import '../services/notification_service.dart';
 import '../services/settings_service.dart';
+import '../services/window_service.dart';
 
 class AgentScreen extends StatefulWidget {
   const AgentScreen({super.key, this.onSignRequest});
@@ -57,23 +58,30 @@ class _AgentScreenState extends State<AgentScreen> {
           final autoApprove =
               SettingsService.instance.settings.autoApproveWhenCached;
 
-          // Jump to the agent tab immediately, before any async work.
+          // Switch to the agent tab so the request is visible.
           widget.onSignRequest?.call();
 
-          // Resolve key details and cache check concurrently.
-          final results = await Future.wait([
-            fp.isNotEmpty
-                ? getSshKeyDetails(fingerprint: fp)
-                : Future<SshKeyDetails?>.value(null),
-            if (autoApprove && fp.isNotEmpty)
-              hasCachedPassphrase(fingerprint: fp).then((v) => v as Object?)
-            else
-              Future.value(false),
-          ]);
+          // Resolve key details first so we know whether it's a card key.
+          final SshKeyDetails? details = fp.isNotEmpty
+              ? await getSshKeyDetails(fingerprint: fp)
+              : null;
           if (!mounted) return;
 
-          final details = results[0] as SshKeyDetails?;
-          final cached = autoApprove && (results[1] as bool? ?? false);
+          // Check the appropriate cache depending on key type.
+          final bool cached;
+          if (!autoApprove) {
+            cached = false;
+          } else if (details != null && details.cardIdents.isNotEmpty) {
+            // Card key — check PIN cache for any associated card ident.
+            cached = await Future.any(
+              details.cardIdents.map((id) => hasCachedCardPin(cardIdent: id)),
+            ).then((v) => v).catchError((_) => false);
+          } else if (fp.isNotEmpty) {
+            cached = await hasCachedPassphrase(fingerprint: fp);
+          } else {
+            cached = false;
+          }
+          if (!mounted) return;
 
           // Emit notification if enabled in settings.
           if (SettingsService.instance.settings.notifyOnSignRequest) {
@@ -84,6 +92,8 @@ class _AgentScreenState extends State<AgentScreen> {
               fingerprint: fp,
             );
           }
+
+          final isCardKey = details != null && details.cardIdents.isNotEmpty;
 
           if (cached) {
             // Auto-approve: add as responding immediately, no tile shown to user.
@@ -100,22 +110,26 @@ class _AgentScreenState extends State<AgentScreen> {
                     status: _RequestStatus.responding,
                   ),
                 ));
-            _autoRespondSign(roomId, event.requestId);
+            if (isCardKey) {
+              _autoRespondSignCard(roomId, event.requestId);
+            } else {
+              _autoRespondSign(roomId, event.requestId);
+            }
           } else {
-            // Manual approval required — show pending tile with buttons.
-            setState(() => _log.insert(
-                  0,
-                  _RequestEntry(
-                    type: 'ssh.sign_request',
-                    requestId: event.requestId,
-                    description: event.description,
-                    fingerprint: fp,
-                    keyName: details?.name,
-                    keyAlgo: details?.algo,
-                    cardIdents: details?.cardIdents ?? const [],
-                    status: _RequestStatus.pending,
-                  ),
-                ));
+            // Manual approval required — show pending tile with buttons,
+            // then immediately open the passphrase / PIN dialog.
+            final newEntry = _RequestEntry(
+              type: 'ssh.sign_request',
+              requestId: event.requestId,
+              description: event.description,
+              fingerprint: fp,
+              keyName: details?.name,
+              keyAlgo: details?.algo,
+              cardIdents: details?.cardIdents ?? const [],
+              status: _RequestStatus.pending,
+            );
+            setState(() => _log.insert(0, newEntry));
+            _approveSign(newEntry);
           }
         }
         // Keep log bounded.
@@ -134,6 +148,28 @@ class _AgentScreenState extends State<AgentScreen> {
     } catch (e) {
       // Cache miss or stale — surface as error so the user notices.
       _updateStatusWithError(requestId, e);
+    }
+  }
+
+  Future<void> _autoRespondSignCard(String roomId, String requestId) async {
+    try {
+      await mxRespondSignCardCached(roomId: roomId, requestId: requestId);
+      SettingsService.instance.resetCacheTimer();
+      _updateStatus(requestId, _RequestStatus.done);
+    } catch (e) {
+      // Cached PIN may have been evicted — fall back to PIN dialog.
+      _updateStatus(requestId, _RequestStatus.pending);
+      final entry = _log.firstWhere(
+        (e) => e.requestId == requestId,
+        orElse: () => _RequestEntry(
+          type: 'ssh.sign_request',
+          requestId: requestId,
+          description: null,
+          fingerprint: null,
+          status: _RequestStatus.pending,
+        ),
+      );
+      _approveSign(entry);
     }
   }
 
@@ -173,6 +209,52 @@ class _AgentScreenState extends State<AgentScreen> {
     final roomId = _agentRoom;
     if (roomId == null) return;
 
+    // Card-backed key: check PIN cache first, then prompt if needed.
+    if (entry.cardIdents.isNotEmpty) {
+      // Try any cached ident — if found, skip the dialog entirely.
+      bool pinCached = false;
+      for (final id in entry.cardIdents) {
+        if (await hasCachedCardPin(cardIdent: id)) {
+          pinCached = true;
+          break;
+        }
+      }
+
+      if (pinCached) {
+        _updateStatus(entry.requestId, _RequestStatus.responding);
+        try {
+          await mxRespondSignCardCached(
+            roomId: roomId,
+            requestId: entry.requestId,
+          );
+          SettingsService.instance.resetCacheTimer();
+          _updateStatus(entry.requestId, _RequestStatus.done);
+        } catch (_) {
+          // Stale cache — fall through to PIN dialog below.
+          pinCached = false;
+        }
+        if (pinCached) return;
+      }
+
+      // No cached PIN (or cache was stale) — show PIN dialog.
+      final pin = await _promptPin(entry);
+      if (pin == null) return; // cancelled
+      _updateStatus(entry.requestId, _RequestStatus.responding);
+      try {
+        await mxRespondSignCard(
+          roomId: roomId,
+          requestId: entry.requestId,
+          pin: pin,
+        );
+        SettingsService.instance.resetCacheTimer();
+        _updateStatus(entry.requestId, _RequestStatus.done);
+      } catch (e) {
+        _updateStatusWithError(entry.requestId, e);
+      }
+      return;
+    }
+
+    // Soft-key path ──────────────────────────────────────────────────────────
     final fp = entry.fingerprint ?? '';
 
     // If the passphrase for this key is already cached, skip the dialog.
@@ -254,13 +336,176 @@ class _AgentScreenState extends State<AgentScreen> {
 
     if (!mounted) return null;
 
+    // Bring the window forward — the user must type their passphrase.
+    WindowService.instance.bringToFront();
+
     final ctrl = TextEditingController();
+    var obscure = true; // captured by the StatefulBuilder closure
     return showDialog<String>(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+              backgroundColor: const Color(0xFF2C2C2E),
+              title: const Text('Key passphrase'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // ── Key context ─────────────────────────────────────────
+                  Container(
+                    width: double.infinity,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    margin: const EdgeInsets.only(bottom: 14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1C1C1E),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFF3A3A3C)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (details != null && details.name.isNotEmpty) ...[
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  _keyLabel(details.name, details.cardIdents),
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFFE5E5EA),
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (details.algo.isNotEmpty) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 5, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF3A3A3C),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    details.algo,
+                                    style: const TextStyle(
+                                      fontSize: 10,
+                                      fontFamily: 'monospace',
+                                      color: Color(0xFF8E8E93),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                        ],
+                        if (fp.isNotEmpty)
+                          Text(
+                            fp,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontFamily: 'monospace',
+                              color: Color(0xFF636366),
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        if (entry.description != null &&
+                            entry.description!.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            entry.description!,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF8E8E93),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  // ── Passphrase field ────────────────────────────────────
+                  TextField(
+                    controller: ctrl,
+                    obscureText: obscure,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      hintText: 'Enter passphrase',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscure
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                          size: 18,
+                          color: const Color(0xFF8E8E93),
+                        ),
+                        onPressed: () => setLocal(() => obscure = !obscure),
+                      ),
+                    ),
+                    onSubmitted: (_) => Navigator.pop(ctx, ctrl.text),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx, ctrl.text),
+                  child: const Text('Sign'),
+                ),
+              ],
+            ),
+          ),
+        );
+  }
+
+  Future<String?> _promptPin(_RequestEntry entry) async {
+    final fp = entry.fingerprint ?? '';
+    final firstIdent =
+        entry.cardIdents.isNotEmpty ? entry.cardIdents.first : null;
+
+    // Fetch key details and PIN retry counter concurrently — best-effort.
+    final futures = await Future.wait([
+      (entry.keyName != null)
+          ? Future<SshKeyDetails?>.value(SshKeyDetails(
+              name: entry.keyName!,
+              algo: entry.keyAlgo ?? '',
+              cardIdents: entry.cardIdents,
+            ))
+          : (fp.isNotEmpty
+              ? getSshKeyDetails(fingerprint: fp)
+              : Future<SshKeyDetails?>.value(null)),
+      if (firstIdent != null)
+        getCardPinRetries(cardIdent: firstIdent)
+            .then<int?>((v) => v)
+            .catchError((_) => null as int?)
+      else
+        Future<int?>.value(null),
+    ]);
+
+    if (!mounted) return null;
+
+    final details = futures[0] as SshKeyDetails?;
+    final pinRetries = futures[1] as int?;
+
+    // Bring the window forward — the user must enter their PIN.
+    WindowService.instance.bringToFront();
+
+    final ctrl = TextEditingController();
+    var obscure = true; // captured by StatefulBuilder closure
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
         backgroundColor: const Color(0xFF2C2C2E),
-        title: const Text('Key passphrase'),
+        title: const Text('Card PIN'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -268,7 +513,8 @@ class _AgentScreenState extends State<AgentScreen> {
             // ── Key context ───────────────────────────────────────────────
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               margin: const EdgeInsets.only(bottom: 14),
               decoration: BoxDecoration(
                 color: const Color(0xFF1C1C1E),
@@ -278,7 +524,6 @@ class _AgentScreenState extends State<AgentScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Key name + algo badge on the same row.
                   if (details != null && details.name.isNotEmpty) ...[
                     Row(
                       children: [
@@ -316,7 +561,6 @@ class _AgentScreenState extends State<AgentScreen> {
                     ),
                     const SizedBox(height: 4),
                   ],
-                  // SSH fingerprint — smaller, monospace, secondary.
                   if (fp.isNotEmpty)
                     Text(
                       fp,
@@ -327,7 +571,6 @@ class _AgentScreenState extends State<AgentScreen> {
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
-                  // Sign context / description from the desktop client.
                   if (entry.description != null &&
                       entry.description!.isNotEmpty) ...[
                     const SizedBox(height: 6),
@@ -342,14 +585,55 @@ class _AgentScreenState extends State<AgentScreen> {
                 ],
               ),
             ),
-            // ── Passphrase field ──────────────────────────────────────────
+            // ── PIN retry counter ─────────────────────────────────────────
+            if (pinRetries != null) ...[
+              Row(
+                children: [
+                  Icon(
+                    pinRetries <= 1
+                        ? Icons.warning_amber_rounded
+                        : Icons.pin_outlined,
+                    size: 14,
+                    color: pinRetries <= 1
+                        ? const Color(0xFFFF9F0A)
+                        : const Color(0xFF636366),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '$pinRetries attempt${pinRetries == 1 ? '' : 's'} remaining',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: pinRetries <= 1
+                          ? const Color(0xFFFF9F0A)
+                          : const Color(0xFF8E8E93),
+                      fontWeight: pinRetries <= 1
+                          ? FontWeight.w600
+                          : FontWeight.normal,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+            ],
+            // ── PIN field ─────────────────────────────────────────────────
             TextField(
               controller: ctrl,
-              obscureText: true,
+              obscureText: obscure,
               autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'Enter passphrase',
-                border: OutlineInputBorder(),
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                hintText: '4–8 digit PIN',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    obscure
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                    size: 18,
+                    color: const Color(0xFF8E8E93),
+                  ),
+                  onPressed: () => setLocal(() => obscure = !obscure),
+                ),
               ),
               onSubmitted: (_) => Navigator.pop(ctx, ctrl.text),
             ),
@@ -365,6 +649,7 @@ class _AgentScreenState extends State<AgentScreen> {
             child: const Text('Sign'),
           ),
         ],
+        ),
       ),
     );
   }
@@ -779,20 +1064,24 @@ class _StatusLabel extends StatelessWidget {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Converts a card ident like `"0006:17684870"` to `"cardno:17_684_870"`.
+String _cardnoFromIdent(String ident) {
+  final serial = ident.contains(':') ? ident.split(':').last : ident;
+  final buf = StringBuffer();
+  for (var i = 0; i < serial.length; i++) {
+    final fromRight = serial.length - i;
+    if (i > 0 && fromRight % 3 == 0) buf.write('_');
+    buf.write(serial[i]);
+  }
+  return 'cardno:$buf';
+}
+
 /// Build the display label for a key: `uid` optionally followed by
-/// `#<short-ident>` for each associated card.
-///
-/// Card ident strings are typically a long hex AID like
-/// `D2760001240102010006123456780000`.  We show only the last 8 characters
-/// (the serial-number portion) to keep the label compact:
-/// `Abels<<Meno#56780000`.  Multiple cards are separated by commas.
+/// `cardno:XX_XXX_XXX` for each associated card.
 String _keyLabel(String uid, List<String> cardIdents) {
   if (cardIdents.isEmpty) return uid;
-  final shorts = cardIdents.map((id) {
-    final s = id.replaceAll(RegExp(r'\s+'), '');
-    return '#${s.length > 8 ? s.substring(s.length - 8) : s}';
-  });
-  return '$uid ${shorts.join(', ')}';
+  final labels = cardIdents.map(_cardnoFromIdent);
+  return '$uid ${labels.join(', ')}';
 }
 
 // ── Data model ────────────────────────────────────────────────────────────────

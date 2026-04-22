@@ -66,8 +66,8 @@ async fn do_devices(_args: DevicesArgs, cfg: &MatrixConfig) -> Result<()> {
     }
 
     println!(
-        "{:<25}  {:<30}  {:<15}  {}",
-        "DEVICE ID", "DISPLAY NAME", "LAST SEEN IP", ""
+        "{:<25}  {:<30}  {:<15}",
+        "DEVICE ID", "DISPLAY NAME", "LAST SEEN IP"
     );
     println!("{}", "-".repeat(80));
 

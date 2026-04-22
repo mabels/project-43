@@ -34,11 +34,13 @@ pub fn run(
             label.as_deref(),
             Some(ttl),
             out,
-            card,
-            ident.as_deref(),
-            soft_key.as_deref(),
-            passphrase,
-            pin,
+            UnlockOpts {
+                use_card: card,
+                ident: ident.as_deref(),
+                soft_key: soft_key.as_deref(),
+                passphrase,
+                pin,
+            },
         ),
         BusCmd::Show { file } => cmd_show(&file),
         BusCmd::ListKeys => cmd_list_keys(&bus_dir),
@@ -53,14 +55,20 @@ pub fn run(
         } => cmd_encrypt(
             &bus_dir,
             &to,
-            device.as_deref(),
-            from_cert.as_deref(),
             &msg,
             &kind,
             out,
-            soft_key.as_deref(),
-            passphrase,
-            pin,
+            SenderOpts {
+                device: device.as_deref(),
+                from_cert: from_cert.as_deref(),
+            },
+            UnlockOpts {
+                use_card: false,
+                ident: None,
+                soft_key: soft_key.as_deref(),
+                passphrase,
+                pin,
+            },
         ),
 
         BusCmd::Decrypt { file, device } => cmd_decrypt(
@@ -75,6 +83,25 @@ pub fn run(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// ── Authority-unlock option bundle ───────────────────────────────────────────
+//
+// Groups the five authority-unlock parameters into one struct so callers stay
+// under clippy's `too_many_arguments` limit of 7.
+
+struct UnlockOpts<'a> {
+    use_card: bool,
+    ident: Option<&'a str>,
+    soft_key: Option<&'a Path>,
+    passphrase: Option<String>,
+    pin: Option<String>,
+}
+
+/// Sender context for `cmd_encrypt`.
+struct SenderOpts<'a> {
+    device: Option<&'a str>,
+    from_cert: Option<&'a Path>,
+}
 
 fn resolve_secret(explicit: Option<String>, env_var: &str, prompt: &str) -> Result<String> {
     if let Some(v) = explicit {
@@ -259,11 +286,7 @@ fn cmd_issue_cert(
     label: Option<&str>,
     ttl: Option<i64>,
     out: Option<PathBuf>,
-    use_card: bool,
-    ident: Option<&str>,
-    soft_key: Option<&Path>,
-    passphrase: Option<String>,
-    pin: Option<String>,
+    unlock: UnlockOpts<'_>,
 ) -> Result<()> {
     // Resolve the CSR path: explicit file takes precedence, then --label, then error.
     let csr_path_buf;
@@ -281,12 +304,12 @@ fn cmd_issue_cert(
     let encrypted = std::fs::read(&enc_path)
         .with_context(|| format!("read authority key blob from {}", enc_path.display()))?;
 
-    let authority_key = if use_card || soft_key.is_none() {
-        let card_pin = resolve_secret(pin, "YK_PIN", "YubiKey PIN: ")?;
-        p43::bus::authority::unlock_card(&encrypted, &card_pin, ident)?
+    let authority_key = if let (false, Some(key)) = (unlock.use_card, unlock.soft_key) {
+        let phrase = resolve_secret(unlock.passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
+        p43::bus::authority::unlock_soft(&encrypted, key, &phrase)?
     } else {
-        let phrase = resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
-        p43::bus::authority::unlock_soft(&encrypted, soft_key.unwrap(), &phrase)?
+        let card_pin = resolve_secret(unlock.pin, "YK_PIN", "YubiKey PIN: ")?;
+        p43::bus::authority::unlock_card(&encrypted, &card_pin, unlock.ident)?
     };
 
     let csr_bytes = DeviceCsr::load_bytes(csr_path)?;
@@ -549,14 +572,11 @@ fn resolve_recipient_cert(bus_dir: &Path, to: &str) -> Result<PathBuf> {
 fn cmd_encrypt(
     bus_dir: &Path,
     to: &str,
-    device: Option<&str>,
-    from_cert: Option<&Path>,
     msg: &str,
     kind: &str,
     out: Option<PathBuf>,
-    soft_key: Option<&Path>,
-    passphrase: Option<String>,
-    pin: Option<String>,
+    sender: SenderOpts<'_>,
+    unlock: UnlockOpts<'_>,
 ) -> Result<()> {
     let payload = MsgPayload {
         msg_id: Uuid::new_v4().to_string(),
@@ -568,19 +588,20 @@ fn cmd_encrypt(
     let to_cert_path = resolve_recipient_cert(bus_dir, to)?;
     let recipient_cert = DeviceCert::load(&to_cert_path)?;
 
-    let envelope = if device == Some("authority") {
+    let envelope = if sender.device == Some("authority") {
         // Sender is the authority — unlock AuthorityKey and use authority.cert.cbor.
         let enc_path = bus::authority_enc_path(bus_dir);
         let encrypted = std::fs::read(&enc_path)
             .with_context(|| format!("read authority key blob from {}", enc_path.display()))?;
-        let authority_key = if soft_key.is_none() {
-            let card_pin = resolve_secret(pin, "YK_PIN", "YubiKey PIN: ")?;
-            p43::bus::authority::unlock_card(&encrypted, &card_pin, None)?
+        let authority_key = if let Some(key) = unlock.soft_key {
+            let phrase = resolve_secret(unlock.passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
+            p43::bus::authority::unlock_soft(&encrypted, key, &phrase)?
         } else {
-            let phrase = resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
-            p43::bus::authority::unlock_soft(&encrypted, soft_key.unwrap(), &phrase)?
+            let card_pin = resolve_secret(unlock.pin, "YK_PIN", "YubiKey PIN: ")?;
+            p43::bus::authority::unlock_card(&encrypted, &card_pin, None)?
         };
-        let sender_cert_path = from_cert
+        let sender_cert_path = sender
+            .from_cert
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| bus::authority_cert_path(bus_dir));
         let sender_cert_bytes = std::fs::read(&sender_cert_path)
@@ -593,8 +614,9 @@ fn cmd_encrypt(
         )?
     } else {
         // Sender is a regular device key.
-        let (effective_label, _key_path, sender_key) = resolve_device_key(bus_dir, device)?;
-        let sender_cert_path = from_cert
+        let (effective_label, _key_path, sender_key) = resolve_device_key(bus_dir, sender.device)?;
+        let sender_cert_path = sender
+            .from_cert
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| bus::device_cert_path(bus_dir, &effective_label));
         let sender_cert_bytes = std::fs::read(&sender_cert_path)
@@ -655,12 +677,12 @@ fn cmd_decrypt(
         let enc_path = bus::authority_enc_path(bus_dir);
         let encrypted = std::fs::read(&enc_path)
             .with_context(|| format!("read authority key blob from {}", enc_path.display()))?;
-        let authority_key = if soft_key.is_none() {
+        let authority_key = if let Some(key) = soft_key {
+            let phrase = resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
+            p43::bus::authority::unlock_soft(&encrypted, key, &phrase)?
+        } else {
             let card_pin = resolve_secret(pin, "YK_PIN", "YubiKey PIN: ")?;
             p43::bus::authority::unlock_card(&encrypted, &card_pin, None)?
-        } else {
-            let phrase = resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
-            p43::bus::authority::unlock_soft(&encrypted, soft_key.unwrap(), &phrase)?
         };
         bus::decrypt(&authority_key, &envelope, &authority_sign_pub)?
     } else {

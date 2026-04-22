@@ -26,5 +26,8 @@ rpassword = "7"
 # Force bundled SQLite so Android doesn't need a system libsqlite3
 rusqlite = { version = "0.37", features = ["bundled"] }
 
+[features]
+telemetry = ["p43/telemetry"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

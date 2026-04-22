@@ -23,9 +23,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
-            libclang-dev \
-            llvm \
-            nettle-dev \
             libpcsclite-dev
 
       - name: install Rust stable
@@ -48,11 +45,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        # rust_lib_p43 (Flutter bridge) uses crypto-rust and is built by Flutter,
-        # not Rust CI.  Exclude it to avoid the crypto-nettle vs crypto-rust
-        # feature-unification conflict in sequoia-openpgp.
-        # Do NOT use --all-features: crypto-nettle and crypto-rust are mutually
-        # exclusive and must never be enabled together.
+        # rust_lib_p43 is the Flutter bridge crate — built by Flutter, not Rust CI.
         run: >
           cargo clippy
           --workspace --exclude rust_lib_p43

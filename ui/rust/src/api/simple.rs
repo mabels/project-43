@@ -1,5 +1,5 @@
-use anyhow::Context as _;
 use crate::frb_generated::StreamSink;
+use anyhow::Context as _;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use flutter_rust_bridge::frb;
 use p43::key_store::{keygen, store::KeyStore};
@@ -826,7 +826,8 @@ pub async fn mx_respond_csr(
     // Load authority public bundle (CBOR) and re-encode for the wire.
     let authority_pub = AuthorityPub::load(&bus::authority_pub_path(&bus_dir))
         .context("read authority.pub.cbor — run `p43 bus init` first")?;
-    let authority_pub_cbor = authority_pub.to_cbor_bytes()
+    let authority_pub_cbor = authority_pub
+        .to_cbor_bytes()
         .context("CBOR encode AuthorityPub for response")?;
 
     // Send response.
@@ -843,6 +844,359 @@ pub async fn mx_respond_csr(
     cert.save(&peer_path)?;
 
     Ok(())
+}
+
+/// Return the authority's public key bundle as a base64-encoded CBOR blob.
+///
+/// The returned string is suitable for embedding in a QR code and scanning
+/// on a desktop device to bootstrap bus trust.  The format is:
+///   `p43:bus:authority:<base64(CBOR AuthorityPub)>`
+#[frb]
+pub fn bus_authority_pub_qr_data() -> anyhow::Result<String> {
+    use p43::bus::{self, AuthorityPub};
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+    let authority_pub = AuthorityPub::load(&bus::authority_pub_path(&bus_dir))
+        .context("authority not initialised — run `p43 bus init` first")?;
+    let cbor = authority_pub.to_cbor_bytes()?;
+    Ok(format!(
+        "p43:bus:authority:{}",
+        base64::engine::general_purpose::STANDARD.encode(&cbor)
+    ))
+}
+
+/// Returns `true` when the bus authority has been initialised
+/// (`authority.key.enc` exists in the bus directory).
+#[frb]
+pub fn bus_has_authority() -> bool {
+    let store_dir = default_store_dir();
+    let bus_dir = p43::bus::bus_dir(&store_dir);
+    p43::bus::authority_enc_path(&bus_dir).exists()
+}
+
+/// Initialise the bus authority, sealing the encrypted key blob to **all**
+/// currently-imported OpenPGP keys (card keys and soft keys alike).
+///
+/// This is a public-key-only operation — no passphrase or PIN is required.
+/// Each imported key's `.pub.asc` file is used as a recipient.
+///
+/// Also writes `authority.pub.cbor` and a self-issued `authority.cert.cbor`.
+#[frb]
+pub fn bus_init_authority() -> anyhow::Result<()> {
+    use p43::bus::{self, CsrPayload, DeviceCert};
+    use p43::key_store::store::KeyStore;
+
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+
+    let ks = KeyStore::open(&store_dir)?;
+    let entries = ks.list()?;
+    anyhow::ensure!(
+        !entries.is_empty(),
+        "no keys imported yet — import at least one key first"
+    );
+
+    // Collect all public-key paths (card + soft) as recipients.
+    let pub_paths: Vec<std::path::PathBuf> = entries
+        .iter()
+        .map(|e| ks.pub_file_path(&e.fingerprint))
+        .collect();
+    let pub_path_refs: Vec<&std::path::Path> = pub_paths.iter().map(|p| p.as_path()).collect();
+
+    let (authority_key, authority_pub, encrypted) =
+        p43::bus::authority::generate_and_encrypt(&pub_path_refs)?;
+
+    // Write authority.key.enc.
+    let enc_path = bus::authority_enc_path(&bus_dir);
+    if let Some(parent) = enc_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&enc_path, &encrypted)
+        .with_context(|| format!("write {}", enc_path.display()))?;
+
+    // Write authority.pub.cbor.
+    authority_pub.save(&bus::authority_pub_path(&bus_dir))?;
+
+    // Self-issue authority.cert.cbor.
+    let authority_pub_key = authority_key.authority_pub();
+    let csr_payload = CsrPayload {
+        version: 1,
+        label: "authority".to_string(),
+        sign_pubkey: authority_pub_key.ed25519_pub.clone(),
+        ecdh_pubkey: authority_pub_key.x25519_pub.clone(),
+        nonce: vec![0u8; 16], // synthetic — no peer verification needed
+        timestamp: p43::bus::unix_now()?,
+    };
+    let cert = DeviceCert::issue(&csr_payload, &authority_key, None)?;
+    cert.save(&bus::authority_cert_path(&bus_dir))?;
+
+    Ok(())
+}
+
+// ── Authority unlock helper ───────────────────────────────────────────────────
+
+/// Decrypt the existing `authority.key.enc` using either a soft key or a card.
+fn unlock_authority(
+    encrypted: &[u8],
+    use_card: bool,
+    unlock_fingerprint: Option<&str>,
+    pin: Option<&str>,
+    passphrase: Option<&str>,
+) -> anyhow::Result<p43::bus::authority::AuthorityKey> {
+    use p43::key_store::store::KeyStore;
+    let store_dir = default_store_dir();
+
+    if use_card {
+        let card_pin = pin.ok_or_else(|| anyhow::anyhow!("pin required for card unlock"))?;
+        let ident: Option<String> = unlock_fingerprint.and_then(|fp| {
+            let ks = KeyStore::open(&store_dir).ok()?;
+            let entry = ks.list().ok()?.into_iter().find(|e| e.fingerprint == fp)?;
+            entry.card_idents.into_iter().next()
+        });
+        p43::bus::authority::unlock_card(encrypted, card_pin, ident.as_deref())
+    } else {
+        let fp = unlock_fingerprint
+            .ok_or_else(|| anyhow::anyhow!("unlock_fingerprint required for soft-key unlock"))?;
+        let phrase =
+            passphrase.ok_or_else(|| anyhow::anyhow!("passphrase required for soft-key unlock"))?;
+        let ks = KeyStore::open(&store_dir)?;
+        let key_file = ks.sec_file_path(fp);
+        anyhow::ensure!(
+            key_file.exists(),
+            "secret key file not found for fingerprint {fp}"
+        );
+        p43::bus::authority::unlock_soft(encrypted, &key_file, phrase)
+    }
+}
+
+// ── Key seal status ───────────────────────────────────────────────────────────
+
+/// Sealing status for a single keystore key.
+pub struct KeySealStatus {
+    pub fingerprint: String,
+    pub uid: String,
+    pub is_sealed: bool,
+    /// `true` → card key (unlock with PIN); `false` → soft key (unlock with passphrase).
+    pub has_card: bool,
+}
+
+/// Return the sealing status of every keystore key against the current
+/// `authority.key.enc`.  Returns an empty list when no authority exists.
+#[frb]
+pub fn bus_authority_key_seal_status() -> anyhow::Result<Vec<KeySealStatus>> {
+    use p43::bus;
+    use p43::key_store::store::KeyStore;
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+    let enc_path = bus::authority_enc_path(&bus_dir);
+    let ks = KeyStore::open(&store_dir)?;
+    let statuses = p43::bus::authority::key_seal_status(&enc_path, &ks)?;
+    Ok(statuses
+        .into_iter()
+        .map(|s| KeySealStatus {
+            fingerprint: s.fingerprint,
+            uid: s.uid,
+            is_sealed: s.is_sealed,
+            has_card: s.has_card,
+        })
+        .collect())
+}
+
+// ── Reseal ────────────────────────────────────────────────────────────────────
+
+/// Re-seal the authority key to **all** currently-imported keys.
+///
+/// The caller must supply credentials to unlock the existing authority:
+/// - `use_card = true`:  unlock via connected YubiKey using `pin`.
+/// - `use_card = false`: unlock via soft key at `unlock_fingerprint` using
+///   `passphrase`.
+#[frb]
+pub fn bus_reseal_authority(
+    use_card: bool,
+    unlock_fingerprint: Option<String>,
+    pin: Option<String>,
+    passphrase: Option<String>,
+) -> anyhow::Result<()> {
+    use p43::bus;
+    use p43::key_store::store::KeyStore;
+
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+    let enc_path = bus::authority_enc_path(&bus_dir);
+
+    let encrypted = std::fs::read(&enc_path)
+        .context("authority not initialised — run bus_init_authority() first")?;
+
+    let authority_key = unlock_authority(
+        &encrypted,
+        use_card,
+        unlock_fingerprint.as_deref(),
+        pin.as_deref(),
+        passphrase.as_deref(),
+    )?;
+
+    let ks = KeyStore::open(&store_dir)?;
+    let entries = ks.list()?;
+    anyhow::ensure!(
+        !entries.is_empty(),
+        "no keys in store — cannot reseal to empty recipient set"
+    );
+    let pub_paths: Vec<std::path::PathBuf> = entries
+        .iter()
+        .map(|e| ks.pub_file_path(&e.fingerprint))
+        .collect();
+    let pub_path_refs: Vec<&std::path::Path> = pub_paths.iter().map(|p| p.as_path()).collect();
+
+    let new_encrypted = p43::bus::authority::reseal(&authority_key, &pub_path_refs)?;
+    std::fs::write(&enc_path, &new_encrypted)
+        .with_context(|| format!("write {}", enc_path.display()))?;
+
+    Ok(())
+}
+
+/// Re-seal the authority key to all keys **except** `exclude_fingerprint`.
+///
+/// Use this when a key has been compromised and must be revoked from authority
+/// access.  At least one other sealed key must remain.
+///
+/// Credentials unlock the existing authority (use a key *other* than the one
+/// being excluded).
+#[frb]
+pub fn bus_reseal_authority_excluding(
+    exclude_fingerprint: String,
+    use_card: bool,
+    unlock_fingerprint: Option<String>,
+    pin: Option<String>,
+    passphrase: Option<String>,
+) -> anyhow::Result<()> {
+    use p43::bus;
+    use p43::key_store::store::KeyStore;
+
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+    let enc_path = bus::authority_enc_path(&bus_dir);
+
+    let encrypted = std::fs::read(&enc_path)
+        .context("authority not initialised — run bus_init_authority() first")?;
+
+    let authority_key = unlock_authority(
+        &encrypted,
+        use_card,
+        unlock_fingerprint.as_deref(),
+        pin.as_deref(),
+        passphrase.as_deref(),
+    )?;
+
+    let ks = KeyStore::open(&store_dir)?;
+    let entries = ks.list()?;
+    let remaining: Vec<_> = entries
+        .iter()
+        .filter(|e| e.fingerprint != exclude_fingerprint)
+        .collect();
+    anyhow::ensure!(
+        !remaining.is_empty(),
+        "cannot remove the last key — at least one recipient is required"
+    );
+    let pub_paths: Vec<std::path::PathBuf> = remaining
+        .iter()
+        .map(|e| ks.pub_file_path(&e.fingerprint))
+        .collect();
+    let pub_path_refs: Vec<&std::path::Path> = pub_paths.iter().map(|p| p.as_path()).collect();
+
+    let new_encrypted = p43::bus::authority::reseal(&authority_key, &pub_path_refs)?;
+    std::fs::write(&enc_path, &new_encrypted)
+        .with_context(|| format!("write {}", enc_path.display()))?;
+
+    Ok(())
+}
+
+/// Exported authority key bundle — encrypted private scalar + public key.
+///
+/// Both fields are required to fully restore the authority on another device.
+pub struct AuthorityKeyExport {
+    /// Raw bytes of `authority.key.enc` (OpenPGP-encrypted CBOR blob).
+    pub key_enc: Vec<u8>,
+    /// Raw bytes of `authority.pub.cbor` (CBOR-encoded [`AuthorityPub`]).
+    pub pub_cbor: Vec<u8>,
+}
+
+/// Export the authority key bundle so it can be backed up or transferred.
+///
+/// Returns an error if the authority has not been initialised.
+#[frb]
+pub fn bus_export_authority() -> anyhow::Result<AuthorityKeyExport> {
+    use p43::bus;
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+
+    let key_enc = std::fs::read(bus::authority_enc_path(&bus_dir))
+        .context("authority.key.enc not found — initialise the authority first")?;
+    let pub_cbor = std::fs::read(bus::authority_pub_path(&bus_dir))
+        .context("authority.pub.cbor not found — initialise the authority first")?;
+
+    Ok(AuthorityKeyExport { key_enc, pub_cbor })
+}
+
+/// Import an authority key bundle (overwriting any existing authority files).
+///
+/// Use this to restore an authority from a backup or to move it to a new
+/// device.  Both `key_enc` and `pub_cbor` must come from a prior
+/// [`bus_export_authority`] call.
+#[frb]
+pub fn bus_import_authority(key_enc: Vec<u8>, pub_cbor: Vec<u8>) -> anyhow::Result<()> {
+    use p43::bus;
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+
+    // Validate pub_cbor by round-tripping through AuthorityPub before writing.
+    p43::bus::AuthorityPub::from_cbor_bytes(&pub_cbor)
+        .context("pub_cbor is not a valid CBOR AuthorityPub")?;
+
+    if let Some(parent) = bus::authority_enc_path(&bus_dir).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(bus::authority_enc_path(&bus_dir), &key_enc)
+        .context("write authority.key.enc")?;
+    std::fs::write(bus::authority_pub_path(&bus_dir), &pub_cbor)
+        .context("write authority.pub.cbor")?;
+
+    Ok(())
+}
+
+/// Check whether any currently-imported keystore key can decrypt `key_enc`.
+///
+/// Returns the UIDs of all matching keys (could be more than one when the
+/// blob was sealed to multiple recipients).  Returns an **error** if no
+/// keystore key matches — the blob would be unrecoverable on this device.
+///
+/// Call this before writing the imported bundle to disk so users cannot
+/// accidentally import a bundle that none of their keys can open.
+#[frb]
+pub fn bus_authority_check_importable(key_enc: Vec<u8>) -> anyhow::Result<Vec<String>> {
+    use p43::key_store::store::KeyStore;
+    let ks = KeyStore::open(&default_store_dir())?;
+    p43::bus::authority::check_importable(&key_enc, &ks)
+}
+
+/// Return fingerprints of keystore keys whose encryption subkeys are **not**
+/// listed as recipients in the current `authority.key.enc`.
+///
+/// Returns an empty `Vec` when no authority exists yet or all keys are sealed.
+/// A non-empty return value means the Reseal tile should show a warning badge.
+#[frb]
+pub fn bus_authority_keys_not_sealed() -> anyhow::Result<Vec<String>> {
+    use p43::bus;
+    use p43::key_store::store::KeyStore;
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+    let enc_path = bus::authority_enc_path(&bus_dir);
+    let ks = KeyStore::open(&store_dir)?;
+    let statuses = p43::bus::authority::key_seal_status(&enc_path, &ks)?;
+    Ok(statuses
+        .into_iter()
+        .filter(|s| !s.is_sealed)
+        .map(|s| s.fingerprint)
+        .collect())
 }
 
 fn resolve_secret(explicit: Option<String>, env_var: &str, prompt: &str) -> anyhow::Result<String> {

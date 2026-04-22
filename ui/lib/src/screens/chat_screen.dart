@@ -63,9 +63,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _sendCtrl.clear();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Send failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Send failed: $e')));
       }
     } finally {
       if (mounted) setState(() => _sending = false);
@@ -134,11 +134,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         _MessageBubble(message: _messages[i]),
                   ),
           ),
-          _SendBar(
-            controller: _sendCtrl,
-            sending: _sending,
-            onSend: _send,
-          ),
+          _SendBar(controller: _sendCtrl, sending: _sending, onSend: _send),
         ],
       ),
     );

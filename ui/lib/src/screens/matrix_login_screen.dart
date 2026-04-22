@@ -26,7 +26,10 @@ class _MatrixLoginScreenState extends State<MatrixLoginScreen> {
   }
 
   Future<void> _login() async {
-    setState(() { _loading = true; _error = null; });
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
       await mxLogin(
         homeserver: _homeserverCtrl.text.trim(),
@@ -67,11 +70,7 @@ class _MatrixLoginScreenState extends State<MatrixLoginScreen> {
               hint: '@alice:matrix.org',
             ),
             const SizedBox(height: 12),
-            _Field(
-              controller: _passwordCtrl,
-              label: 'Password',
-              obscure: true,
-            ),
+            _Field(controller: _passwordCtrl, label: 'Password', obscure: true),
             if (_error != null) ...[
               const SizedBox(height: 12),
               Text(
@@ -94,7 +93,10 @@ class _MatrixLoginScreenState extends State<MatrixLoginScreen> {
             Text(
               'Your credentials are used only to authenticate with your homeserver '
               'and are never sent elsewhere.',
-              style: TextStyle(fontSize: 11, color: cs.onSurface.withValues(alpha: 0.4)),
+              style: TextStyle(
+                fontSize: 11,
+                color: cs.onSurface.withValues(alpha: 0.4),
+              ),
               textAlign: TextAlign.center,
             ),
           ],

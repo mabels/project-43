@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'simple.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `card_pin_cache`, `default_store_dir`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_signs`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`
+// These functions are ignored because they are not marked as `pub`: `card_pin_cache`, `default_store_dir`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_signs`, `resolve_secret`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`
 
 /// Initialise tracing.
 ///
@@ -263,6 +263,146 @@ Future<void> mxRespondListKeys({
   requestId: requestId,
 );
 
+/// Subscribe to `bus.csr_request` messages in `room_id`.
+///
+/// Each incoming CSR is surfaced as a [`BusCsrEvent`] on `sink`.
+/// Flutter shows a "pending device" tile; user approves by calling
+/// [`mx_respond_csr`].
+Stream<BusCsrEvent> mxListenBus({required String roomId}) =>
+    RustLib.instance.api.crateApiSimpleMxListenBus(roomId: roomId);
+
+/// Approve a device registration: verify the CSR, sign a cert with the
+/// authority key, and send `bus.cert_response` back into the room.
+///
+/// The authority key is unlocked using the card PIN (YubiKey) or passphrase
+/// (soft key), following the same priority as other operations:
+///   card=true  → PIN  (YK_PIN env or prompt)
+///   card=false → passphrase (YK_PASSPHRASE env or prompt)
+Future<void> mxRespondCsr({
+  required String roomId,
+  required String requestId,
+  required String csrB64,
+  PlatformInt64? ttlSecs,
+  required bool useCard,
+  String? pin,
+  String? passphrase,
+}) => RustLib.instance.api.crateApiSimpleMxRespondCsr(
+  roomId: roomId,
+  requestId: requestId,
+  csrB64: csrB64,
+  ttlSecs: ttlSecs,
+  useCard: useCard,
+  pin: pin,
+  passphrase: passphrase,
+);
+
+/// Return the authority's public key bundle as a base64-encoded CBOR blob.
+///
+/// The returned string is suitable for embedding in a QR code and scanning
+/// on a desktop device to bootstrap bus trust.  The format is:
+///   `p43:bus:authority:<base64(CBOR AuthorityPub)>`
+Future<String> busAuthorityPubQrData() =>
+    RustLib.instance.api.crateApiSimpleBusAuthorityPubQrData();
+
+/// Returns `true` when the bus authority has been initialised
+/// (`authority.key.enc` exists in the bus directory).
+Future<bool> busHasAuthority() =>
+    RustLib.instance.api.crateApiSimpleBusHasAuthority();
+
+/// Initialise the bus authority, sealing the encrypted key blob to **all**
+/// currently-imported OpenPGP keys (card keys and soft keys alike).
+///
+/// This is a public-key-only operation — no passphrase or PIN is required.
+/// Each imported key's `.pub.asc` file is used as a recipient.
+///
+/// Also writes `authority.pub.cbor` and a self-issued `authority.cert.cbor`.
+Future<void> busInitAuthority() =>
+    RustLib.instance.api.crateApiSimpleBusInitAuthority();
+
+/// Return the sealing status of every keystore key against the current
+/// `authority.key.enc`.  Returns an empty list when no authority exists.
+Future<List<KeySealStatus>> busAuthorityKeySealStatus() =>
+    RustLib.instance.api.crateApiSimpleBusAuthorityKeySealStatus();
+
+/// Re-seal the authority key to **all** currently-imported keys.
+///
+/// The caller must supply credentials to unlock the existing authority:
+/// - `use_card = true`:  unlock via connected YubiKey using `pin`.
+/// - `use_card = false`: unlock via soft key at `unlock_fingerprint` using
+///   `passphrase`.
+Future<void> busResealAuthority({
+  required bool useCard,
+  String? unlockFingerprint,
+  String? pin,
+  String? passphrase,
+}) => RustLib.instance.api.crateApiSimpleBusResealAuthority(
+  useCard: useCard,
+  unlockFingerprint: unlockFingerprint,
+  pin: pin,
+  passphrase: passphrase,
+);
+
+/// Re-seal the authority key to all keys **except** `exclude_fingerprint`.
+///
+/// Use this when a key has been compromised and must be revoked from authority
+/// access.  At least one other sealed key must remain.
+///
+/// Credentials unlock the existing authority (use a key *other* than the one
+/// being excluded).
+Future<void> busResealAuthorityExcluding({
+  required String excludeFingerprint,
+  required bool useCard,
+  String? unlockFingerprint,
+  String? pin,
+  String? passphrase,
+}) => RustLib.instance.api.crateApiSimpleBusResealAuthorityExcluding(
+  excludeFingerprint: excludeFingerprint,
+  useCard: useCard,
+  unlockFingerprint: unlockFingerprint,
+  pin: pin,
+  passphrase: passphrase,
+);
+
+/// Export the authority key bundle so it can be backed up or transferred.
+///
+/// Returns an error if the authority has not been initialised.
+Future<AuthorityKeyExport> busExportAuthority() =>
+    RustLib.instance.api.crateApiSimpleBusExportAuthority();
+
+/// Import an authority key bundle (overwriting any existing authority files).
+///
+/// Use this to restore an authority from a backup or to move it to a new
+/// device.  Both `key_enc` and `pub_cbor` must come from a prior
+/// [`bus_export_authority`] call.
+Future<void> busImportAuthority({
+  required List<int> keyEnc,
+  required List<int> pubCbor,
+}) => RustLib.instance.api.crateApiSimpleBusImportAuthority(
+  keyEnc: keyEnc,
+  pubCbor: pubCbor,
+);
+
+/// Check whether any currently-imported keystore key can decrypt `key_enc`.
+///
+/// Returns the UIDs of all matching keys (could be more than one when the
+/// blob was sealed to multiple recipients).  Returns an **error** if no
+/// keystore key matches — the blob would be unrecoverable on this device.
+///
+/// Call this before writing the imported bundle to disk so users cannot
+/// accidentally import a bundle that none of their keys can open.
+Future<List<String>> busAuthorityCheckImportable({required List<int> keyEnc}) =>
+    RustLib.instance.api.crateApiSimpleBusAuthorityCheckImportable(
+      keyEnc: keyEnc,
+    );
+
+/// Return fingerprints of keystore keys whose encryption subkeys are **not**
+/// listed as recipients in the current `authority.key.enc`.
+///
+/// Returns an empty `Vec` when no authority exists yet or all keys are sealed.
+/// A non-empty return value means the Reseal tile should show a warning badge.
+Future<List<String>> busAuthorityKeysNotSealed() =>
+    RustLib.instance.api.crateApiSimpleBusAuthorityKeysNotSealed();
+
 /// Returns `true` if cached credentials exist for the given SSH fingerprint,
 /// meaning `mx_respond_sign_cached` can proceed without a passphrase dialog.
 ///
@@ -428,6 +568,64 @@ sealed class AgentRequest with _$AgentRequest {
   }) = AgentRequest_Sign;
 }
 
+/// Exported authority key bundle — encrypted private scalar + public key.
+///
+/// Both fields are required to fully restore the authority on another device.
+class AuthorityKeyExport {
+  /// Raw bytes of `authority.key.enc` (OpenPGP-encrypted CBOR blob).
+  final Uint8List keyEnc;
+
+  /// Raw bytes of `authority.pub.cbor` (CBOR-encoded [`AuthorityPub`]).
+  final Uint8List pubCbor;
+
+  const AuthorityKeyExport({required this.keyEnc, required this.pubCbor});
+
+  @override
+  int get hashCode => keyEnc.hashCode ^ pubCbor.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AuthorityKeyExport &&
+          runtimeType == other.runtimeType &&
+          keyEnc == other.keyEnc &&
+          pubCbor == other.pubCbor;
+}
+
+/// A pending device registration request surfaced from the Matrix room.
+class BusCsrEvent {
+  final String requestId;
+  final String deviceLabel;
+  final String deviceId;
+
+  /// Base64-encoded COSE_Sign1 CSR bytes — passed back to mx_respond_csr.
+  final String csrB64;
+
+  const BusCsrEvent({
+    required this.requestId,
+    required this.deviceLabel,
+    required this.deviceId,
+    required this.csrB64,
+  });
+
+  @override
+  int get hashCode =>
+      requestId.hashCode ^
+      deviceLabel.hashCode ^
+      deviceId.hashCode ^
+      csrB64.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BusCsrEvent &&
+          runtimeType == other.runtimeType &&
+          requestId == other.requestId &&
+          deviceLabel == other.deviceLabel &&
+          deviceId == other.deviceId &&
+          csrB64 == other.csrB64;
+}
+
 /// Summary of a connected OpenPGP card returned by [list_connected_cards].
 class ConnectedCardInfo {
   final String ident;
@@ -509,6 +707,40 @@ class KeyInfo {
           enabled == other.enabled &&
           cardIdents == other.cardIdents &&
           subkeys == other.subkeys;
+}
+
+/// Sealing status for a single keystore key.
+class KeySealStatus {
+  final String fingerprint;
+  final String uid;
+  final bool isSealed;
+
+  /// `true` → card key (unlock with PIN); `false` → soft key (unlock with passphrase).
+  final bool hasCard;
+
+  const KeySealStatus({
+    required this.fingerprint,
+    required this.uid,
+    required this.isSealed,
+    required this.hasCard,
+  });
+
+  @override
+  int get hashCode =>
+      fingerprint.hashCode ^
+      uid.hashCode ^
+      isSealed.hashCode ^
+      hasCard.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KeySealStatus &&
+          runtimeType == other.runtimeType &&
+          fingerprint == other.fingerprint &&
+          uid == other.uid &&
+          isSealed == other.isSealed &&
+          hasCard == other.hasCard;
 }
 
 class MxDeviceInfo {

@@ -93,7 +93,9 @@ class _GenerateKeyScreenState extends State<GenerateKeyScreen> {
                 enabled: !_busy,
                 validator: (v) {
                   if (v == null || v.trim().isEmpty) return 'Email is required';
-                  if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(v.trim())) {
+                  if (!RegExp(
+                    r'^[^\s@]+@[^\s@]+\.[^\s@]+$',
+                  ).hasMatch(v.trim())) {
                     return 'Enter a valid email address';
                   }
                   return null;
@@ -221,10 +223,7 @@ class _Field extends StatelessWidget {
               const SizedBox(width: 4),
               Text(
                 '($hint)',
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: Color(0xFF636366),
-                ),
+                style: const TextStyle(fontSize: 11, color: Color(0xFF636366)),
               ),
             ],
           ],
@@ -260,8 +259,10 @@ class _Field extends StatelessWidget {
               borderRadius: BorderRadius.circular(8),
               borderSide: const BorderSide(color: Color(0xFFFF453A)),
             ),
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 10,
+            ),
           ),
         ),
       ],
@@ -318,8 +319,10 @@ class _DropdownField extends StatelessWidget {
               borderRadius: BorderRadius.circular(8),
               borderSide: const BorderSide(color: Color(0xFF0A84FF)),
             ),
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 10,
+            ),
           ),
           items: items
               .map((a) => DropdownMenuItem(value: a, child: Text(a)))

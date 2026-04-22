@@ -45,6 +45,8 @@ dependencies:
   # OpenTelemetry — traces exported via OTLP HTTP to Jaeger / any OTel collector.
   # https://pub.dev/packages/opentelemetry
   opentelemetry: ^0.18.11
+  # QR code rendering — used in Settings to export the authority pubkey.
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:

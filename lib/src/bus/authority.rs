@@ -191,6 +191,132 @@ pub fn unlock_card(encrypted: &[u8], pin: &str, ident: Option<&str>) -> Result<A
     parse_secret(plain)
 }
 
+// ── Import validation helpers ─────────────────────────────────────────────────
+
+/// Parse PKESK headers from an OpenPGP-encrypted blob and return every
+/// recipient key handle (as [`openpgp::KeyHandle`]) without decrypting anything.
+fn extract_pkesk_recipients(key_enc: &[u8]) -> Result<Vec<openpgp::KeyHandle>> {
+    use openpgp::packet::Packet;
+    use openpgp::parse::{PacketParser, PacketParserResult};
+
+    let mut recipients = Vec::new();
+    let mut ppr =
+        PacketParser::from_bytes(key_enc).context("parse OpenPGP packets from key_enc")?;
+    while let PacketParserResult::Some(pp) = ppr {
+        if let Packet::PKESK(pkesk) = &pp.packet {
+            // recipient() returns &KeyID; wrap in KeyHandle for aliases() checks.
+            recipients.push(openpgp::KeyHandle::from(pkesk.recipient().clone()));
+        }
+        let (_, next_ppr) = pp.recurse().context("advance packet parser")?;
+        ppr = next_ppr;
+    }
+    Ok(recipients)
+}
+
+/// Check which keys in `store` can decrypt `key_enc`.
+///
+/// Returns the UIDs of all matching keys.  Errors if the blob has no PKESK
+/// packets or none of the store keys match.
+pub fn check_importable(
+    key_enc: &[u8],
+    store: &crate::key_store::store::KeyStore,
+) -> Result<Vec<String>> {
+    let recipients = extract_pkesk_recipients(key_enc)?;
+    anyhow::ensure!(
+        !recipients.is_empty(),
+        "no PKESK packets found — this does not look like an encrypted authority bundle"
+    );
+
+    let entries = store.list()?;
+    let policy = StandardPolicy::new();
+    let mut matching = Vec::new();
+
+    for entry in &entries {
+        let cert = match store.find(&entry.fingerprint) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let matches = cert
+            .keys()
+            .with_policy(&policy, None)
+            .supported()
+            .alive()
+            .revoked(false)
+            .for_transport_encryption()
+            .any(|key| {
+                let handle = key.key_handle();
+                recipients.iter().any(|r| r.aliases(&handle))
+            });
+        if matches {
+            matching.push(entry.uid.clone());
+        }
+    }
+
+    anyhow::ensure!(
+        !matching.is_empty(),
+        "none of your imported keys can unlock this bundle — \
+         import the correct key first, or use a different device"
+    );
+
+    Ok(matching)
+}
+
+/// One key's sealing status — returned by [`key_seal_status`].
+pub struct KeySealStatus {
+    pub fingerprint: String,
+    pub uid: String,
+    pub is_sealed: bool,
+    /// `true` when this key lives on an OpenPGP card (needs a PIN to unlock),
+    /// `false` for soft keys (needs a passphrase).
+    pub has_card: bool,
+}
+
+/// Return the sealing status of every keystore key against `authority.key.enc`
+/// at `enc_path`.
+///
+/// Returns an empty `Vec` when no authority exists yet.
+pub fn key_seal_status(
+    enc_path: &std::path::Path,
+    store: &crate::key_store::store::KeyStore,
+) -> Result<Vec<KeySealStatus>> {
+    if !enc_path.exists() {
+        return Ok(vec![]);
+    }
+
+    let key_enc = std::fs::read(enc_path).context("read authority.key.enc")?;
+    let recipients = extract_pkesk_recipients(&key_enc)?;
+
+    let entries = store.list()?;
+    let policy = StandardPolicy::new();
+    let mut result = Vec::new();
+
+    for entry in &entries {
+        let cert = match store.find(&entry.fingerprint) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let is_sealed = cert
+            .keys()
+            .with_policy(&policy, None)
+            .supported()
+            .alive()
+            .revoked(false)
+            .for_transport_encryption()
+            .any(|key| {
+                let handle = key.key_handle();
+                recipients.iter().any(|r| r.aliases(&handle))
+            });
+        result.push(KeySealStatus {
+            fingerprint: entry.fingerprint.clone(),
+            uid: entry.uid.clone(),
+            is_sealed,
+            has_card: !entry.card_idents.is_empty(),
+        });
+    }
+
+    Ok(result)
+}
+
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 fn parse_secret(plain: Vec<u8>) -> Result<AuthorityKey> {

@@ -22,7 +22,9 @@ class _MatrixRoomListScreenState extends State<MatrixRoomListScreen> {
   }
 
   void _reload() {
-    setState(() { _roomsFuture = mxListRooms(); });
+    setState(() {
+      _roomsFuture = mxListRooms();
+    });
   }
 
   Future<void> _logout() async {
@@ -31,9 +33,9 @@ class _MatrixRoomListScreenState extends State<MatrixRoomListScreen> {
       widget.onLoggedOut();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Logout failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Logout failed: $e')));
       }
     }
   }
@@ -71,9 +73,9 @@ class _MatrixRoomListScreenState extends State<MatrixRoomListScreen> {
       _reload();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to join: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to join: $e')));
       }
     }
   }
@@ -152,9 +154,7 @@ class _MatrixRoomListScreenState extends State<MatrixRoomListScreen> {
                 room: rooms[i],
                 onTap: () => Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (_) => ChatScreen(room: rooms[i]),
-                  ),
+                  MaterialPageRoute(builder: (_) => ChatScreen(room: rooms[i])),
                 ),
               ),
             ),

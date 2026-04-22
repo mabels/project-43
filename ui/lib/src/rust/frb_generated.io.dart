@@ -27,6 +27,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<BusCsrEvent> dco_decode_StreamSink_bus_csr_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   RustStreamSink<MxMessage> dco_decode_StreamSink_mx_message_Sse(dynamic raw);
 
   @protected
@@ -41,16 +46,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentRequest dco_decode_agent_request(dynamic raw);
 
   @protected
+  AuthorityKeyExport dco_decode_authority_key_export(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
   SshKeyDetails dco_decode_box_autoadd_ssh_key_details(dynamic raw);
 
   @protected
+  BusCsrEvent dco_decode_bus_csr_event(dynamic raw);
+
+  @protected
   ConnectedCardInfo dco_decode_connected_card_info(dynamic raw);
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
   KeyInfo dco_decode_key_info(dynamic raw);
+
+  @protected
+  KeySealStatus dco_decode_key_seal_status(dynamic raw);
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
@@ -60,6 +80,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<KeyInfo> dco_decode_list_key_info(dynamic raw);
+
+  @protected
+  List<KeySealStatus> dco_decode_list_key_seal_status(dynamic raw);
 
   @protected
   List<MxDeviceInfo> dco_decode_list_mx_device_info(dynamic raw);
@@ -98,6 +121,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
+
+  @protected
   SshKeyDetails? dco_decode_opt_box_autoadd_ssh_key_details(dynamic raw);
 
   @protected
@@ -121,6 +147,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<BusCsrEvent> sse_decode_StreamSink_bus_csr_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RustStreamSink<MxMessage> sse_decode_StreamSink_mx_message_Sse(
     SseDeserializer deserializer,
   );
@@ -137,7 +168,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentRequest sse_decode_agent_request(SseDeserializer deserializer);
 
   @protected
+  AuthorityKeyExport sse_decode_authority_key_export(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
   SshKeyDetails sse_decode_box_autoadd_ssh_key_details(
@@ -145,12 +184,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BusCsrEvent sse_decode_bus_csr_event(SseDeserializer deserializer);
+
+  @protected
   ConnectedCardInfo sse_decode_connected_card_info(
     SseDeserializer deserializer,
   );
 
   @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
   KeyInfo sse_decode_key_info(SseDeserializer deserializer);
+
+  @protected
+  KeySealStatus sse_decode_key_seal_status(SseDeserializer deserializer);
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
@@ -162,6 +210,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<KeyInfo> sse_decode_list_key_info(SseDeserializer deserializer);
+
+  @protected
+  List<KeySealStatus> sse_decode_list_key_seal_status(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<MxDeviceInfo> sse_decode_list_mx_device_info(
@@ -202,6 +255,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
   SshKeyDetails? sse_decode_opt_box_autoadd_ssh_key_details(
     SseDeserializer deserializer,
   );
@@ -234,6 +290,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_StreamSink_bus_csr_event_Sse(
+    RustStreamSink<BusCsrEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_StreamSink_mx_message_Sse(
     RustStreamSink<MxMessage> self,
     SseSerializer serializer,
@@ -252,7 +314,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_agent_request(AgentRequest self, SseSerializer serializer);
 
   @protected
+  void sse_encode_authority_key_export(
+    AuthorityKeyExport self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_i_64(
+    PlatformInt64 self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_ssh_key_details(
@@ -261,13 +335,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_bus_csr_event(BusCsrEvent self, SseSerializer serializer);
+
+  @protected
   void sse_encode_connected_card_info(
     ConnectedCardInfo self,
     SseSerializer serializer,
   );
 
   @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
   void sse_encode_key_info(KeyInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_key_seal_status(KeySealStatus self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
@@ -280,6 +363,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_key_info(List<KeyInfo> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_key_seal_status(
+    List<KeySealStatus> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_mx_device_info(
@@ -331,6 +420,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_i_64(
+    PlatformInt64? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_ssh_key_details(

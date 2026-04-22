@@ -74,9 +74,9 @@ class _VerifyScreenState extends State<VerifyScreen> {
       await mxConfirmVerify(confirmed: accepted);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
   }
@@ -108,9 +108,7 @@ class _VerifyScreenState extends State<VerifyScreen> {
                 alignment: WrapAlignment.center,
                 spacing: 12,
                 runSpacing: 12,
-                children: _emojis
-                    .map((e) => _EmojiTile(emoji: e))
-                    .toList(),
+                children: _emojis.map((e) => _EmojiTile(emoji: e)).toList(),
               ),
             ],
             const SizedBox(height: 32),

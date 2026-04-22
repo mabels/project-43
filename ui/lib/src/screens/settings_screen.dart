@@ -3,7 +3,6 @@ import '../services/settings_service.dart';
 import 'matrix_login_screen.dart';
 import 'matrix_room_list_screen.dart';
 import 'settings/agent_section.dart';
-import 'settings/authority_section.dart';
 import 'settings/shared_widgets.dart';
 import 'settings/telemetry_section.dart';
 
@@ -76,18 +75,24 @@ class SettingsScreen extends StatelessWidget {
                 onTap: () => _openMatrix(context),
               ),
 
-              // ── Bus Authority ─────────────────────────────────────────
+              // ── Devices ───────────────────────────────────────────────
               const Divider(height: 32),
-              SettingsSectionHeader('Bus Authority'),
-              const AuthorityStatusTile(),
-              const SizedBox(height: 1),
-              const AuthorityQrTile(),
-              const SizedBox(height: 1),
-              const AuthorityResealTile(),
-              const SizedBox(height: 1),
-              const AuthorityExportTile(),
-              const SizedBox(height: 1),
-              const AuthorityImportTile(),
+              SettingsSectionHeader('Devices'),
+              _DeviceCertTtlTile(
+                current: s.deviceCertTtlDays,
+                onChanged: (v) => SettingsService.instance.save(
+                  s.copyWith(deviceCertTtlDays: v),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+                child: Text(
+                  'How long a device certificate is valid after being issued. '
+                  'Devices must re-register when their certificate expires.',
+                  style: TextStyle(fontSize: 11, color: Color(0xFF8E8E93)),
+                ),
+              ),
+              const SizedBox(height: 8),
 
               // ── Agent ─────────────────────────────────────────────────
               const Divider(height: 32),
@@ -201,6 +206,87 @@ class SettingsScreen extends StatelessWidget {
           );
         },
       ),
+    );
+  }
+}
+
+// ── Device cert TTL tile ──────────────────────────────────────────────────────
+
+class _DeviceCertTtlTile extends StatelessWidget {
+  const _DeviceCertTtlTile({
+    required this.current,
+    required this.onChanged,
+  });
+
+  final int current;
+  final ValueChanged<int> onChanged;
+
+  static const _options = [30, 60, 90, 180, 365];
+
+  String _label(int days) {
+    if (days == 0) return 'No expiry';
+    if (days % 365 == 0) {
+      final y = days ~/ 365;
+      return '$y ${y == 1 ? 'year' : 'years'}';
+    }
+    if (days % 30 == 0) {
+      final m = days ~/ 30;
+      return '$m ${m == 1 ? 'month' : 'months'}';
+    }
+    return '$days days';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      tileColor: const Color(0xFF2C2C2E),
+      contentPadding:
+          const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      title: const Text(
+        'Certificate validity',
+        style: TextStyle(fontSize: 15),
+      ),
+      subtitle: Text(
+        _label(current),
+        style: const TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
+      ),
+      trailing: const Icon(
+        Icons.chevron_right,
+        size: 18,
+        color: Color(0xFF8E8E93),
+      ),
+      onTap: () async {
+        final picked = await showDialog<int>(
+          context: context,
+          builder: (ctx) => SimpleDialog(
+            backgroundColor: const Color(0xFF2C2C2E),
+            title: const Text(
+              'Certificate validity',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            ),
+            children: [
+              for (final days in _options)
+                ListTile(
+                  leading: Icon(
+                    days == current
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_off,
+                    size: 18,
+                    color: days == current
+                        ? const Color(0xFF0A84FF)
+                        : const Color(0xFF8E8E93),
+                  ),
+                  title: Text(
+                    _label(days),
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                  onTap: () => Navigator.pop(ctx, days),
+                ),
+            ],
+          ),
+        );
+        if (picked != null) onChanged(picked);
+      },
     );
   }
 }

@@ -452,6 +452,374 @@ abstract class AgentRequest_Sign extends AgentRequest {
 }
 
 /// @nodoc
+mixin _$AppMessage {
+  Object get event => throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(AgentRequest event) agentEvent,
+    required TResult Function(BusCsrEvent event) busEvent,
+  }) => throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(AgentRequest event)? agentEvent,
+    TResult? Function(BusCsrEvent event)? busEvent,
+  }) => throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(AgentRequest event)? agentEvent,
+    TResult Function(BusCsrEvent event)? busEvent,
+    required TResult orElse(),
+  }) => throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(AppMessage_AgentEvent value) agentEvent,
+    required TResult Function(AppMessage_BusEvent value) busEvent,
+  }) => throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(AppMessage_AgentEvent value)? agentEvent,
+    TResult? Function(AppMessage_BusEvent value)? busEvent,
+  }) => throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(AppMessage_AgentEvent value)? agentEvent,
+    TResult Function(AppMessage_BusEvent value)? busEvent,
+    required TResult orElse(),
+  }) => throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $AppMessageCopyWith<$Res> {
+  factory $AppMessageCopyWith(
+    AppMessage value,
+    $Res Function(AppMessage) then,
+  ) = _$AppMessageCopyWithImpl<$Res, AppMessage>;
+}
+
+/// @nodoc
+class _$AppMessageCopyWithImpl<$Res, $Val extends AppMessage>
+    implements $AppMessageCopyWith<$Res> {
+  _$AppMessageCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+}
+
+/// @nodoc
+abstract class _$$AppMessage_AgentEventImplCopyWith<$Res> {
+  factory _$$AppMessage_AgentEventImplCopyWith(
+    _$AppMessage_AgentEventImpl value,
+    $Res Function(_$AppMessage_AgentEventImpl) then,
+  ) = __$$AppMessage_AgentEventImplCopyWithImpl<$Res>;
+  @useResult
+  $Res call({AgentRequest event});
+
+  $AgentRequestCopyWith<$Res> get event;
+}
+
+/// @nodoc
+class __$$AppMessage_AgentEventImplCopyWithImpl<$Res>
+    extends _$AppMessageCopyWithImpl<$Res, _$AppMessage_AgentEventImpl>
+    implements _$$AppMessage_AgentEventImplCopyWith<$Res> {
+  __$$AppMessage_AgentEventImplCopyWithImpl(
+    _$AppMessage_AgentEventImpl _value,
+    $Res Function(_$AppMessage_AgentEventImpl) _then,
+  ) : super(_value, _then);
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({Object? event = null}) {
+    return _then(
+      _$AppMessage_AgentEventImpl(
+        event: null == event
+            ? _value.event
+            : event // ignore: cast_nullable_to_non_nullable
+                  as AgentRequest,
+      ),
+    );
+  }
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $AgentRequestCopyWith<$Res> get event {
+    return $AgentRequestCopyWith<$Res>(_value.event, (value) {
+      return _then(_value.copyWith(event: value));
+    });
+  }
+}
+
+/// @nodoc
+
+class _$AppMessage_AgentEventImpl extends AppMessage_AgentEvent {
+  const _$AppMessage_AgentEventImpl({required this.event}) : super._();
+
+  @override
+  final AgentRequest event;
+
+  @override
+  String toString() {
+    return 'AppMessage.agentEvent(event: $event)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$AppMessage_AgentEventImpl &&
+            (identical(other.event, event) || other.event == event));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, event);
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$AppMessage_AgentEventImplCopyWith<_$AppMessage_AgentEventImpl>
+  get copyWith =>
+      __$$AppMessage_AgentEventImplCopyWithImpl<_$AppMessage_AgentEventImpl>(
+        this,
+        _$identity,
+      );
+
+  @override
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(AgentRequest event) agentEvent,
+    required TResult Function(BusCsrEvent event) busEvent,
+  }) {
+    return agentEvent(event);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(AgentRequest event)? agentEvent,
+    TResult? Function(BusCsrEvent event)? busEvent,
+  }) {
+    return agentEvent?.call(event);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(AgentRequest event)? agentEvent,
+    TResult Function(BusCsrEvent event)? busEvent,
+    required TResult orElse(),
+  }) {
+    if (agentEvent != null) {
+      return agentEvent(event);
+    }
+    return orElse();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(AppMessage_AgentEvent value) agentEvent,
+    required TResult Function(AppMessage_BusEvent value) busEvent,
+  }) {
+    return agentEvent(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(AppMessage_AgentEvent value)? agentEvent,
+    TResult? Function(AppMessage_BusEvent value)? busEvent,
+  }) {
+    return agentEvent?.call(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(AppMessage_AgentEvent value)? agentEvent,
+    TResult Function(AppMessage_BusEvent value)? busEvent,
+    required TResult orElse(),
+  }) {
+    if (agentEvent != null) {
+      return agentEvent(this);
+    }
+    return orElse();
+  }
+}
+
+abstract class AppMessage_AgentEvent extends AppMessage {
+  const factory AppMessage_AgentEvent({required final AgentRequest event}) =
+      _$AppMessage_AgentEventImpl;
+  const AppMessage_AgentEvent._() : super._();
+
+  @override
+  AgentRequest get event;
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$AppMessage_AgentEventImplCopyWith<_$AppMessage_AgentEventImpl>
+  get copyWith => throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class _$$AppMessage_BusEventImplCopyWith<$Res> {
+  factory _$$AppMessage_BusEventImplCopyWith(
+    _$AppMessage_BusEventImpl value,
+    $Res Function(_$AppMessage_BusEventImpl) then,
+  ) = __$$AppMessage_BusEventImplCopyWithImpl<$Res>;
+  @useResult
+  $Res call({BusCsrEvent event});
+}
+
+/// @nodoc
+class __$$AppMessage_BusEventImplCopyWithImpl<$Res>
+    extends _$AppMessageCopyWithImpl<$Res, _$AppMessage_BusEventImpl>
+    implements _$$AppMessage_BusEventImplCopyWith<$Res> {
+  __$$AppMessage_BusEventImplCopyWithImpl(
+    _$AppMessage_BusEventImpl _value,
+    $Res Function(_$AppMessage_BusEventImpl) _then,
+  ) : super(_value, _then);
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({Object? event = null}) {
+    return _then(
+      _$AppMessage_BusEventImpl(
+        event: null == event
+            ? _value.event
+            : event // ignore: cast_nullable_to_non_nullable
+                  as BusCsrEvent,
+      ),
+    );
+  }
+}
+
+/// @nodoc
+
+class _$AppMessage_BusEventImpl extends AppMessage_BusEvent {
+  const _$AppMessage_BusEventImpl({required this.event}) : super._();
+
+  @override
+  final BusCsrEvent event;
+
+  @override
+  String toString() {
+    return 'AppMessage.busEvent(event: $event)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$AppMessage_BusEventImpl &&
+            (identical(other.event, event) || other.event == event));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, event);
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$AppMessage_BusEventImplCopyWith<_$AppMessage_BusEventImpl> get copyWith =>
+      __$$AppMessage_BusEventImplCopyWithImpl<_$AppMessage_BusEventImpl>(
+        this,
+        _$identity,
+      );
+
+  @override
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(AgentRequest event) agentEvent,
+    required TResult Function(BusCsrEvent event) busEvent,
+  }) {
+    return busEvent(event);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(AgentRequest event)? agentEvent,
+    TResult? Function(BusCsrEvent event)? busEvent,
+  }) {
+    return busEvent?.call(event);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(AgentRequest event)? agentEvent,
+    TResult Function(BusCsrEvent event)? busEvent,
+    required TResult orElse(),
+  }) {
+    if (busEvent != null) {
+      return busEvent(event);
+    }
+    return orElse();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(AppMessage_AgentEvent value) agentEvent,
+    required TResult Function(AppMessage_BusEvent value) busEvent,
+  }) {
+    return busEvent(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(AppMessage_AgentEvent value)? agentEvent,
+    TResult? Function(AppMessage_BusEvent value)? busEvent,
+  }) {
+    return busEvent?.call(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(AppMessage_AgentEvent value)? agentEvent,
+    TResult Function(AppMessage_BusEvent value)? busEvent,
+    required TResult orElse(),
+  }) {
+    if (busEvent != null) {
+      return busEvent(this);
+    }
+    return orElse();
+  }
+}
+
+abstract class AppMessage_BusEvent extends AppMessage {
+  const factory AppMessage_BusEvent({required final BusCsrEvent event}) =
+      _$AppMessage_BusEventImpl;
+  const AppMessage_BusEvent._() : super._();
+
+  @override
+  BusCsrEvent get event;
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$AppMessage_BusEventImplCopyWith<_$AppMessage_BusEventImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
 mixin _$MxVerifyEvent {
   @optionalTypeArgs
   TResult when<TResult extends Object?>({

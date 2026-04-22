@@ -10,7 +10,7 @@ part 'simple.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `card_pin_cache`, `default_store_dir`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_signs`, `resolve_secret`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
 /// Initialise tracing.
 ///
@@ -242,18 +242,6 @@ Future<String?> mxGetAgentRoom() =>
 Future<void> mxSetAgentRoom({required String roomId}) =>
     RustLib.instance.api.crateApiSimpleMxSetAgentRoom(roomId: roomId);
 
-/// Subscribe to p43 protocol request messages arriving in `room_id`.
-///
-/// Only `ssh.list_keys_request` and `ssh.sign_request` events are forwarded;
-/// all other room traffic is silently ignored.
-///
-/// On startup the last persisted `agent_since` token (if any) is loaded from
-/// `matrix-config.json` and passed to the sync so old messages are not replayed.
-/// The token is saved on **every** sync batch so it survives process kills and
-/// crashes — no history replay on reconnect regardless of how the app exited.
-Stream<AgentRequest> mxListenAgent({required String roomId}) =>
-    RustLib.instance.api.crateApiSimpleMxListenAgent(roomId: roomId);
-
 /// Respond to an `ssh.list_keys_request` with the keys held in the local store.
 Future<void> mxRespondListKeys({
   required String roomId,
@@ -263,13 +251,18 @@ Future<void> mxRespondListKeys({
   requestId: requestId,
 );
 
-/// Subscribe to `bus.csr_request` messages in `room_id`.
+/// Subscribe to **all** p43 protocol messages in `room_id` with a single
+/// Matrix sync loop.
 ///
-/// Each incoming CSR is surfaced as a [`BusCsrEvent`] on `sink`.
-/// Flutter shows a "pending device" tile; user approves by calling
-/// [`mx_respond_csr`].
-Stream<BusCsrEvent> mxListenBus({required String roomId}) =>
-    RustLib.instance.api.crateApiSimpleMxListenBus(roomId: roomId);
+/// Replaces the pair `mx_listen_agent` + `mx_listen_bus`.  The Flutter root
+/// shell subscribes once here and fans out:
+///   [`AppMessage::AgentEvent`] → `AgentScreen`
+///   [`AppMessage::BusEvent`]   → `DevicesScreen`
+///
+/// The `agent_since` pointer (persisted in `matrix-config.json`) is respected
+/// and updated on every sync batch so reconnects never replay seen messages.
+Stream<AppMessage> mxListenAll({required String roomId}) =>
+    RustLib.instance.api.crateApiSimpleMxListenAll(roomId: roomId);
 
 /// Approve a device registration: verify the CSR, sign a cert with the
 /// authority key, and send `bus.cert_response` back into the room.
@@ -284,6 +277,7 @@ Future<void> mxRespondCsr({
   required String csrB64,
   PlatformInt64? ttlSecs,
   required bool useCard,
+  String? fingerprint,
   String? pin,
   String? passphrase,
 }) => RustLib.instance.api.crateApiSimpleMxRespondCsr(
@@ -292,6 +286,7 @@ Future<void> mxRespondCsr({
   csrB64: csrB64,
   ttlSecs: ttlSecs,
   useCard: useCard,
+  fingerprint: fingerprint,
   pin: pin,
   passphrase: passphrase,
 );
@@ -552,6 +547,19 @@ Stream<MxVerifyEvent> mxStartVerify() =>
 Future<void> mxConfirmVerify({required bool confirmed}) =>
     RustLib.instance.api.crateApiSimpleMxConfirmVerify(confirmed: confirmed);
 
+/// List all locally-owned device keys under `<store>/bus/devices/`.
+Future<List<BusOwnDevice>> busListOwnDevices() =>
+    RustLib.instance.api.crateApiSimpleBusListOwnDevices();
+
+/// List all peer certs registered under `<store>/bus/peers/`.
+Future<List<BusPeer>> busListPeers() =>
+    RustLib.instance.api.crateApiSimpleBusListPeers();
+
+/// Remove a peer cert by device_id from `<store>/bus/peers/`.
+/// Returns `true` if the cert was found and deleted, `false` if it did not exist.
+Future<bool> busRemovePeer({required String deviceId}) =>
+    RustLib.instance.api.crateApiSimpleBusRemovePeer(deviceId: deviceId);
+
 @freezed
 sealed class AgentRequest with _$AgentRequest {
   const AgentRequest._();
@@ -566,6 +574,19 @@ sealed class AgentRequest with _$AgentRequest {
     required String fingerprint,
     required String description,
   }) = AgentRequest_Sign;
+}
+
+@freezed
+sealed class AppMessage with _$AppMessage {
+  const AppMessage._();
+
+  /// An SSH-agent protocol event (list-keys or sign request).
+  const factory AppMessage.agentEvent({required AgentRequest event}) =
+      AppMessage_AgentEvent;
+
+  /// A bus device-registration CSR event.
+  const factory AppMessage.busEvent({required BusCsrEvent event}) =
+      AppMessage_BusEvent;
 }
 
 /// Exported authority key bundle — encrypted private scalar + public key.
@@ -624,6 +645,76 @@ class BusCsrEvent {
           deviceLabel == other.deviceLabel &&
           deviceId == other.deviceId &&
           csrB64 == other.csrB64;
+}
+
+/// Summary of a locally-owned device key (own side).
+class BusOwnDevice {
+  final String label;
+  final String deviceId;
+  final bool hasCert;
+  final bool hasCsr;
+
+  /// Unix timestamp of cert expiry, or `None` if absent / never expires.
+  final PlatformInt64? certExp;
+
+  const BusOwnDevice({
+    required this.label,
+    required this.deviceId,
+    required this.hasCert,
+    required this.hasCsr,
+    this.certExp,
+  });
+
+  @override
+  int get hashCode =>
+      label.hashCode ^
+      deviceId.hashCode ^
+      hasCert.hashCode ^
+      hasCsr.hashCode ^
+      certExp.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BusOwnDevice &&
+          runtimeType == other.runtimeType &&
+          label == other.label &&
+          deviceId == other.deviceId &&
+          hasCert == other.hasCert &&
+          hasCsr == other.hasCsr &&
+          certExp == other.certExp;
+}
+
+/// Summary of a registered peer device (authority side).
+class BusPeer {
+  final String deviceId;
+  final String label;
+  final PlatformInt64 issuedAt;
+  final PlatformInt64? expiresAt;
+
+  const BusPeer({
+    required this.deviceId,
+    required this.label,
+    required this.issuedAt,
+    this.expiresAt,
+  });
+
+  @override
+  int get hashCode =>
+      deviceId.hashCode ^
+      label.hashCode ^
+      issuedAt.hashCode ^
+      expiresAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BusPeer &&
+          runtimeType == other.runtimeType &&
+          deviceId == other.deviceId &&
+          label == other.label &&
+          issuedAt == other.issuedAt &&
+          expiresAt == other.expiresAt;
 }
 
 /// Summary of a connected OpenPGP card returned by [list_connected_cards].

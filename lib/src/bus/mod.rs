@@ -24,7 +24,9 @@
 pub mod authority;
 pub mod cert;
 pub mod csr;
+pub mod device;
 pub mod device_key;
+pub mod list;
 pub mod message;
 pub mod signer;
 
@@ -33,7 +35,12 @@ pub mod signer;
 pub use authority::{AuthorityKey, AuthorityPub};
 pub use cert::{CertPayload, DeviceCert};
 pub use csr::{unix_now, CsrPayload, DeviceCsr};
+pub use device::{hostname_label, load_or_generate_device_key};
 pub use device_key::DeviceKey;
+pub use list::{
+    delete_device_key, list_own_devices, list_peers, remove_peer, resolve_device_key,
+    resolve_own_device_label, resolve_recipient_cert, OwnDeviceInfo, PeerInfo,
+};
 pub use message::{decrypt, encrypt, BusDecryptor, BusEnvelope, BusRecipient, MsgPayload};
 pub use signer::BusSigner;
 

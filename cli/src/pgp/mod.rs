@@ -2,6 +2,7 @@ pub mod subcmd;
 
 use anyhow::Result;
 use p43::pkcs11::{card, ops, soft_ops};
+use p43::util::resolve_secret;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use subcmd::PgpCmd;
@@ -24,9 +25,13 @@ pub fn run(
         PgpCmd::Sign { message, file } => {
             let data = read_input(message, file)?;
             let sig = if let Some(kf) = soft_key {
-                soft_ops::sign(&data, &kf, &resolve_passphrase(passphrase)?)?
+                soft_ops::sign(
+                    &data,
+                    &kf,
+                    &resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?,
+                )?
             } else {
-                ops::sign(&data, &resolve_pin(pin)?)?
+                ops::sign(&data, &resolve_secret(pin, "YK_PIN", "Card PIN: ")?)?
             };
             print!("{}", sig);
         }
@@ -43,9 +48,13 @@ pub fn run(
         PgpCmd::Decrypt { file } => {
             let data = read_input(None, file)?;
             let plain = if let Some(kf) = soft_key {
-                soft_ops::decrypt(&data, &kf, &resolve_passphrase(passphrase)?)?
+                soft_ops::decrypt(
+                    &data,
+                    &kf,
+                    &resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?,
+                )?
             } else {
-                ops::decrypt(&data, &resolve_pin(pin)?)?
+                ops::decrypt(&data, &resolve_secret(pin, "YK_PIN", "Card PIN: ")?)?
             };
             io::stdout().write_all(&plain)?;
         }
@@ -57,9 +66,18 @@ pub fn run(
         } => {
             let data = read_input(message, file)?;
             let cipher = if let Some(kf) = soft_key {
-                soft_ops::sign_encrypt(&data, &kf, &recipient, &resolve_passphrase(passphrase)?)?
+                soft_ops::sign_encrypt(
+                    &data,
+                    &kf,
+                    &recipient,
+                    &resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?,
+                )?
             } else {
-                ops::sign_encrypt(&data, &recipient, &resolve_pin(pin)?)?
+                ops::sign_encrypt(
+                    &data,
+                    &recipient,
+                    &resolve_secret(pin, "YK_PIN", "Card PIN: ")?,
+                )?
             };
             print!("{}", cipher);
         }
@@ -79,9 +97,18 @@ pub fn run(
         PgpCmd::DecryptVerify { file, signer } => {
             let data = read_input(None, file)?;
             let result = if let Some(kf) = soft_key {
-                soft_ops::decrypt_verify(&data, &kf, &signer, &resolve_passphrase(passphrase)?)
+                soft_ops::decrypt_verify(
+                    &data,
+                    &kf,
+                    &signer,
+                    &resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?,
+                )
             } else {
-                ops::decrypt_verify(&data, &signer, &resolve_pin(pin)?)
+                ops::decrypt_verify(
+                    &data,
+                    &signer,
+                    &resolve_secret(pin, "YK_PIN", "Card PIN: ")?,
+                )
             };
             match result {
                 Ok(plain) => {
@@ -111,24 +138,4 @@ fn read_input(message: Option<String>, file: Option<PathBuf>) -> Result<Vec<u8>>
     let mut buf = Vec::new();
     io::stdin().read_to_end(&mut buf)?;
     Ok(buf)
-}
-
-fn resolve_pin(provided: Option<String>) -> Result<String> {
-    if let Some(v) = provided {
-        return Ok(v);
-    }
-    if let Ok(v) = std::env::var("YK_PIN") {
-        return Ok(v);
-    }
-    Ok(rpassword::prompt_password("Card PIN: ")?)
-}
-
-fn resolve_passphrase(provided: Option<String>) -> Result<String> {
-    if let Some(v) = provided {
-        return Ok(v);
-    }
-    if let Ok(v) = std::env::var("YK_PASSPHRASE") {
-        return Ok(v);
-    }
-    Ok(rpassword::prompt_password("Key passphrase: ")?)
 }

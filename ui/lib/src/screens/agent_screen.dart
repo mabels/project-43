@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:p43/src/rust/api/simple.dart';
 import '../services/notification_service.dart';
@@ -8,11 +9,25 @@ import 'agent/request_model.dart';
 import 'key_helpers.dart';
 
 class AgentScreen extends StatefulWidget {
-  const AgentScreen({super.key, this.onSignRequest});
+  const AgentScreen({
+    super.key,
+    this.onSignRequest,
+    this.agentStream,
+    this.onRoomChanged,
+  });
 
   /// Called when an `ssh.sign_request` arrives so the shell can switch to
   /// the Agent tab if it is not already in focus.
   final VoidCallback? onSignRequest;
+
+  /// Broadcast stream of agent events routed by the root shell's single
+  /// [mxListenAll] subscription.  When provided, this screen never calls
+  /// [mxListenAgent] itself — one sync loop for the whole app.
+  final Stream<AgentRequest>? agentStream;
+
+  /// Called when the user picks a different agent room, so the root shell
+  /// can restart the unified [mxListenAll] listener with the new room.
+  final void Function(String roomId)? onRoomChanged;
 
   @override
   State<AgentScreen> createState() => _AgentScreenState();
@@ -22,26 +37,36 @@ class _AgentScreenState extends State<AgentScreen> {
   String? _agentRoom;
   final List<RequestEntry> _log = [];
   bool _listening = false;
+  StreamSubscription<AgentRequest>? _agentSub;
 
   @override
   void initState() {
     super.initState();
     _loadAgentRoom();
+    _subscribeToStream();
   }
 
+  @override
+  void dispose() {
+    _agentSub?.cancel();
+    super.dispose();
+  }
+
+  /// Load the saved agent room ID so we know where to send responses.
+  /// Does NOT start a Matrix listener — that is owned by the root shell.
   Future<void> _loadAgentRoom() async {
     final room = await mxGetAgentRoom();
     if (!mounted) return;
     if (room != _agentRoom) {
       setState(() => _agentRoom = room);
-      if (room != null) _startListening(room);
     }
   }
 
-  void _startListening(String roomId) {
-    if (_listening) return;
-    _listening = true;
-    mxListenAgent(roomId: roomId).listen(
+  /// Subscribe once to the root shell's broadcast stream.
+  void _subscribeToStream() {
+    final stream = widget.agentStream;
+    if (stream == null) return;
+    _agentSub = stream.listen(
       (event) async {
         if (!mounted) return;
         if (event is AgentRequest_ListKeys) {
@@ -57,7 +82,8 @@ class _AgentScreenState extends State<AgentScreen> {
               ),
             ),
           );
-          _autoRespondListKeys(roomId, event.requestId);
+          final room0 = _agentRoom;
+          if (room0 != null) _autoRespondListKeys(room0, event.requestId);
         } else if (event is AgentRequest_Sign) {
           final fp = event.fingerprint;
           final autoApprove =
@@ -114,10 +140,13 @@ class _AgentScreenState extends State<AgentScreen> {
                 ),
               ),
             );
-            if (isCardKey) {
-              _autoRespondSignCard(roomId, event.requestId);
-            } else {
-              _autoRespondSign(roomId, event.requestId);
+            final room1 = _agentRoom;
+            if (room1 != null) {
+              if (isCardKey) {
+                _autoRespondSignCard(room1, event.requestId);
+              } else {
+                _autoRespondSign(room1, event.requestId);
+              }
             }
           } else {
             final newEntry = RequestEntry(
@@ -136,9 +165,10 @@ class _AgentScreenState extends State<AgentScreen> {
         }
         if (_log.length > 50) _log.removeLast();
       },
-      onError: (_) => setState(() => _listening = false),
-      onDone: () => setState(() => _listening = false),
+      onError: (_) {},
+      onDone: () {},
     );
+    if (mounted) setState(() => _listening = true);
   }
 
   Future<void> _autoRespondSign(String roomId, String requestId) async {
@@ -686,10 +716,10 @@ class _AgentScreenState extends State<AgentScreen> {
       if (!mounted) return;
       setState(() {
         _agentRoom = picked.roomId;
-        _listening = false;
         _log.clear();
       });
-      _startListening(picked.roomId);
+      // Notify the root shell so it restarts mxListenAll with the new room.
+      widget.onRoomChanged?.call(picked.roomId);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(

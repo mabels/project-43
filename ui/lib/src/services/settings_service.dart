@@ -15,6 +15,7 @@ class AgentSettings {
     this.cacheTimeoutMinutes = 15,
     this.notifyOnSignRequest = true,
     this.otelEndpoint = '',
+    this.deviceCertTtlDays = 180,
   });
 
   /// When `true` and credentials for the requested key are cached, sign
@@ -51,12 +52,19 @@ class AgentSettings {
   /// Changes take effect on the next app launch.
   final String otelEndpoint;
 
+  /// How many days a device certificate is valid after being issued.
+  ///
+  /// Defaults to 180 days (≈ 6 months).  Set to 0 to issue certificates with
+  /// no expiry (not recommended for production use).
+  final int deviceCertTtlDays;
+
   AgentSettings copyWith({
     bool? autoApproveWhenCached,
     bool? cacheDecryptedKey,
     Object? cacheTimeoutMinutes = _sentinel,
     bool? notifyOnSignRequest,
     String? otelEndpoint,
+    int? deviceCertTtlDays,
   }) =>
       AgentSettings(
         autoApproveWhenCached:
@@ -67,6 +75,7 @@ class AgentSettings {
             : cacheTimeoutMinutes as int?,
         notifyOnSignRequest: notifyOnSignRequest ?? this.notifyOnSignRequest,
         otelEndpoint: otelEndpoint ?? this.otelEndpoint,
+        deviceCertTtlDays: deviceCertTtlDays ?? this.deviceCertTtlDays,
       );
 
   Map<String, dynamic> toJson() => {
@@ -75,6 +84,7 @@ class AgentSettings {
         'cacheTimeoutMinutes': cacheTimeoutMinutes,
         'notifyOnSignRequest': notifyOnSignRequest,
         'otelEndpoint': otelEndpoint,
+        'deviceCertTtlDays': deviceCertTtlDays,
       };
 
   factory AgentSettings.fromJson(Map<String, dynamic> json) => AgentSettings(
@@ -84,6 +94,7 @@ class AgentSettings {
         cacheTimeoutMinutes: json['cacheTimeoutMinutes'] as int? ?? 15,
         notifyOnSignRequest: json['notifyOnSignRequest'] as bool? ?? true,
         otelEndpoint: json['otelEndpoint'] as String? ?? '',
+        deviceCertTtlDays: json['deviceCertTtlDays'] as int? ?? 180,
       );
 }
 

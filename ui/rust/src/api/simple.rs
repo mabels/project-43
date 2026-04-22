@@ -633,81 +633,6 @@ pub async fn mx_set_agent_room(room_id: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Subscribe to p43 protocol request messages arriving in `room_id`.
-///
-/// Only `ssh.list_keys_request` and `ssh.sign_request` events are forwarded;
-/// all other room traffic is silently ignored.
-///
-/// On startup the last persisted `agent_since` token (if any) is loaded from
-/// `matrix-config.json` and passed to the sync so old messages are not replayed.
-/// The token is saved on **every** sync batch so it survives process kills and
-/// crashes — no history replay on reconnect regardless of how the app exited.
-#[frb]
-pub fn mx_listen_agent(room_id: String, sink: StreamSink<AgentRequest>) {
-    tokio_rt().spawn(async move {
-        // Load the persisted since-token for this room, if any.
-        let since: Option<String> = (|| -> Option<String> {
-            let store_dir = STORE_DIR.get()?;
-            let cfg = p43::matrix::MatrixConfig::from_store_dir(store_dir);
-            let saved = p43::matrix::client::load_config(&cfg.config_path).ok()??;
-            saved.agent_since
-        })();
-
-        // Save the token to disk on every sync batch so reconnects never
-        // replay messages that have already been seen, even after a crash.
-        let pointer_store_dir = STORE_DIR.get().cloned();
-        let on_pointer = move |token: String| {
-            let Some(ref store_dir) = pointer_store_dir else {
-                return;
-            };
-            let cfg = p43::matrix::MatrixConfig::from_store_dir(store_dir);
-            let Ok(Some(mut saved)) = p43::matrix::client::load_config(&cfg.config_path) else {
-                return;
-            };
-            saved.agent_since = Some(token);
-            let _ = p43::matrix::client::save_config(&saved, &cfg.config_path);
-        };
-
-        let _ = p43::matrix::global::listen_room(
-            &room_id,
-            since.as_deref(),
-            on_pointer,
-            move |_sender, body| {
-                let event = match p43::protocol::Message::from_json(&body) {
-                    Ok(p43::protocol::Message::SshListKeysRequest(r)) => {
-                        Some(AgentRequest::ListKeys {
-                            request_id: r.request_id,
-                        })
-                    }
-                    Ok(p43::protocol::Message::SshSignRequest(r)) => {
-                        // Store signing payload so Flutter can approve later.
-                        if let Ok(mut map) = pending_signs().lock() {
-                            map.insert(
-                                r.request_id.clone(),
-                                PendingSign {
-                                    fingerprint: r.fingerprint.clone(),
-                                    data_b64: r.data.clone(),
-                                    flags: r.flags,
-                                },
-                            );
-                        }
-                        Some(AgentRequest::Sign {
-                            request_id: r.request_id,
-                            fingerprint: r.fingerprint,
-                            description: r.description,
-                        })
-                    }
-                    _ => None,
-                };
-                if let Some(ev) = event {
-                    let _ = sink.add(ev);
-                }
-            },
-        )
-        .await;
-    });
-}
-
 /// Respond to an `ssh.list_keys_request` with the keys held in the local store.
 #[frb]
 #[cfg_attr(
@@ -737,37 +662,101 @@ pub struct BusCsrEvent {
     pub csr_b64: String,
 }
 
-/// Subscribe to `bus.csr_request` messages in `room_id`.
+/// Unified app-level event emitted by [`mx_listen_all`].
 ///
-/// Each incoming CSR is surfaced as a [`BusCsrEvent`] on `sink`.
-/// Flutter shows a "pending device" tile; user approves by calling
-/// [`mx_respond_csr`].
+/// The Flutter root shell subscribes once and fans out to per-screen broadcast
+/// `StreamController`s:
+/// - [`AppMessage::AgentEvent`] → `AgentScreen`
+/// - [`AppMessage::BusEvent`]   → `DevicesScreen`
+#[derive(Clone)]
+pub enum AppMessage {
+    /// An SSH-agent protocol event (list-keys or sign request).
+    AgentEvent { event: AgentRequest },
+    /// A bus device-registration CSR event.
+    BusEvent { event: BusCsrEvent },
+}
+
+/// Subscribe to **all** p43 protocol messages in `room_id` with a single
+/// Matrix sync loop.
+///
+/// Replaces the pair `mx_listen_agent` + `mx_listen_bus`.  The Flutter root
+/// shell subscribes once here and fans out:
+///   [`AppMessage::AgentEvent`] → `AgentScreen`
+///   [`AppMessage::BusEvent`]   → `DevicesScreen`
+///
+/// The `agent_since` pointer (persisted in `matrix-config.json`) is respected
+/// and updated on every sync batch so reconnects never replay seen messages.
 #[frb]
-pub fn mx_listen_bus(room_id: String, sink: StreamSink<BusCsrEvent>) {
-    let store_dir = default_store_dir();
-    tokio::spawn(async move {
-        let since = {
-            let cfg = p43::matrix::MatrixConfig::from_store_dir(&store_dir);
-            p43::matrix::client::load_config(&cfg.config_path)
-                .ok()
-                .flatten()
-                .and_then(|c| c.agent_since)
+pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
+    tokio_rt().spawn(async move {
+        // Load the persisted since-token for this room, if any.
+        let since: Option<String> = (|| -> Option<String> {
+            let store_dir = STORE_DIR.get()?;
+            let cfg = p43::matrix::MatrixConfig::from_store_dir(store_dir);
+            let saved = p43::matrix::client::load_config(&cfg.config_path).ok()??;
+            saved.agent_since
+        })();
+
+        // Persist the token on every sync batch so reconnects never replay
+        // already-seen messages, even after a crash.
+        let pointer_store_dir = STORE_DIR.get().cloned();
+        let on_pointer = move |token: String| {
+            let Some(ref store_dir) = pointer_store_dir else {
+                return;
+            };
+            let cfg = p43::matrix::MatrixConfig::from_store_dir(store_dir);
+            let Ok(Some(mut saved)) = p43::matrix::client::load_config(&cfg.config_path) else {
+                return;
+            };
+            saved.agent_since = Some(token);
+            let _ = p43::matrix::client::save_config(&saved, &cfg.config_path);
         };
 
         let _ = p43::matrix::global::listen_room(
             &room_id,
             since.as_deref(),
-            |_| {},
+            on_pointer,
             move |_sender, body| {
-                if let Ok(p43::protocol::Message::BusCsrRequest(r)) =
-                    p43::protocol::Message::from_json(&body)
-                {
-                    let _ = sink.add(BusCsrEvent {
-                        request_id: r.request_id,
-                        device_label: r.device_label,
-                        device_id: r.device_id,
-                        csr_b64: r.csr_b64,
-                    });
+                let msg = match p43::protocol::Message::from_json(&body) {
+                    Ok(p43::protocol::Message::SshListKeysRequest(r)) => {
+                        Some(AppMessage::AgentEvent {
+                            event: AgentRequest::ListKeys {
+                                request_id: r.request_id,
+                            },
+                        })
+                    }
+                    Ok(p43::protocol::Message::SshSignRequest(r)) => {
+                        // Store signing payload so Flutter can approve later.
+                        if let Ok(mut map) = pending_signs().lock() {
+                            map.insert(
+                                r.request_id.clone(),
+                                PendingSign {
+                                    fingerprint: r.fingerprint.clone(),
+                                    data_b64: r.data.clone(),
+                                    flags: r.flags,
+                                },
+                            );
+                        }
+                        Some(AppMessage::AgentEvent {
+                            event: AgentRequest::Sign {
+                                request_id: r.request_id,
+                                fingerprint: r.fingerprint,
+                                description: r.description,
+                            },
+                        })
+                    }
+                    Ok(p43::protocol::Message::BusCsrRequest(r)) => Some(AppMessage::BusEvent {
+                        event: BusCsrEvent {
+                            request_id: r.request_id,
+                            device_label: r.device_label,
+                            device_id: r.device_id,
+                            csr_b64: r.csr_b64,
+                        },
+                    }),
+                    _ => None,
+                };
+                if let Some(m) = msg {
+                    let _ = sink.add(m);
                 }
             },
         )
@@ -789,6 +778,8 @@ pub async fn mx_respond_csr(
     csr_b64: String,
     ttl_secs: Option<i64>,
     use_card: bool,
+    // Keystore fingerprint — resolves card AID (card) or key file (soft key).
+    fingerprint: Option<String>,
     pin: Option<String>,
     passphrase: Option<String>,
 ) -> anyhow::Result<()> {
@@ -804,21 +795,19 @@ pub async fn mx_respond_csr(
         .context("decode CSR base64")?;
     let csr_payload = DeviceCsr::verify(&csr_bytes)?;
 
-    // Unlock the authority key.
+    // Unlock the authority key via the shared helper (resolves card AID /
+    // key file path from the keystore by fingerprint — no env vars needed).
     let enc_path = bus::authority_enc_path(&bus_dir);
     let encrypted =
         std::fs::read(&enc_path).context("read authority.key.enc — run `p43 bus init` first")?;
 
-    let authority_key = if use_card {
-        let card_pin = resolve_secret(pin, "YK_PIN", "YubiKey PIN: ")?;
-        p43::bus::authority::unlock_card(&encrypted, &card_pin, None)?
-    } else {
-        let phrase = resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
-        let soft_key = std::env::var("YK_KEY_FILE")
-            .map(std::path::PathBuf::from)
-            .context("YK_KEY_FILE not set — needed for soft-key authority unlock")?;
-        p43::bus::authority::unlock_soft(&encrypted, &soft_key, &phrase)?
-    };
+    let authority_key = unlock_authority(
+        &encrypted,
+        use_card,
+        fingerprint.as_deref(),
+        pin.as_deref(),
+        passphrase.as_deref(),
+    )?;
 
     // Issue cert.
     let cert = DeviceCert::issue(&csr_payload, &authority_key, ttl_secs)?;
@@ -1639,4 +1628,63 @@ pub async fn mx_confirm_verify(confirmed: bool) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No active verification"))?;
     tx.send(confirmed)
         .map_err(|_| anyhow::anyhow!("Verification already completed"))
+}
+
+// ── Bus device list ───────────────────────────────────────────────────────────
+
+/// Summary of a locally-owned device key (own side).
+pub struct BusOwnDevice {
+    pub label: String,
+    pub device_id: String,
+    pub has_cert: bool,
+    pub has_csr: bool,
+    /// Unix timestamp of cert expiry, or `None` if absent / never expires.
+    pub cert_exp: Option<i64>,
+}
+
+/// Summary of a registered peer device (authority side).
+pub struct BusPeer {
+    pub device_id: String,
+    pub label: String,
+    pub issued_at: i64,
+    pub expires_at: Option<i64>,
+}
+
+/// List all locally-owned device keys under `<store>/bus/devices/`.
+#[frb]
+pub fn bus_list_own_devices() -> anyhow::Result<Vec<BusOwnDevice>> {
+    let bus_dir = p43::bus::bus_dir(&default_store_dir());
+    Ok(p43::bus::list_own_devices(&bus_dir)?
+        .into_iter()
+        .map(|d| BusOwnDevice {
+            label: d.label,
+            device_id: d.device_id,
+            has_cert: d.has_cert,
+            has_csr: d.has_csr,
+            cert_exp: d.cert_exp,
+        })
+        .collect())
+}
+
+/// List all peer certs registered under `<store>/bus/peers/`.
+#[frb]
+pub fn bus_list_peers() -> anyhow::Result<Vec<BusPeer>> {
+    let bus_dir = p43::bus::bus_dir(&default_store_dir());
+    Ok(p43::bus::list_peers(&bus_dir)?
+        .into_iter()
+        .map(|p| BusPeer {
+            device_id: p.device_id,
+            label: p.label,
+            issued_at: p.issued_at,
+            expires_at: p.expires_at,
+        })
+        .collect())
+}
+
+/// Remove a peer cert by device_id from `<store>/bus/peers/`.
+/// Returns `true` if the cert was found and deleted, `false` if it did not exist.
+#[frb]
+pub fn bus_remove_peer(device_id: String) -> anyhow::Result<bool> {
+    let bus_dir = p43::bus::bus_dir(&default_store_dir());
+    p43::bus::remove_peer(&bus_dir, &device_id)
 }

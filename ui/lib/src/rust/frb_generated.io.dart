@@ -22,14 +22,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException dco_decode_AnyhowException(dynamic raw);
 
   @protected
-  RustStreamSink<AgentRequest> dco_decode_StreamSink_agent_request_Sse(
-    dynamic raw,
-  );
-
-  @protected
-  RustStreamSink<BusCsrEvent> dco_decode_StreamSink_bus_csr_event_Sse(
-    dynamic raw,
-  );
+  RustStreamSink<AppMessage> dco_decode_StreamSink_app_message_Sse(dynamic raw);
 
   @protected
   RustStreamSink<MxMessage> dco_decode_StreamSink_mx_message_Sse(dynamic raw);
@@ -46,10 +39,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentRequest dco_decode_agent_request(dynamic raw);
 
   @protected
+  AppMessage dco_decode_app_message(dynamic raw);
+
+  @protected
   AuthorityKeyExport dco_decode_authority_key_export(dynamic raw);
 
   @protected
   bool dco_decode_bool(dynamic raw);
+
+  @protected
+  AgentRequest dco_decode_box_autoadd_agent_request(dynamic raw);
+
+  @protected
+  BusCsrEvent dco_decode_box_autoadd_bus_csr_event(dynamic raw);
 
   @protected
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
@@ -59,6 +61,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BusCsrEvent dco_decode_bus_csr_event(dynamic raw);
+
+  @protected
+  BusOwnDevice dco_decode_bus_own_device(dynamic raw);
+
+  @protected
+  BusPeer dco_decode_bus_peer(dynamic raw);
 
   @protected
   ConnectedCardInfo dco_decode_connected_card_info(dynamic raw);
@@ -74,6 +82,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<BusOwnDevice> dco_decode_list_bus_own_device(dynamic raw);
+
+  @protected
+  List<BusPeer> dco_decode_list_bus_peer(dynamic raw);
 
   @protected
   List<ConnectedCardInfo> dco_decode_list_connected_card_info(dynamic raw);
@@ -142,12 +156,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
-  RustStreamSink<AgentRequest> sse_decode_StreamSink_agent_request_Sse(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  RustStreamSink<BusCsrEvent> sse_decode_StreamSink_bus_csr_event_Sse(
+  RustStreamSink<AppMessage> sse_decode_StreamSink_app_message_Sse(
     SseDeserializer deserializer,
   );
 
@@ -168,12 +177,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentRequest sse_decode_agent_request(SseDeserializer deserializer);
 
   @protected
+  AppMessage sse_decode_app_message(SseDeserializer deserializer);
+
+  @protected
   AuthorityKeyExport sse_decode_authority_key_export(
     SseDeserializer deserializer,
   );
 
   @protected
   bool sse_decode_bool(SseDeserializer deserializer);
+
+  @protected
+  AgentRequest sse_decode_box_autoadd_agent_request(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BusCsrEvent sse_decode_box_autoadd_bus_csr_event(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
@@ -185,6 +207,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BusCsrEvent sse_decode_bus_csr_event(SseDeserializer deserializer);
+
+  @protected
+  BusOwnDevice sse_decode_bus_own_device(SseDeserializer deserializer);
+
+  @protected
+  BusPeer sse_decode_bus_peer(SseDeserializer deserializer);
 
   @protected
   ConnectedCardInfo sse_decode_connected_card_info(
@@ -202,6 +230,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<BusOwnDevice> sse_decode_list_bus_own_device(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<BusPeer> sse_decode_list_bus_peer(SseDeserializer deserializer);
 
   @protected
   List<ConnectedCardInfo> sse_decode_list_connected_card_info(
@@ -284,14 +320,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_StreamSink_agent_request_Sse(
-    RustStreamSink<AgentRequest> self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_StreamSink_bus_csr_event_Sse(
-    RustStreamSink<BusCsrEvent> self,
+  void sse_encode_StreamSink_app_message_Sse(
+    RustStreamSink<AppMessage> self,
     SseSerializer serializer,
   );
 
@@ -314,6 +344,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_agent_request(AgentRequest self, SseSerializer serializer);
 
   @protected
+  void sse_encode_app_message(AppMessage self, SseSerializer serializer);
+
+  @protected
   void sse_encode_authority_key_export(
     AuthorityKeyExport self,
     SseSerializer serializer,
@@ -321,6 +354,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_agent_request(
+    AgentRequest self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_bus_csr_event(
+    BusCsrEvent self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_i_64(
@@ -336,6 +381,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_bus_csr_event(BusCsrEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_bus_own_device(BusOwnDevice self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_bus_peer(BusPeer self, SseSerializer serializer);
 
   @protected
   void sse_encode_connected_card_info(
@@ -354,6 +405,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_bus_own_device(
+    List<BusOwnDevice> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_bus_peer(List<BusPeer> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_connected_card_info(

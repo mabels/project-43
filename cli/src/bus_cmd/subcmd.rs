@@ -92,6 +92,22 @@ pub enum BusCmd {
     /// alongside each key.
     ListKeys,
 
+    /// Delete a locally-owned device key (and its CSR/cert if present).
+    ///
+    /// Provide exactly one of --label or --id.
+    /// --id accepts a prefix of the hex device-id (min 4 chars recommended).
+    DeleteKey {
+        /// Label given at gen-key time.
+        #[arg(long)]
+        label: Option<String>,
+        /// Device-id (or unambiguous prefix) as shown in list-keys.
+        #[arg(long)]
+        id: Option<String>,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// List registered peer certs.
     ListPeers,
 

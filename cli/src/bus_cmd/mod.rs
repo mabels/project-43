@@ -2,7 +2,12 @@ pub mod subcmd;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use p43::bus::{self, AuthorityPub, DeviceCert, DeviceCsr, DeviceKey, MsgPayload};
+use p43::bus::{
+    self, delete_device_key, list_own_devices, list_peers, resolve_device_key,
+    resolve_own_device_label, resolve_recipient_cert, AuthorityPub, DeviceCert, DeviceCsr,
+    DeviceKey, MsgPayload,
+};
+use p43::util::resolve_secret;
 use std::path::{Path, PathBuf};
 use subcmd::BusCmd;
 use uuid::Uuid;
@@ -44,6 +49,9 @@ pub fn run(
         ),
         BusCmd::Show { file } => cmd_show(&file),
         BusCmd::ListKeys => cmd_list_keys(&bus_dir),
+        BusCmd::DeleteKey { label, id, force } => {
+            cmd_delete_key(&bus_dir, label.as_deref(), id.as_deref(), force)
+        }
         BusCmd::ListPeers => cmd_list_peers(&bus_dir),
         BusCmd::Encrypt {
             to,
@@ -101,77 +109,6 @@ struct UnlockOpts<'a> {
 struct SenderOpts<'a> {
     device: Option<&'a str>,
     from_cert: Option<&'a Path>,
-}
-
-fn resolve_secret(explicit: Option<String>, env_var: &str, prompt: &str) -> Result<String> {
-    if let Some(v) = explicit {
-        return Ok(v);
-    }
-    if let Ok(v) = std::env::var(env_var) {
-        return Ok(v);
-    }
-    Ok(rpassword::prompt_password(prompt)?)
-}
-
-/// Resolve a device key from `bus_dir/devices/`.
-///
-/// - If `label` is `Some`, load `devices/<label>.key.cbor` directly.
-/// - If `label` is `None`, scan `devices/` for exactly one `*.key.cbor` file
-///   and use that.  Errors if zero or more than one device key is found.
-fn resolve_device_key(bus_dir: &Path, label: Option<&str>) -> Result<(String, PathBuf, DeviceKey)> {
-    if let Some(lbl) = label {
-        let path = bus::device_key_path(bus_dir, lbl);
-        let key = DeviceKey::load(&path)
-            .with_context(|| format!("load device key from {}", path.display()))?;
-        return Ok((lbl.to_string(), path, key));
-    }
-
-    // Auto-detect: scan devices/ for *.key.cbor files.
-    let devices_dir = bus::devices_dir(bus_dir);
-    if !devices_dir.exists() {
-        bail!(
-            "no devices directory found at {}; run `bus gen-key` first",
-            devices_dir.display()
-        );
-    }
-
-    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(&devices_dir)
-        .with_context(|| format!("read {}", devices_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("cbor") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.ends_with(".key") {
-                    let label = stem.trim_end_matches(".key").to_string();
-                    candidates.push((label, path));
-                }
-            }
-        }
-    }
-
-    match candidates.len() {
-        0 => bail!(
-            "no device keys found in {}; run `bus gen-key` first",
-            devices_dir.display()
-        ),
-        1 => {
-            let (lbl, path) = candidates.remove(0);
-            let key = DeviceKey::load(&path)
-                .with_context(|| format!("load device key from {}", path.display()))?;
-            Ok((lbl, path, key))
-        }
-        n => {
-            let labels: Vec<_> = candidates.iter().map(|(l, _)| l.as_str()).collect();
-            bail!(
-                "{} device keys found in {}; specify one with --label (or --device): {}",
-                n,
-                devices_dir.display(),
-                labels.join(", ")
-            )
-        }
-    }
 }
 
 // ── init ──────────────────────────────────────────────────────────────────────
@@ -420,151 +357,85 @@ fn cmd_show(file: &Path) -> Result<()> {
 // ── list-keys ─────────────────────────────────────────────────────────────────
 
 fn cmd_list_keys(bus_dir: &Path) -> Result<()> {
-    let devices_dir = bus::devices_dir(bus_dir);
-    if !devices_dir.exists() {
+    let items = list_own_devices(bus_dir)?;
+    if items.is_empty() {
         println!(
-            "No devices directory found at {}; run `bus gen-key` first",
-            devices_dir.display()
+            "No device keys found in {}",
+            bus::devices_dir(bus_dir).display()
         );
         return Ok(());
     }
-
-    let mut rows: Vec<(String, String, bool, bool)> = Vec::new(); // (label, device_id, has_cert, has_csr)
-
-    for entry in std::fs::read_dir(&devices_dir)
-        .with_context(|| format!("read {}", devices_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("cbor") {
-            continue;
-        }
-        let stem = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        if !stem.ends_with(".key") {
-            continue;
-        }
-
-        let label = stem.trim_end_matches(".key").to_string();
-        let key = match DeviceKey::load(&path) {
-            Ok(k) => k,
-            Err(e) => {
-                eprintln!("warn: could not load {}: {}", path.display(), e);
-                continue;
-            }
-        };
-        let device_id = key.device_id();
-        let has_cert = bus::device_cert_path(bus_dir, &label).exists();
-        let has_csr = bus::device_csr_path(bus_dir, &label).exists();
-        rows.push((label, device_id, has_cert, has_csr));
-    }
-
-    if rows.is_empty() {
-        println!("No device keys found in {}", devices_dir.display());
-        return Ok(());
-    }
-
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-
     println!(
         "{:<24}  {:<16}  {:<4}  {:<3}",
         "label", "device_id", "cert", "csr"
     );
     println!("{}", "-".repeat(56));
-    for (label, device_id, has_cert, has_csr) in rows {
+    for d in items {
         println!(
             "{:<24}  {:<16}  {:<4}  {:<3}",
-            label,
-            device_id,
-            if has_cert { "yes" } else { "no" },
-            if has_csr { "yes" } else { "no" },
+            d.label,
+            d.device_id,
+            if d.has_cert { "yes" } else { "no" },
+            if d.has_csr { "yes" } else { "no" },
         );
     }
+    Ok(())
+}
+
+// ── delete-key ────────────────────────────────────────────────────────────────
+
+fn cmd_delete_key(
+    bus_dir: &Path,
+    label: Option<&str>,
+    id: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    // Resolve first (read-only) so the user sees what will be deleted before
+    // we touch the filesystem.
+    let resolved = resolve_own_device_label(bus_dir, label, id)?;
+
+    if !force {
+        eprint!(
+            "Delete device key {:?} and any associated CSR/cert? [y/N] ",
+            resolved
+        );
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            eprintln!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    delete_device_key(bus_dir, &resolved)?;
+    println!("Deleted device key: {resolved}");
     Ok(())
 }
 
 // ── list-peers ────────────────────────────────────────────────────────────────
 
 fn cmd_list_peers(bus_dir: &Path) -> Result<()> {
-    let peers_dir = bus_dir.join("peers");
-    if !peers_dir.exists() {
-        println!("No peers registered.");
+    let items = list_peers(bus_dir)?;
+    if items.is_empty() {
+        println!("No peer certs found.");
         return Ok(());
     }
-
-    let mut found = false;
-    for entry in std::fs::read_dir(&peers_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("cbor") {
-            if let Ok(cert) = DeviceCert::load(&path) {
-                found = true;
-                let exp_str = cert
-                    .payload
-                    .exp
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "(never)".into());
-                println!(
-                    "{}  {}  exp={}  {}",
-                    cert.payload.device_id,
-                    cert.payload.label,
-                    exp_str,
-                    path.display()
-                );
-            }
-        }
-    }
-    if !found {
-        println!("No peer certs found in {}", peers_dir.display());
+    println!(
+        "{:<16}  {:<24}  {:<12}  {}",
+        "device_id", "label", "issued_at", "expires_at"
+    );
+    println!("{}", "-".repeat(68));
+    for p in items {
+        let exp = p
+            .expires_at
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "(never)".into());
+        println!(
+            "{:<16}  {:<24}  {:<12}  {}",
+            p.device_id, p.label, p.issued_at, exp
+        );
     }
     Ok(())
-}
-
-// ── recipient resolution ──────────────────────────────────────────────────────
-
-/// Resolve `--to` value to a cert file path.
-///
-/// Accepts:
-///   1. The special token `"authority"` → `authority.cert.cbor`.
-///   2. A literal file path that already exists on disk.
-///   3. A label / device-id — looked up first in `peers/`, then in `devices/`.
-fn resolve_recipient_cert(bus_dir: &Path, to: &str) -> Result<PathBuf> {
-    // Special token: encrypt to the authority itself.
-    if to == "authority" {
-        let auth_cert = bus::authority_cert_path(bus_dir);
-        if !auth_cert.exists() {
-            bail!(
-                "authority cert not found at {}; run `bus init` first",
-                auth_cert.display()
-            );
-        }
-        return Ok(auth_cert);
-    }
-
-    let as_path = PathBuf::from(to);
-    if as_path.exists() {
-        return Ok(as_path);
-    }
-
-    // Try peers/<label>.cert.cbor
-    let peer_path = bus::peer_cert_path(bus_dir, to);
-    if peer_path.exists() {
-        return Ok(peer_path);
-    }
-
-    // Try devices/<label>.cert.cbor
-    let dev_path = bus::device_cert_path(bus_dir, to);
-    if dev_path.exists() {
-        return Ok(dev_path);
-    }
-
-    bail!(
-        "could not resolve recipient {:?}: not a file path, \
-         not found in peers/ or devices/",
-        to
-    )
 }
 
 // ── encrypt ───────────────────────────────────────────────────────────────────

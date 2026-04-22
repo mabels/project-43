@@ -4,6 +4,7 @@
 
 pub mod key_store;
 pub mod protocol;
+pub mod util;
 
 #[cfg(feature = "bus")]
 pub mod bus;

@@ -112,6 +112,54 @@ pub async fn list_rooms() -> Result<Vec<BridgeRoomInfo>> {
     Ok(rooms)
 }
 
+/// Resolve which Matrix room the SSH agent should use.
+///
+/// Priority:
+/// 1. `room_arg` — explicit `--room` flag value.
+/// 2. `agent_room` saved in `matrix-config.json` by `p43 matrix join`.
+/// 3. If exactly one room is joined, use it (convenience).
+/// 4. Otherwise print the list and return an error.
+pub async fn resolve_agent_room(
+    room_arg: Option<&str>,
+    store_dir: &std::path::Path,
+) -> Result<String> {
+    if let Some(r) = room_arg {
+        return Ok(r.to_string());
+    }
+
+    // Check the saved agent_room in the config.
+    let cfg = super::client::MatrixConfig::from_store_dir(store_dir);
+    if let Some(saved) = super::client::load_config(&cfg.config_path)? {
+        if let Some(room_id) = saved.agent_room {
+            eprintln!("Using saved agent_room: {room_id}");
+            return Ok(room_id);
+        }
+    }
+
+    // Fall back to listing rooms.
+    let rooms = list_rooms().await?;
+    match rooms.as_slice() {
+        [] => anyhow::bail!(
+            "No rooms joined yet.\n\
+             Run:  p43 matrix join --room <#room:server>"
+        ),
+        [room] => {
+            eprintln!("Using room: {} ({})", room.name, room.room_id);
+            Ok(room.room_id.clone())
+        }
+        _ => {
+            eprintln!(
+                "Multiple rooms joined — run  p43 matrix join --room <ID>  to set a default,"
+            );
+            eprintln!("or pass --room to ssh-agent directly.  Joined rooms:");
+            for r in &rooms {
+                eprintln!("  {}  {}", r.room_id, r.name);
+            }
+            anyhow::bail!("Ambiguous room; use --room to specify")
+        }
+    }
+}
+
 /// Join a room and return its basic info.
 #[cfg_attr(
     feature = "telemetry",

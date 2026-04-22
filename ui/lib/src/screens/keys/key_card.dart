@@ -6,10 +6,18 @@ import 'key_widgets.dart';
 // ── Key card ──────────────────────────────────────────────────────────────────
 
 class KeyCard extends StatelessWidget {
-  const KeyCard({super.key, required this.info, this.onTap});
+  const KeyCard({
+    super.key,
+    required this.info,
+    this.onTap,
+    this.isDefault = false,
+    this.onSetDefault,
+  });
 
   final KeyInfo info;
   final VoidCallback? onTap;
+  final bool isDefault;
+  final VoidCallback? onSetDefault;
 
   @override
   Widget build(BuildContext context) {
@@ -75,6 +83,20 @@ class KeyCard extends StatelessWidget {
                     background: info.hasSecret
                         ? const Color(0xFF3A2A0A)
                         : const Color(0xFF1A2A1A),
+                  ),
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: isDefault ? null : onSetDefault,
+                    child: Tooltip(
+                      message: isDefault ? 'Default key' : 'Set as default',
+                      child: Icon(
+                        isDefault ? Icons.star : Icons.star_border,
+                        size: 18,
+                        color: isDefault
+                            ? const Color(0xFFFFD60A)
+                            : const Color(0xFF48484A),
+                      ),
+                    ),
                   ),
                 ],
               ),

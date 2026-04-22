@@ -453,37 +453,44 @@ abstract class AgentRequest_Sign extends AgentRequest {
 
 /// @nodoc
 mixin _$AppMessage {
-  Object get event => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult when<TResult extends Object?>({
     required TResult Function(AgentRequest event) agentEvent,
     required TResult Function(BusCsrEvent event) busEvent,
+    required TResult Function() sessionLockRequired,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function(AgentRequest event)? agentEvent,
     TResult? Function(BusCsrEvent event)? busEvent,
+    TResult? Function()? sessionLockRequired,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
     TResult Function(AgentRequest event)? agentEvent,
     TResult Function(BusCsrEvent event)? busEvent,
+    TResult Function()? sessionLockRequired,
     required TResult orElse(),
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult map<TResult extends Object?>({
     required TResult Function(AppMessage_AgentEvent value) agentEvent,
     required TResult Function(AppMessage_BusEvent value) busEvent,
+    required TResult Function(AppMessage_SessionLockRequired value)
+    sessionLockRequired,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(AppMessage_AgentEvent value)? agentEvent,
     TResult? Function(AppMessage_BusEvent value)? busEvent,
+    TResult? Function(AppMessage_SessionLockRequired value)?
+    sessionLockRequired,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult maybeMap<TResult extends Object?>({
     TResult Function(AppMessage_AgentEvent value)? agentEvent,
     TResult Function(AppMessage_BusEvent value)? busEvent,
+    TResult Function(AppMessage_SessionLockRequired value)? sessionLockRequired,
     required TResult orElse(),
   }) => throw _privateConstructorUsedError;
 }
@@ -598,6 +605,7 @@ class _$AppMessage_AgentEventImpl extends AppMessage_AgentEvent {
   TResult when<TResult extends Object?>({
     required TResult Function(AgentRequest event) agentEvent,
     required TResult Function(BusCsrEvent event) busEvent,
+    required TResult Function() sessionLockRequired,
   }) {
     return agentEvent(event);
   }
@@ -607,6 +615,7 @@ class _$AppMessage_AgentEventImpl extends AppMessage_AgentEvent {
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function(AgentRequest event)? agentEvent,
     TResult? Function(BusCsrEvent event)? busEvent,
+    TResult? Function()? sessionLockRequired,
   }) {
     return agentEvent?.call(event);
   }
@@ -616,6 +625,7 @@ class _$AppMessage_AgentEventImpl extends AppMessage_AgentEvent {
   TResult maybeWhen<TResult extends Object?>({
     TResult Function(AgentRequest event)? agentEvent,
     TResult Function(BusCsrEvent event)? busEvent,
+    TResult Function()? sessionLockRequired,
     required TResult orElse(),
   }) {
     if (agentEvent != null) {
@@ -629,6 +639,8 @@ class _$AppMessage_AgentEventImpl extends AppMessage_AgentEvent {
   TResult map<TResult extends Object?>({
     required TResult Function(AppMessage_AgentEvent value) agentEvent,
     required TResult Function(AppMessage_BusEvent value) busEvent,
+    required TResult Function(AppMessage_SessionLockRequired value)
+    sessionLockRequired,
   }) {
     return agentEvent(this);
   }
@@ -638,6 +650,8 @@ class _$AppMessage_AgentEventImpl extends AppMessage_AgentEvent {
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(AppMessage_AgentEvent value)? agentEvent,
     TResult? Function(AppMessage_BusEvent value)? busEvent,
+    TResult? Function(AppMessage_SessionLockRequired value)?
+    sessionLockRequired,
   }) {
     return agentEvent?.call(this);
   }
@@ -647,6 +661,7 @@ class _$AppMessage_AgentEventImpl extends AppMessage_AgentEvent {
   TResult maybeMap<TResult extends Object?>({
     TResult Function(AppMessage_AgentEvent value)? agentEvent,
     TResult Function(AppMessage_BusEvent value)? busEvent,
+    TResult Function(AppMessage_SessionLockRequired value)? sessionLockRequired,
     required TResult orElse(),
   }) {
     if (agentEvent != null) {
@@ -661,7 +676,6 @@ abstract class AppMessage_AgentEvent extends AppMessage {
       _$AppMessage_AgentEventImpl;
   const AppMessage_AgentEvent._() : super._();
 
-  @override
   AgentRequest get event;
 
   /// Create a copy of AppMessage
@@ -746,6 +760,7 @@ class _$AppMessage_BusEventImpl extends AppMessage_BusEvent {
   TResult when<TResult extends Object?>({
     required TResult Function(AgentRequest event) agentEvent,
     required TResult Function(BusCsrEvent event) busEvent,
+    required TResult Function() sessionLockRequired,
   }) {
     return busEvent(event);
   }
@@ -755,6 +770,7 @@ class _$AppMessage_BusEventImpl extends AppMessage_BusEvent {
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function(AgentRequest event)? agentEvent,
     TResult? Function(BusCsrEvent event)? busEvent,
+    TResult? Function()? sessionLockRequired,
   }) {
     return busEvent?.call(event);
   }
@@ -764,6 +780,7 @@ class _$AppMessage_BusEventImpl extends AppMessage_BusEvent {
   TResult maybeWhen<TResult extends Object?>({
     TResult Function(AgentRequest event)? agentEvent,
     TResult Function(BusCsrEvent event)? busEvent,
+    TResult Function()? sessionLockRequired,
     required TResult orElse(),
   }) {
     if (busEvent != null) {
@@ -777,6 +794,8 @@ class _$AppMessage_BusEventImpl extends AppMessage_BusEvent {
   TResult map<TResult extends Object?>({
     required TResult Function(AppMessage_AgentEvent value) agentEvent,
     required TResult Function(AppMessage_BusEvent value) busEvent,
+    required TResult Function(AppMessage_SessionLockRequired value)
+    sessionLockRequired,
   }) {
     return busEvent(this);
   }
@@ -786,6 +805,8 @@ class _$AppMessage_BusEventImpl extends AppMessage_BusEvent {
   TResult? mapOrNull<TResult extends Object?>({
     TResult? Function(AppMessage_AgentEvent value)? agentEvent,
     TResult? Function(AppMessage_BusEvent value)? busEvent,
+    TResult? Function(AppMessage_SessionLockRequired value)?
+    sessionLockRequired,
   }) {
     return busEvent?.call(this);
   }
@@ -795,6 +816,7 @@ class _$AppMessage_BusEventImpl extends AppMessage_BusEvent {
   TResult maybeMap<TResult extends Object?>({
     TResult Function(AppMessage_AgentEvent value)? agentEvent,
     TResult Function(AppMessage_BusEvent value)? busEvent,
+    TResult Function(AppMessage_SessionLockRequired value)? sessionLockRequired,
     required TResult orElse(),
   }) {
     if (busEvent != null) {
@@ -809,7 +831,6 @@ abstract class AppMessage_BusEvent extends AppMessage {
       _$AppMessage_BusEventImpl;
   const AppMessage_BusEvent._() : super._();
 
-  @override
   BusCsrEvent get event;
 
   /// Create a copy of AppMessage
@@ -817,6 +838,125 @@ abstract class AppMessage_BusEvent extends AppMessage {
   @JsonKey(includeFromJson: false, includeToJson: false)
   _$$AppMessage_BusEventImplCopyWith<_$AppMessage_BusEventImpl> get copyWith =>
       throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class _$$AppMessage_SessionLockRequiredImplCopyWith<$Res> {
+  factory _$$AppMessage_SessionLockRequiredImplCopyWith(
+    _$AppMessage_SessionLockRequiredImpl value,
+    $Res Function(_$AppMessage_SessionLockRequiredImpl) then,
+  ) = __$$AppMessage_SessionLockRequiredImplCopyWithImpl<$Res>;
+}
+
+/// @nodoc
+class __$$AppMessage_SessionLockRequiredImplCopyWithImpl<$Res>
+    extends _$AppMessageCopyWithImpl<$Res, _$AppMessage_SessionLockRequiredImpl>
+    implements _$$AppMessage_SessionLockRequiredImplCopyWith<$Res> {
+  __$$AppMessage_SessionLockRequiredImplCopyWithImpl(
+    _$AppMessage_SessionLockRequiredImpl _value,
+    $Res Function(_$AppMessage_SessionLockRequiredImpl) _then,
+  ) : super(_value, _then);
+
+  /// Create a copy of AppMessage
+  /// with the given fields replaced by the non-null parameter values.
+}
+
+/// @nodoc
+
+class _$AppMessage_SessionLockRequiredImpl
+    extends AppMessage_SessionLockRequired {
+  const _$AppMessage_SessionLockRequiredImpl() : super._();
+
+  @override
+  String toString() {
+    return 'AppMessage.sessionLockRequired()';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$AppMessage_SessionLockRequiredImpl);
+  }
+
+  @override
+  int get hashCode => runtimeType.hashCode;
+
+  @override
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(AgentRequest event) agentEvent,
+    required TResult Function(BusCsrEvent event) busEvent,
+    required TResult Function() sessionLockRequired,
+  }) {
+    return sessionLockRequired();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(AgentRequest event)? agentEvent,
+    TResult? Function(BusCsrEvent event)? busEvent,
+    TResult? Function()? sessionLockRequired,
+  }) {
+    return sessionLockRequired?.call();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(AgentRequest event)? agentEvent,
+    TResult Function(BusCsrEvent event)? busEvent,
+    TResult Function()? sessionLockRequired,
+    required TResult orElse(),
+  }) {
+    if (sessionLockRequired != null) {
+      return sessionLockRequired();
+    }
+    return orElse();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(AppMessage_AgentEvent value) agentEvent,
+    required TResult Function(AppMessage_BusEvent value) busEvent,
+    required TResult Function(AppMessage_SessionLockRequired value)
+    sessionLockRequired,
+  }) {
+    return sessionLockRequired(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(AppMessage_AgentEvent value)? agentEvent,
+    TResult? Function(AppMessage_BusEvent value)? busEvent,
+    TResult? Function(AppMessage_SessionLockRequired value)?
+    sessionLockRequired,
+  }) {
+    return sessionLockRequired?.call(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(AppMessage_AgentEvent value)? agentEvent,
+    TResult Function(AppMessage_BusEvent value)? busEvent,
+    TResult Function(AppMessage_SessionLockRequired value)? sessionLockRequired,
+    required TResult orElse(),
+  }) {
+    if (sessionLockRequired != null) {
+      return sessionLockRequired(this);
+    }
+    return orElse();
+  }
+}
+
+abstract class AppMessage_SessionLockRequired extends AppMessage {
+  const factory AppMessage_SessionLockRequired() =
+      _$AppMessage_SessionLockRequiredImpl;
+  const AppMessage_SessionLockRequired._() : super._();
 }
 
 /// @nodoc

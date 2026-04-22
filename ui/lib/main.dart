@@ -79,6 +79,8 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
       StreamController<AgentRequest>.broadcast();
   final StreamController<BusCsrEvent> _busCtrl =
       StreamController<BusCsrEvent>.broadcast();
+  final StreamController<void> _sessionLockCtrl =
+      StreamController<void>.broadcast();
   StreamSubscription<AppMessage>? _allSub;
 
   @override
@@ -94,6 +96,7 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     _allSub?.cancel();
     _agentCtrl.close();
     _busCtrl.close();
+    _sessionLockCtrl.close();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -113,6 +116,10 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
           _agentCtrl.add(msg.event);
         } else if (msg is AppMessage_BusEvent) {
           _busCtrl.add(msg.event);
+        } else if (msg is AppMessage_SessionLockRequired) {
+          if (_tabIndex != 2) setState(() => _tabIndex = 2);
+          _sessionLockCtrl.add(null);
+          WindowService.instance.bringToFront();
         }
       },
       onError: (_) {},
@@ -155,6 +162,7 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
           ),
           DevicesScreen(
             busStream: _busCtrl.stream,
+            sessionLockStream: _sessionLockCtrl.stream,
             onCsrRequest: () {
               if (_tabIndex != 2) setState(() => _tabIndex = 2);
             },

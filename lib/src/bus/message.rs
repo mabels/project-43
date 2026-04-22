@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use coset::{iana, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable};
 use ed25519_dalek::{Verifier, VerifyingKey};
 use hkdf::Hkdf;
-use rand::rngs::OsRng;
+use rand::{rngs::OsRng, RngCore as _};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
@@ -83,12 +83,16 @@ const HKDF_INFO: &[u8] = b"p43-bus-v1";
 pub struct BusEnvelope {
     pub version: u8,
     /// Ephemeral X25519 public key (32 bytes) — used for ECDH.
+    #[serde(with = "serde_bytes")]
     pub eph_pub: Vec<u8>,
     /// AES-256-GCM nonce (12 bytes).
+    #[serde(with = "serde_bytes")]
     pub nonce: Vec<u8>,
     /// AES-256-GCM ciphertext (includes 16-byte GCM tag).
+    #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
     /// Sender's raw cert bytes (COSE_Sign1) — lets recipient verify the inner sig.
+    #[serde(with = "serde_bytes")]
     pub sender_cert: Vec<u8>,
 }
 
@@ -103,7 +107,8 @@ pub struct MsgPayload {
     pub timestamp: i64,
     /// Application-defined message type, e.g. `"ssh.sign_request"`.
     pub kind: String,
-    /// Raw CBOR body (application-defined schema).
+    /// CBOR-encoded protocol message body.
+    #[serde(with = "serde_bytes")]
     pub body: Vec<u8>,
 }
 
@@ -188,6 +193,67 @@ pub fn decrypt(
     let payload = verify_payload(&inner_bytes, &sender_cert)?;
 
     Ok((payload, sender_cert))
+}
+
+/// Seal a [`crate::protocol::Message`] into a
+/// [`crate::protocol::BusSecure`] envelope.
+///
+/// All protocol messages except `bus.csr_request` and `bus.cert_response`
+/// should be sent through this function once both sides have valid certificates.
+///
+/// - `sender_key`  : signs the inner COSE_Sign1 (Ed25519)
+/// - `sender_cert` : raw COSE_Sign1 cert bytes — embedded so the recipient can
+///   verify the signature without a separate lookup
+/// - `recipient`   : ECDH public key of the intended recipient
+/// - `message`     : the protocol message to seal
+pub fn seal_protocol_message(
+    sender_key: &dyn BusSigner,
+    sender_cert: &[u8],
+    recipient: &dyn BusRecipient,
+    message: &crate::protocol::Message,
+) -> Result<crate::protocol::Message> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    let body = super::csr::cbor_encode(message)?;
+    let mut id_bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut id_bytes);
+    let payload = MsgPayload {
+        msg_id: hex::encode(id_bytes),
+        timestamp: super::csr::unix_now()?,
+        kind: message.type_name().to_string(),
+        body,
+    };
+    let envelope_bytes = encrypt(sender_key, sender_cert, recipient, &payload)?;
+    Ok(crate::protocol::Message::BusSecure(
+        crate::protocol::BusSecureEnvelope {
+            v: 1,
+            from: hex::encode(sender_key.fingerprint()),
+            envelope_b64: B64.encode(&envelope_bytes),
+        },
+    ))
+}
+
+/// Decrypt and verify a [`crate::protocol::BusSecureEnvelope`] produced by
+/// [`seal_protocol_message`].
+///
+/// Returns the inner [`crate::protocol::Message`] and the sender's verified
+/// [`CertPayload`].
+///
+/// - `recipient_key`         : used for the ECDH decryption step
+/// - `authority_sign_pubkey` : Ed25519 authority public key used to verify the
+///   sender's certificate embedded in the envelope
+/// - `envelope`              : the `BusSecureEnvelope` to open
+pub fn open_protocol_message(
+    recipient_key: &dyn BusDecryptor,
+    authority_sign_pubkey: &[u8; 32],
+    envelope: &crate::protocol::BusSecureEnvelope,
+) -> Result<(crate::protocol::Message, CertPayload)> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    let envelope_bytes = B64.decode(&envelope.envelope_b64)?;
+    let (payload, cert) = decrypt(recipient_key, &envelope_bytes, authority_sign_pubkey)?;
+    let message = super::csr::cbor_decode(&payload.body)?;
+    Ok((message, cert))
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

@@ -561,6 +561,9 @@ fn cmd_decrypt(
         bus::decrypt(&recipient_key, &envelope, &authority_sign_pub)?
     };
 
+    let body_display = p43::bus::csr::cbor_to_json_pretty(&payload.body)
+        .unwrap_or_else(|_| format!("<{} bytes, not valid CBOR>", payload.body.len()));
+
     println!("Decrypted message:");
     println!("  msg_id   : {}", payload.msg_id);
     println!("  kind     : {}", payload.kind);
@@ -569,6 +572,6 @@ fn cmd_decrypt(
         "  sender   : {} ({})",
         sender_cert.label, sender_cert.device_id
     );
-    println!("  body     : {}", String::from_utf8_lossy(&payload.body));
+    println!("  body     :\n{}", body_display);
     Ok(())
 }

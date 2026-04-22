@@ -1,12 +1,14 @@
 use crate::frb_generated::StreamSink;
 use anyhow::Context as _;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::Engine as _;
 use flutter_rust_bridge::frb;
+use p43::bus::BusSigner as _;
 use p43::key_store::{keygen, store::KeyStore};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use tokio::sync::mpsc;
 
 // ── Global Tokio runtime ──────────────────────────────────────────────────────
 // FRB only provides a Tokio context for async bridge functions.  Sync functions
@@ -119,11 +121,15 @@ static STORE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Data held on the Rust side for an in-flight `ssh.sign_request`.
 /// The Flutter layer only receives `fingerprint` and `description` for display;
-/// `data` (base64) and `flags` are kept here and looked up on approval.
+/// `data` and `flags` are kept here and looked up on approval.
 struct PendingSign {
     fingerprint: String,
-    data_b64: String,
+    data: Vec<u8>,
     flags: u32,
+    /// Sender's verified [`p43::bus::CertPayload`] when the request arrived
+    /// inside a `BusSecure` envelope.  Used to encrypt the response back to
+    /// the requesting device.  `None` for plaintext requests (legacy / tests).
+    sender_cert: Option<p43::bus::CertPayload>,
 }
 
 static PENDING_SIGNS: OnceLock<Mutex<HashMap<String, PendingSign>>> = OnceLock::new();
@@ -156,6 +162,77 @@ static CARD_PIN_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new(
 
 fn card_pin_cache() -> &'static Mutex<HashMap<String, String>> {
     CARD_PIN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// ── Authority session ─────────────────────────────────────────────────────────
+//
+// The unlocked authority key + its COSE_Sign1 cert bytes.  Held in memory so
+// incoming `BusSecure` messages can be decrypted without a passphrase prompt
+// and outgoing responses can be sealed before sending.
+//
+// Cleared by `bus_lock_session` and `mx_clear_caches`.
+
+static AUTHORITY_SESSION: OnceLock<Mutex<Option<(p43::bus::AuthorityKey, Vec<u8>)>>> =
+    OnceLock::new();
+
+fn authority_session() -> &'static Mutex<Option<(p43::bus::AuthorityKey, Vec<u8>)>> {
+    AUTHORITY_SESSION.get_or_init(|| Mutex::new(None))
+}
+
+// ── Outbound queue sender ─────────────────────────────────────────────────────
+//
+// Populated by `mx_listen_all` when the bridge is set up.  All `mx_respond_*`
+// functions send through here so that encryption is handled by the worker task
+// rather than inline.  Protected by a Mutex so it can be replaced on reconnect.
+
+static OUTBOUND_TX: OnceLock<Mutex<Option<mpsc::Sender<p43::bus::OutboundBusMessage>>>> =
+    OnceLock::new();
+
+fn outbound_tx_cell()
+-> &'static Mutex<Option<mpsc::Sender<p43::bus::OutboundBusMessage>>> {
+    OUTBOUND_TX.get_or_init(|| Mutex::new(None))
+}
+
+// ── External bus sender (for locked-message replay) ───────────────────────────
+//
+// A clone of the external-bus broadcast sender kept so that `bus_unlock_session`
+// can re-inject `BusSecure` messages that arrived while the session was locked.
+
+static EXTERNAL_TX: OnceLock<
+    Mutex<Option<tokio::sync::broadcast::Sender<p43::protocol::Message>>>,
+> = OnceLock::new();
+
+fn external_tx_cell()
+-> &'static Mutex<Option<tokio::sync::broadcast::Sender<p43::protocol::Message>>> {
+    EXTERNAL_TX.get_or_init(|| Mutex::new(None))
+}
+
+// ── Locked-message queue ──────────────────────────────────────────────────────
+//
+// `BusSecure` messages that arrived while the authority session was locked are
+// pushed here by the `on_locked` callback in `mx_listen_all`.
+// `bus_unlock_session` drains this queue and replays each message onto the
+// external bus so the full decrypt → internal-bus → AppMessage pipeline runs.
+
+static LOCKED_MSG_QUEUE: OnceLock<
+    Mutex<std::collections::VecDeque<p43::protocol::Message>>,
+> = OnceLock::new();
+
+fn locked_msg_queue()
+-> &'static Mutex<std::collections::VecDeque<p43::protocol::Message>> {
+    LOCKED_MSG_QUEUE.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
+}
+
+// ── Pending list-keys map ─────────────────────────────────────────────────────
+//
+// Keyed by `request_id` of an in-flight `ssh.list_keys_request`.  Stores the
+// sender cert (if the request arrived encrypted) so the response can be sealed.
+
+static PENDING_LIST_KEYS: OnceLock<Mutex<HashMap<String, Option<p43::bus::CertPayload>>>> =
+    OnceLock::new();
+
+fn pending_list_keys() -> &'static Mutex<HashMap<String, Option<p43::bus::CertPayload>>> {
+    PENDING_LIST_KEYS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ── Signing-key cache ─────────────────────────────────────────────────────────
@@ -640,14 +717,21 @@ pub async fn mx_set_agent_room(room_id: String) -> anyhow::Result<()> {
     tracing::instrument(fields(request_id, room_id))
 )]
 pub async fn mx_respond_list_keys(room_id: String, request_id: String) -> anyhow::Result<()> {
+    // Consume the sender cert so the response can be sealed if available.
+    let sender_cert = pending_list_keys()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(&request_id))
+        .flatten();
+
     let store_dir = default_store_dir();
     let keys = p43::ssh_agent::list_ssh_public_keys(&store_dir);
-    let json = p43::protocol::Message::SshListKeysResponse(p43::protocol::SshListKeysResponse {
-        request_id,
-        keys,
-    })
-    .to_json()?;
-    p43::matrix::global::send_message(&room_id, &json).await
+    let response =
+        p43::protocol::Message::SshListKeysResponse(p43::protocol::SshListKeysResponse {
+            request_id,
+            keys,
+        });
+    send_via_bridge(&room_id, response, sender_cert).await
 }
 
 // ── Bus registration (authority side) ────────────────────────────────────────
@@ -668,12 +752,16 @@ pub struct BusCsrEvent {
 /// `StreamController`s:
 /// - [`AppMessage::AgentEvent`] → `AgentScreen`
 /// - [`AppMessage::BusEvent`]   → `DevicesScreen`
+/// - [`AppMessage::SessionLockRequired`] → root shell (switch to Devices tab)
 #[derive(Clone)]
 pub enum AppMessage {
     /// An SSH-agent protocol event (list-keys or sign request).
     AgentEvent { event: AgentRequest },
     /// A bus device-registration CSR event.
     BusEvent { event: BusCsrEvent },
+    /// A `BusSecure` message arrived but the authority session is locked.
+    /// The UI should navigate to Devices → Authority so the user can unlock.
+    SessionLockRequired,
 }
 
 /// Subscribe to **all** p43 protocol messages in `room_id` with a single
@@ -684,12 +772,18 @@ pub enum AppMessage {
 ///   [`AppMessage::AgentEvent`] → `AgentScreen`
 ///   [`AppMessage::BusEvent`]   → `DevicesScreen`
 ///
+/// Internally sets up the two-layer bus bridge:
+///   - Raw Matrix messages → **external bus** (broadcast)
+///   - Decrypt middleware → **internal bus** (broadcast, plaintext)
+///   - Application dispatcher subscribes to internal bus → `AppMessage` stream
+///   - **Outbound queue** (mpsc) → encrypt worker → Matrix send
+///
 /// The `agent_since` pointer (persisted in `matrix-config.json`) is respected
 /// and updated on every sync batch so reconnects never replay seen messages.
 #[frb]
 pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
     tokio_rt().spawn(async move {
-        // Load the persisted since-token for this room, if any.
+        // ── Since token ───────────────────────────────────────────────────────
         let since: Option<String> = (|| -> Option<String> {
             let store_dir = STORE_DIR.get()?;
             let cfg = p43::matrix::MatrixConfig::from_store_dir(store_dir);
@@ -697,8 +791,6 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
             saved.agent_since
         })();
 
-        // Persist the token on every sync batch so reconnects never replay
-        // already-seen messages, even after a crash.
         let pointer_store_dir = STORE_DIR.get().cloned();
         let on_pointer = move |token: String| {
             let Some(ref store_dir) = pointer_store_dir else {
@@ -712,51 +804,159 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
             let _ = p43::matrix::client::save_config(&saved, &cfg.config_path);
         };
 
+        // ── Bridge channels ───────────────────────────────────────────────────
+        let (external_tx, external_rx) = p43::bus::new_external_bus();
+        let (internal_tx, _initial_rx) = p43::bus::new_internal_bus();
+        let (outbound_tx, outbound_rx) = p43::bus::new_outbound_queue();
+
+        // Store the outbound sender so respond functions can enqueue responses.
+        if let Ok(mut guard) = outbound_tx_cell().lock() {
+            *guard = Some(outbound_tx);
+        }
+
+        // Store the external bus sender so bus_unlock_session can replay
+        // messages that arrived while the session was locked.
+        if let Ok(mut guard) = external_tx_cell().lock() {
+            *guard = Some(external_tx.clone());
+        }
+
+        // ── Decrypt middleware: external bus → internal bus ───────────────────
+        //
+        // Determine the authority's own fingerprint so echoed outbound messages
+        // (encrypted to the device, not to us) can be skipped.  Read from the
+        // authority pub file; fall back to empty string when not yet initialised.
+        let own_auth_fp: String = (|| -> Option<String> {
+            let store_dir = STORE_DIR.get()?;
+            let bus_dir = p43::bus::bus_dir(store_dir);
+            let authority_pub =
+                p43::bus::AuthorityPub::load(&p43::bus::authority_pub_path(&bus_dir)).ok()?;
+            Some(hex::encode(&authority_pub.fingerprint()))
+        })()
+        .unwrap_or_default();
+
+        {
+            let sink_locked = sink.clone();
+            p43::bus::spawn_decrypt_middleware(
+                move |env| {
+                    // Drop our own echoed outbound messages.
+                    if env.from == own_auth_fp {
+                        return p43::bus::DecryptResult::Skip;
+                    }
+                    let Ok(guard) = authority_session().lock() else {
+                        return p43::bus::DecryptResult::Err("mutex poisoned".into());
+                    };
+                    let Some((ref auth_key, _)) = *guard else {
+                        return p43::bus::DecryptResult::Locked;
+                    };
+                    let auth_sign_pub: [u8; 32] = auth_key.sign_pubkey();
+                    match p43::bus::open_protocol_message(auth_key, &auth_sign_pub, env) {
+                        Ok((inner, cert)) => p43::bus::DecryptResult::Ok(inner, cert),
+                        Err(e) => p43::bus::DecryptResult::Err(e.to_string()),
+                    }
+                },
+                move |locked_msg| {
+                    // Buffer the raw BusSecure message so it can be replayed
+                    // through the external bus once the session is unlocked.
+                    if let Ok(mut queue) = locked_msg_queue().lock() {
+                        queue.push_back(locked_msg);
+                    }
+                    let _ = sink_locked.add(AppMessage::SessionLockRequired);
+                },
+                external_rx,
+                internal_tx.clone(),
+            );
+        }
+
+        // ── Encrypt worker: outbound queue → seal → Matrix send ───────────────
+        p43::bus::spawn_encrypt_worker(
+            |msg, recipient| {
+                let Ok(guard) = authority_session().lock() else {
+                    return None;
+                };
+                let Some((ref auth_key, ref auth_cert)) = *guard else {
+                    return None;
+                };
+                p43::bus::seal_protocol_message(auth_key, auth_cert, recipient, msg).ok()
+            },
+            room_id.clone(),
+            outbound_rx,
+        );
+
+        // ── Internal bus dispatcher → AppMessage stream ───────────────────────
+        {
+            let sink_dispatch = sink.clone();
+            let mut internal_rx = internal_tx.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    let inbound = match internal_rx.recv().await {
+                        Ok(m) => m,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            eprintln!(
+                                "[p43::bridge] internal_rx lagged, dropped {n} messages"
+                            );
+                            continue;
+                        }
+                    };
+                    let sender_cert = inbound.sender_cert;
+                    let event = match inbound.message {
+                        p43::protocol::Message::SshListKeysRequest(r) => {
+                            if let Ok(mut map) = pending_list_keys().lock() {
+                                map.insert(r.request_id.clone(), sender_cert);
+                            }
+                            Some(AppMessage::AgentEvent {
+                                event: AgentRequest::ListKeys {
+                                    request_id: r.request_id,
+                                },
+                            })
+                        }
+                        p43::protocol::Message::SshSignRequest(r) => {
+                            if let Ok(mut map) = pending_signs().lock() {
+                                map.insert(
+                                    r.request_id.clone(),
+                                    PendingSign {
+                                        fingerprint: r.fingerprint.clone(),
+                                        data: r.data.clone(),
+                                        flags: r.flags,
+                                        sender_cert,
+                                    },
+                                );
+                            }
+                            Some(AppMessage::AgentEvent {
+                                event: AgentRequest::Sign {
+                                    request_id: r.request_id,
+                                    fingerprint: r.fingerprint,
+                                    description: r.description,
+                                },
+                            })
+                        }
+                        p43::protocol::Message::BusCsrRequest(r) => {
+                            Some(AppMessage::BusEvent {
+                                event: BusCsrEvent {
+                                    request_id: r.request_id,
+                                    device_label: r.device_label,
+                                    device_id: r.device_id,
+                                    csr_b64: r.csr_b64,
+                                },
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(m) = event {
+                        let _ = sink_dispatch.add(m);
+                    }
+                }
+            });
+        }
+
+        // ── Raw Matrix listener → external bus ────────────────────────────────
         let _ = p43::matrix::global::listen_room(
             &room_id,
             since.as_deref(),
             on_pointer,
             move |_sender, body| {
-                let msg = match p43::protocol::Message::from_json(&body) {
-                    Ok(p43::protocol::Message::SshListKeysRequest(r)) => {
-                        Some(AppMessage::AgentEvent {
-                            event: AgentRequest::ListKeys {
-                                request_id: r.request_id,
-                            },
-                        })
-                    }
-                    Ok(p43::protocol::Message::SshSignRequest(r)) => {
-                        // Store signing payload so Flutter can approve later.
-                        if let Ok(mut map) = pending_signs().lock() {
-                            map.insert(
-                                r.request_id.clone(),
-                                PendingSign {
-                                    fingerprint: r.fingerprint.clone(),
-                                    data_b64: r.data.clone(),
-                                    flags: r.flags,
-                                },
-                            );
-                        }
-                        Some(AppMessage::AgentEvent {
-                            event: AgentRequest::Sign {
-                                request_id: r.request_id,
-                                fingerprint: r.fingerprint,
-                                description: r.description,
-                            },
-                        })
-                    }
-                    Ok(p43::protocol::Message::BusCsrRequest(r)) => Some(AppMessage::BusEvent {
-                        event: BusCsrEvent {
-                            request_id: r.request_id,
-                            device_label: r.device_label,
-                            device_id: r.device_id,
-                            csr_b64: r.csr_b64,
-                        },
-                    }),
-                    _ => None,
-                };
-                if let Some(m) = msg {
-                    let _ = sink.add(m);
+                if let Ok(msg) = p43::protocol::Message::from_json(&body) {
+                    let _ = external_tx.send(msg);
                 }
             },
         )
@@ -1188,6 +1388,150 @@ pub fn bus_authority_keys_not_sealed() -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
+// ── Authority session management (FRB) ───────────────────────────────────────
+
+/// Unlock the bus authority session.
+///
+/// The authority key is decrypted from `authority.key.enc` and held in memory
+/// until [`bus_lock_session`] or [`mx_clear_caches`] is called.  While unlocked
+/// the app can decrypt incoming `BusSecure` messages and seal outgoing responses.
+#[frb]
+pub fn bus_unlock_session(
+    use_card: bool,
+    fingerprint: Option<String>,
+    pin: Option<String>,
+    passphrase: Option<String>,
+) -> anyhow::Result<()> {
+    use p43::bus;
+
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+
+    let encrypted = std::fs::read(bus::authority_enc_path(&bus_dir))
+        .context("authority.key.enc not found — run bus_init_authority first")?;
+    let authority_key = unlock_authority(
+        &encrypted,
+        use_card,
+        fingerprint.as_deref(),
+        pin.as_deref(),
+        passphrase.as_deref(),
+    )?;
+
+    // Load authority self-cert bytes so we can sign/seal outgoing responses.
+    let cert_bytes = std::fs::read(bus::authority_cert_path(&bus_dir))
+        .context("authority.cert.cbor not found — run bus_init_authority first")?;
+
+    if let Ok(mut guard) = authority_session().lock() {
+        *guard = Some((authority_key, cert_bytes));
+    }
+
+    // Prime the signing-credential caches with the credentials just used so
+    // that any replayed sign requests (see below) can be auto-approved without
+    // showing a second PIN / passphrase dialog.
+    let store_dir = default_store_dir();
+    if use_card {
+        if let (Some(fp), Some(ref pin_val)) = (fingerprint.as_deref(), &pin) {
+            if let Some(meta) = p43::ssh_agent::get_ssh_key_meta(&store_dir, fp) {
+                if let Ok(mut cache) = card_pin_cache().lock() {
+                    for ident in &meta.card_idents {
+                        cache.insert(ident.clone(), pin_val.clone());
+                    }
+                }
+            }
+        }
+    } else if let (Some(fp), Some(ref phrase)) = (fingerprint.as_deref(), &passphrase) {
+        if let Ok(mut cache) = passphrase_cache().lock() {
+            cache.insert(fp.to_string(), phrase.clone());
+        }
+    }
+
+    // Replay any BusSecure messages that arrived while the session was locked.
+    // We drain the queue first, then inject each message back onto the external
+    // bus so the full decrypt → internal-bus → AppMessage pipeline handles them.
+    let buffered: Vec<p43::protocol::Message> = locked_msg_queue()
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default();
+
+    if !buffered.is_empty() {
+        if let Ok(guard) = external_tx_cell().lock() {
+            if let Some(ref tx) = *guard {
+                for msg in buffered {
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Clear the in-memory authority session key.
+///
+/// After this call the app can no longer decrypt `BusSecure` messages or seal
+/// outgoing responses until [`bus_unlock_session`] is called again.
+#[frb]
+pub fn bus_lock_session() {
+    if let Ok(mut guard) = authority_session().lock() {
+        *guard = None;
+    }
+}
+
+/// Returns `true` if the authority session key is currently unlocked.
+#[frb]
+pub fn bus_is_session_unlocked() -> bool {
+    authority_session()
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
+}
+
+// ── Outbound helper ───────────────────────────────────────────────────────────
+
+/// Enqueue `msg` on the outbound bus (encrypt worker handles sealing + send).
+///
+/// When `sender_cert` is `Some`, the message will be sealed to that recipient
+/// by the encrypt worker.  When `None`, it is sent as plain JSON.
+///
+/// Falls back to a direct `send_message` call if the outbound queue has not
+/// been set up yet (e.g. during early startup before `mx_listen_all` runs).
+async fn send_via_bridge(
+    room_id: &str,
+    msg: p43::protocol::Message,
+    sender_cert: Option<p43::bus::CertPayload>,
+) -> anyhow::Result<()> {
+    let tx_opt: Option<mpsc::Sender<p43::bus::OutboundBusMessage>> = outbound_tx_cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+
+    if let Some(tx) = tx_opt {
+        tx.send(p43::bus::OutboundBusMessage {
+            message: msg,
+            recipient_cert: sender_cert,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("outbound queue closed"))?;
+        return Ok(());
+    }
+
+    // Fallback: no bridge yet — inline seal + send.
+    let json = if let Some(cert) = sender_cert.as_ref() {
+        let sealed_opt = authority_session()
+            .lock()
+            .ok()
+            .and_then(|guard| {
+                guard.as_ref().and_then(|(auth_key, auth_cert_bytes)| {
+                    p43::bus::seal_protocol_message(auth_key, auth_cert_bytes, cert, &msg).ok()
+                })
+            });
+        sealed_opt.map(|s| s.to_json()).unwrap_or_else(|| msg.to_json())?
+    } else {
+        msg.to_json()?
+    };
+    p43::matrix::global::send_message(room_id, &json).await
+}
+
 fn resolve_secret(explicit: Option<String>, env_var: &str, prompt: &str) -> anyhow::Result<String> {
     if let Some(v) = explicit {
         return Ok(v);
@@ -1223,6 +1567,18 @@ pub fn has_cached_passphrase(fingerprint: String) -> bool {
     has_key || has_passphrase || has_rsa_key
 }
 
+/// Prime the passphrase cache for a given key fingerprint.
+///
+/// Call after a successful `bus_unlock_session` so that sign requests arriving
+/// shortly after can be auto-approved without asking for the passphrase again.
+#[frb]
+pub fn mx_prime_passphrase_cache(fingerprint: String, passphrase: String) {
+    passphrase_cache()
+        .lock()
+        .unwrap()
+        .insert(fingerprint, passphrase);
+}
+
 /// Enable or disable the in-memory signing-key cache.
 ///
 /// When `enabled`:
@@ -1245,7 +1601,8 @@ pub fn mx_set_cache_key_enabled(enabled: bool) {
     }
 }
 
-/// Clear all in-memory credential caches (passphrase + signing key).
+/// Clear all in-memory credential caches (passphrase + signing key + authority
+/// session).
 ///
 /// Does **not** affect the `KEY_CACHE_ENABLED` flag — the next successful
 /// `mx_respond_sign` will repopulate the caches if caching is still enabled.
@@ -1261,6 +1618,9 @@ pub fn mx_clear_caches() {
     }
     if let Ok(mut cache) = card_pin_cache().lock() {
         cache.clear();
+    }
+    if let Ok(mut session) = authority_session().lock() {
+        *session = None;
     }
     p43::ssh_agent::clear_rsa_key_cache();
 }
@@ -1289,11 +1649,8 @@ pub async fn mx_respond_sign(
         .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
 
     let store_dir = default_store_dir();
-    let data = B64
-        .decode(&pending.data_b64)
-        .map_err(|e| anyhow::anyhow!("Bad base64 in sign request: {e}"))?;
 
-    let signature_b64 = if KEY_CACHE_ENABLED.load(Ordering::Relaxed) {
+    let sig = if KEY_CACHE_ENABLED.load(Ordering::Relaxed) {
         // Extract and cache the keypair bytes while we're decrypting anyway.
         // RSA keys return None (too large for the 64-byte slot); they fall
         // back to the passphrase cache for subsequent auto-approvals.
@@ -1301,14 +1658,19 @@ pub async fn mx_respond_sign(
             &store_dir,
             &pending.fingerprint,
             &passphrase,
-            &data,
+            &pending.data,
         )?;
         if let (Ok(mut cache), Some(bytes)) = (signing_key_cache().lock(), keypair_bytes) {
             cache.insert(pending.fingerprint.clone(), Box::new(bytes));
         }
         sig
     } else {
-        p43::ssh_agent::sign_with_soft_key(&store_dir, &pending.fingerprint, &passphrase, &data)?
+        p43::ssh_agent::sign_with_soft_key(
+            &store_dir,
+            &pending.fingerprint,
+            &passphrase,
+            &pending.data,
+        )?
     };
 
     // Always cache the passphrase as a fallback for when key-cache is later disabled.
@@ -1316,12 +1678,11 @@ pub async fn mx_respond_sign(
         cache.insert(pending.fingerprint, passphrase);
     }
 
-    let json = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+    let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
         request_id,
-        signature: signature_b64,
-    })
-    .to_json()?;
-    p43::matrix::global::send_message(&room_id, &json).await
+        signature: sig,
+    });
+    send_via_bridge(&room_id, response, pending.sender_cert).await
 }
 
 /// Approve an `ssh.sign_request` for a card-backed key using the card's User PIN.
@@ -1349,15 +1710,12 @@ pub async fn mx_respond_sign_card(
         .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
 
     let store_dir = default_store_dir();
-    let data = B64
-        .decode(&pending.data_b64)
-        .map_err(|e| anyhow::anyhow!("Bad base64 in sign request: {e}"))?;
 
-    let signature_b64 = p43::ssh_agent::sign_with_card_key(
+    let sig = p43::ssh_agent::sign_with_card_key(
         &store_dir,
         &pending.fingerprint,
         &pin,
-        &data,
+        &pending.data,
         pending.flags,
     )?;
 
@@ -1370,12 +1728,11 @@ pub async fn mx_respond_sign_card(
         }
     }
 
-    let json = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+    let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
         request_id,
-        signature: signature_b64,
-    })
-    .to_json()?;
-    p43::matrix::global::send_message(&room_id, &json).await
+        signature: sig,
+    });
+    send_via_bridge(&room_id, response, pending.sender_cert).await
 }
 
 /// Returns `true` if a cached PIN exists for the given card AID ident,
@@ -1410,9 +1767,6 @@ pub async fn mx_respond_sign_card_cached(
         .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
 
     let store_dir = default_store_dir();
-    let data = B64
-        .decode(&pending.data_b64)
-        .map_err(|e| anyhow::anyhow!("Bad base64 in sign request: {e}"))?;
 
     // Resolve card idents for this fingerprint, then look up a cached PIN.
     let meta = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint)
@@ -1428,20 +1782,19 @@ pub async fn mx_respond_sign_card_cached(
             .ok_or_else(|| anyhow::anyhow!("No cached PIN for this card — enter PIN first"))?
     };
 
-    let signature_b64 = p43::ssh_agent::sign_with_card_key(
+    let sig = p43::ssh_agent::sign_with_card_key(
         &store_dir,
         &pending.fingerprint,
         &pin,
-        &data,
+        &pending.data,
         pending.flags,
     )?;
 
-    let json = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+    let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
         request_id,
-        signature: signature_b64,
-    })
-    .to_json()?;
-    p43::matrix::global::send_message(&room_id, &json).await
+        signature: sig,
+    });
+    send_via_bridge(&room_id, response, pending.sender_cert).await
 }
 
 /// Return the number of User PIN attempts remaining for a connected YubiKey /
@@ -1479,19 +1832,14 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
         .remove(&request_id)
         .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
 
-    let data = B64
-        .decode(&pending.data_b64)
-        .map_err(|e| anyhow::anyhow!("Bad base64 in sign request: {e}"))?;
-
     // ── Fast path 1: cached decrypted RSA key (zero-KDF for RSA keys) ─────────
     if p43::ssh_agent::has_cached_rsa_key(&pending.fingerprint) {
-        let signature_b64 = p43::ssh_agent::sign_rsa_cached(&pending.fingerprint, &data)?;
-        let json = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+        let sig = p43::ssh_agent::sign_rsa_cached(&pending.fingerprint, &pending.data)?;
+        let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
             request_id,
-            signature: signature_b64,
-        })
-        .to_json()?;
-        return p43::matrix::global::send_message(&room_id, &json).await;
+            signature: sig,
+        });
+        return send_via_bridge(&room_id, response, pending.sender_cert).await;
     }
 
     // ── Fast path 2: cached decrypted Ed25519 keypair ─────────────────────────
@@ -1500,8 +1848,8 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
         .ok()
         .and_then(|cache| cache.get(&pending.fingerprint).cloned());
 
-    let signature_b64 = if let Some(keypair_bytes) = cached_keypair {
-        p43::ssh_agent::sign_with_cached_keypair(&keypair_bytes, &data)?
+    let sig = if let Some(keypair_bytes) = cached_keypair {
+        p43::ssh_agent::sign_with_cached_keypair(&keypair_bytes, &pending.data)?
     } else {
         // ── Slow fallback: re-run KDF with cached passphrase ─────────────────
         let passphrase = passphrase_cache()
@@ -1512,16 +1860,19 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
             .ok_or_else(|| anyhow::anyhow!("No cached passphrase for this key"))?;
 
         let store_dir = default_store_dir();
-        p43::ssh_agent::sign_with_soft_key(&store_dir, &pending.fingerprint, &passphrase, &data)?
+        p43::ssh_agent::sign_with_soft_key(
+            &store_dir,
+            &pending.fingerprint,
+            &passphrase,
+            &pending.data,
+        )?
     };
 
-    let json = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+    let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
         request_id,
-        signature: signature_b64,
-    })
-    .to_json()?;
-
-    p43::matrix::global::send_message(&room_id, &json).await
+        signature: sig,
+    });
+    send_via_bridge(&room_id, response, pending.sender_cert).await
 }
 
 /// Reject an `ssh.sign_request`: send an error response and discard the request.
@@ -1537,13 +1888,13 @@ pub async fn mx_reject_sign(room_id: String, request_id: String) -> anyhow::Resu
         .ok()
         .and_then(|mut m| m.remove(&request_id));
 
-    let json = p43::protocol::Message::Error(p43::protocol::ErrorResponse {
+    let msg = p43::protocol::Message::Error(p43::protocol::ErrorResponse {
         request_id: Some(request_id),
         message: "User rejected the sign request".into(),
-    })
-    .to_json()?;
+    });
 
-    p43::matrix::global::send_message(&room_id, &json).await
+    // Rejection is always plaintext — no recipient cert needed.
+    send_via_bridge(&room_id, msg, None).await
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────

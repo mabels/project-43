@@ -20,6 +20,7 @@ p43 = { path = "../../lib", default-features = false, features = [
 base64 = "0.22"
 dirs   = "5"
 anyhow = "1"
+hex    = "0.4"
 # tokio for spawning tasks from StreamSink bridge functions
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 rpassword = "7"

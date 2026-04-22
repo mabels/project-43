@@ -22,6 +22,7 @@
 //! OpenPGP-encrypted to the user's main key (any format).  See [`authority`].
 
 pub mod authority;
+pub mod bridge;
 pub mod cert;
 pub mod csr;
 pub mod device;
@@ -41,7 +42,14 @@ pub use list::{
     delete_device_key, list_own_devices, list_peers, remove_peer, resolve_device_key,
     resolve_own_device_label, resolve_recipient_cert, OwnDeviceInfo, PeerInfo,
 };
-pub use message::{decrypt, encrypt, BusDecryptor, BusEnvelope, BusRecipient, MsgPayload};
+pub use bridge::{
+    new_external_bus, new_internal_bus, new_outbound_queue, spawn_decrypt_middleware,
+    spawn_encrypt_worker, DecryptResult, InboundBusMessage, OutboundBusMessage,
+};
+pub use message::{
+    decrypt, encrypt, open_protocol_message, seal_protocol_message, BusDecryptor, BusEnvelope,
+    BusRecipient, MsgPayload,
+};
 pub use signer::BusSigner;
 
 // ── Directory helpers ─────────────────────────────────────────────────────────

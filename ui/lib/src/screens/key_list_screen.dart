@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:p43/src/rust/api/simple.dart';
+import '../services/settings_service.dart';
 import 'generate_key_screen.dart';
 import 'keys/card_import_sheet.dart';
 import 'keys/key_card.dart';
@@ -133,6 +134,8 @@ class _KeyListScreenState extends State<KeyListScreen> {
           if (keys.isEmpty) {
             return _EmptyView(onGenerate: _openGenerate);
           }
+          final defaultFp =
+              SettingsService.instance.settings.defaultKeyFingerprint;
           return ListView.separated(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             itemCount: keys.length,
@@ -140,6 +143,15 @@ class _KeyListScreenState extends State<KeyListScreen> {
             itemBuilder: (context, i) => KeyCard(
               key: ValueKey(keys[i].fingerprint),
               info: keys[i],
+              isDefault: keys[i].fingerprint == defaultFp,
+              onSetDefault: () async {
+                await SettingsService.instance.save(
+                  SettingsService.instance.settings.copyWith(
+                    defaultKeyFingerprint: keys[i].fingerprint,
+                  ),
+                );
+                setState(() {}); // rebuild to update star
+              },
               onTap: () => _showKeyDetail(context, keys[i]),
             ),
           );

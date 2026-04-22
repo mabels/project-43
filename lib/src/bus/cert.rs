@@ -26,10 +26,13 @@ pub struct CertPayload {
     pub device_id: String,
     pub label: String,
     /// Raw 32-byte Ed25519 public key (for COSE_Sign1 verification).
+    #[serde(with = "serde_bytes")]
     pub sign_pubkey: Vec<u8>,
     /// Raw 32-byte X25519 public key (for ECDH key agreement).
+    #[serde(with = "serde_bytes")]
     pub ecdh_pubkey: Vec<u8>,
     /// First 8 bytes of authority signing key — identifies the issuer.
+    #[serde(with = "serde_bytes")]
     pub issuer_fp: Vec<u8>,
     /// Issued-at unix timestamp.
     pub iat: i64,

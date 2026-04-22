@@ -360,7 +360,22 @@ class _AgentScreenState extends State<AgentScreen> {
 
     final ctrl = TextEditingController();
     var obscure = true;
-    return showDialog<String>(
+    Timer? obscureTimer;
+
+    void toggleObscure(StateSetter setLocal) {
+      obscureTimer?.cancel();
+      if (obscure) {
+        setLocal(() => obscure = false);
+        obscureTimer = Timer(const Duration(seconds: 10), () {
+          setLocal(() => obscure = true);
+        });
+      } else {
+        obscureTimer = null;
+        setLocal(() => obscure = true);
+      }
+    }
+
+    final result = await showDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
@@ -464,26 +479,37 @@ class _AgentScreenState extends State<AgentScreen> {
                       size: 18,
                       color: const Color(0xFF8E8E93),
                     ),
-                    onPressed: () => setLocal(() => obscure = !obscure),
+                    onPressed: () => toggleObscure(setLocal),
                   ),
                 ),
-                onSubmitted: (_) => Navigator.pop(ctx, ctrl.text),
+                onSubmitted: (_) {
+                  obscureTimer?.cancel();
+                  Navigator.pop(ctx, ctrl.text);
+                },
               ),
             ],
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(ctx),
+              onPressed: () {
+                obscureTimer?.cancel();
+                Navigator.pop(ctx);
+              },
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(ctx, ctrl.text),
+              onPressed: () {
+                obscureTimer?.cancel();
+                Navigator.pop(ctx, ctrl.text);
+              },
               child: const Text('Sign'),
             ),
           ],
         ),
       ),
     );
+    obscureTimer?.cancel();
+    return result;
   }
 
   Future<String?> _promptPin(RequestEntry entry) async {
@@ -521,7 +547,22 @@ class _AgentScreenState extends State<AgentScreen> {
 
     final ctrl = TextEditingController();
     var obscure = true;
-    return showDialog<String>(
+    Timer? obscureTimer;
+
+    void toggleObscure(StateSetter setLocal) {
+      obscureTimer?.cancel();
+      if (obscure) {
+        setLocal(() => obscure = false);
+        obscureTimer = Timer(const Duration(seconds: 10), () {
+          setLocal(() => obscure = true);
+        });
+      } else {
+        obscureTimer = null;
+        setLocal(() => obscure = true);
+      }
+    }
+
+    final result = await showDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
@@ -655,26 +696,37 @@ class _AgentScreenState extends State<AgentScreen> {
                       size: 18,
                       color: const Color(0xFF8E8E93),
                     ),
-                    onPressed: () => setLocal(() => obscure = !obscure),
+                    onPressed: () => toggleObscure(setLocal),
                   ),
                 ),
-                onSubmitted: (_) => Navigator.pop(ctx, ctrl.text),
+                onSubmitted: (_) {
+                  obscureTimer?.cancel();
+                  Navigator.pop(ctx, ctrl.text);
+                },
               ),
             ],
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(ctx),
+              onPressed: () {
+                obscureTimer?.cancel();
+                Navigator.pop(ctx);
+              },
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(ctx, ctrl.text),
+              onPressed: () {
+                obscureTimer?.cancel();
+                Navigator.pop(ctx, ctrl.text);
+              },
               child: const Text('Sign'),
             ),
           ],
         ),
       ),
     );
+    obscureTimer?.cancel();
+    return result;
   }
 
   // ── Room picker ───────────────────────────────────────────────────────────

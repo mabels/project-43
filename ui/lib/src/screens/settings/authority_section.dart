@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:p43/src/rust/api/simple.dart' as rust;
+import '../../services/settings_service.dart';
 
 // ── Authority status / init tile ──────────────────────────────────────────────
 
@@ -660,6 +662,7 @@ class _UnlockDialogState extends State<_UnlockDialog> {
   String? _selectedFp;
   final _credCtrl = TextEditingController();
   bool _obscure = true;
+  Timer? _obscureTimer;
   bool _busy = false;
   String? _error;
 
@@ -667,14 +670,41 @@ class _UnlockDialogState extends State<_UnlockDialog> {
   void initState() {
     super.initState();
     if (widget.sealedKeys.isNotEmpty) {
-      _selectedFp = widget.sealedKeys.first.fingerprint;
+      // Pre-select the user's default key when it is available in this set.
+      final dfp = SettingsService.instance.settings.defaultKeyFingerprint;
+      final hasDefault = dfp != null &&
+          widget.sealedKeys.any((k) => k.fingerprint == dfp);
+      _selectedFp =
+          hasDefault ? dfp : widget.sealedKeys.first.fingerprint;
     }
   }
 
   @override
   void dispose() {
+    _obscureTimer?.cancel();
     _credCtrl.dispose();
     super.dispose();
+  }
+
+  /// Toggle visibility.  Revealing starts a 10 s auto-hide timer; hiding or
+  /// any action (submit, key switch) cancels it and restores obscured state.
+  void _toggleObscure() {
+    _obscureTimer?.cancel();
+    if (_obscure) {
+      setState(() => _obscure = false);
+      _obscureTimer = Timer(const Duration(seconds: 10), () {
+        if (mounted) setState(() => _obscure = true);
+      });
+    } else {
+      _obscureTimer = null;
+      setState(() => _obscure = true);
+    }
+  }
+
+  void _resetObscure() {
+    _obscureTimer?.cancel();
+    _obscureTimer = null;
+    if (mounted && !_obscure) setState(() => _obscure = true);
   }
 
   rust.KeySealStatus? get _selectedKey => _selectedFp == null
@@ -740,11 +770,17 @@ class _UnlockDialogState extends State<_UnlockDialog> {
                       enabled: !_busy,
                       onTap: _busy
                           ? null
-                          : () => setState(() {
-                              _selectedFp = widget.sealedKeys[i].fingerprint;
-                              _credCtrl.clear();
-                              _error = null;
-                            }),
+                          : () {
+                              _obscureTimer?.cancel();
+                              _obscureTimer = null;
+                              setState(() {
+                                _selectedFp =
+                                    widget.sealedKeys[i].fingerprint;
+                                _credCtrl.clear();
+                                _error = null;
+                                _obscure = true;
+                              });
+                            },
                     ),
                   ],
                 ],
@@ -759,10 +795,12 @@ class _UnlockDialogState extends State<_UnlockDialog> {
             TextField(
               key: ValueKey(_isCard),
               controller: _credCtrl,
-              obscureText: _isCard ? true : _obscure,
+              obscureText: _obscure,
               autofocus: true,
               enabled: !_busy,
               style: const TextStyle(fontSize: 14),
+              keyboardType:
+                  _isCard ? TextInputType.number : TextInputType.text,
               decoration: InputDecoration(
                 hintText: '••••••',
                 hintStyle: const TextStyle(color: Color(0xFF8E8E93)),
@@ -773,21 +811,23 @@ class _UnlockDialogState extends State<_UnlockDialog> {
                   horizontal: 12,
                   vertical: 8,
                 ),
-                suffixIcon: _isCard
-                    ? null
-                    : IconButton(
-                        icon: Icon(
-                          _obscure
-                              ? Icons.visibility_outlined
-                              : Icons.visibility_off_outlined,
-                          size: 18,
-                        ),
-                        onPressed: _busy
-                            ? null
-                            : () => setState(() => _obscure = !_obscure),
-                      ),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _obscure
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                    size: 18,
+                    color: const Color(0xFF8E8E93),
+                  ),
+                  onPressed: _busy ? null : _toggleObscure,
+                ),
               ),
-              onSubmitted: _busy ? null : (_) => _submit(),
+              onSubmitted: _busy
+                  ? null
+                  : (_) {
+                      _resetObscure();
+                      _submit();
+                    },
             ),
             // ── Inline error ────────────────────────────────────────────
             if (_error != null) ...[
@@ -838,6 +878,7 @@ class _UnlockDialogState extends State<_UnlockDialog> {
   }
 
   Future<void> _submit() async {
+    _resetObscure();
     final cred = _credCtrl.text.isEmpty ? null : _credCtrl.text;
     setState(() {
       _busy = true;
@@ -1839,6 +1880,172 @@ class _AuthorityQrDialogState extends State<_AuthorityQrDialog> {
           child: const Text('Close'),
         ),
       ],
+    );
+  }
+}
+
+// ── Session unlock tile ───────────────────────────────────────────────────────
+
+/// Shows current session lock state and lets the user unlock / lock the
+/// authority key held in memory.  The key is required to decrypt incoming
+/// `BusSecure` messages and to seal outgoing responses.
+///
+/// To programmatically open the unlock dialog from outside this widget, obtain
+/// a [GlobalKey<SessionUnlockTileState>], pass it as the widget key, and call
+/// [SessionUnlockTileState.openUnlockDialog] when needed.
+class SessionUnlockTile extends StatefulWidget {
+  const SessionUnlockTile({super.key});
+
+  @override
+  State<SessionUnlockTile> createState() => SessionUnlockTileState();
+}
+
+class SessionUnlockTileState extends State<SessionUnlockTile> {
+  bool _unlocked = false;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  /// Open the unlock dialog.  No-op when already unlocked or not mounted.
+  void openUnlockDialog() {
+    if (!mounted || _unlocked) return;
+    _showUnlockDialog();
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final v = await rust.busIsSessionUnlocked();
+      if (mounted) setState(() => _unlocked = v);
+    } catch (_) {}
+  }
+
+  Future<void> _lock() async {
+    setState(() => _busy = true);
+    try {
+      await rust.busLockSession();
+      if (mounted) {
+        setState(() {
+          _unlocked = false;
+          _busy = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Lock failed: $e')));
+      }
+    }
+  }
+
+  Future<void> _showUnlockDialog() async {
+    List<rust.KeySealStatus> sealedKeys;
+    try {
+      sealedKeys = await rust.busAuthorityKeySealStatus();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Failed to load keys: $e')));
+      }
+      return;
+    }
+    if (!mounted) return;
+    if (sealedKeys.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No sealed keys found — initialise the authority first.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _UnlockDialog(
+        title: 'Unlock Session',
+        description:
+            'Decrypt the authority key into memory so incoming encrypted '
+            'messages can be processed. The session is cleared on screen lock.',
+        confirmColor: const Color(0xFF0A84FF),
+        confirmLabel: 'Unlock',
+        sealedKeys: sealedKeys,
+        onConfirm: (useCard, fp, pin, passphrase) async {
+          await rust.busUnlockSession(
+            useCard: useCard,
+            fingerprint: fp,
+            pin: pin,
+            passphrase: passphrase,
+          );
+          // Prime the signing credential cache so that a sign request
+          // arriving shortly after does not require the passphrase again.
+          if (!useCard &&
+              fp != null &&
+              fp.isNotEmpty &&
+              passphrase != null &&
+              passphrase.isNotEmpty) {
+            await rust.mxPrimePassphraseCache(
+              fingerprint: fp,
+              passphrase: passphrase,
+            );
+            SettingsService.instance.resetCacheTimer();
+          }
+          if (mounted) setState(() => _unlocked = true);
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      tileColor: const Color(0xFF2C2C2E),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      leading: Icon(
+        _unlocked ? Icons.lock_open_outlined : Icons.lock_outlined,
+        color: _unlocked ? const Color(0xFF30D158) : const Color(0xFF8E8E93),
+        size: 20,
+      ),
+      title: Text(
+        _unlocked ? 'Session unlocked' : 'Session locked',
+        style: const TextStyle(fontSize: 15),
+      ),
+      subtitle: Text(
+        _unlocked
+            ? 'Encrypted messages are being processed.'
+            : 'Tap to unlock — required for encrypted SSH requests.',
+        style: const TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
+      ),
+      trailing: _busy
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : _unlocked
+              ? TextButton(
+                  onPressed: _lock,
+                  child: const Text(
+                    'Lock',
+                    style: TextStyle(color: Color(0xFFFF453A)),
+                  ),
+                )
+              : const Icon(
+                  Icons.chevron_right,
+                  size: 18,
+                  color: Color(0xFF8E8E93),
+                ),
+      onTap: _unlocked ? null : _showUnlockDialog,
     );
   }
 }

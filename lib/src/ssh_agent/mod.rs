@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 // ── rsa-crate imports (direct RSA signing, bypasses ssh-key 0.6.7 bug) ───────
 // ssh-key 0.6.7 TryFrom<&RsaKeypair> passes [p, p] instead of [p, q] to
@@ -64,10 +63,9 @@ pub fn has_cached_rsa_key(ssh_fp: &str) -> bool {
 /// Returns an error if no key is cached; the caller should fall back to the
 /// passphrase path.
 ///
-/// Returns the base64-encoded SSH wire signature (same format as
-/// `sign_with_soft_key` / `sign_with_soft_key_and_extract`).
+/// Returns the raw SSH wire-format signature bytes.
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip(data), fields(ssh_fp)))]
-pub fn sign_rsa_cached(ssh_fp: &str, data: &[u8]) -> Result<String> {
+pub fn sign_rsa_cached(ssh_fp: &str, data: &[u8]) -> Result<Vec<u8>> {
     #[cfg(feature = "ssh")]
     {
         let rsa_key = rsa_key_cache()
@@ -78,7 +76,7 @@ pub fn sign_rsa_cached(ssh_fp: &str, data: &[u8]) -> Result<String> {
             .ok_or_else(|| anyhow::anyhow!("No cached RSA key for {ssh_fp}"))?;
 
         let sig_bytes = sign_with_rsa_key(&rsa_key, data)?;
-        // Wrap in SSH wire format (algorithm name + raw bytes) before encoding.
+        // Wrap in SSH wire format (algorithm name + raw bytes).
         let ssh_sig = Signature::new(
             ssh_key::Algorithm::Rsa {
                 hash: Some(HashAlg::Sha512),
@@ -89,7 +87,7 @@ pub fn sign_rsa_cached(ssh_fp: &str, data: &[u8]) -> Result<String> {
         let wire: Vec<u8> = ssh_sig
             .try_into()
             .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature wire encoding failed: {e}"))?;
-        Ok(B64.encode(wire))
+        Ok(wire)
     }
     #[cfg(not(feature = "ssh"))]
     {
@@ -207,11 +205,9 @@ pub fn list_ssh_public_keys(store_dir: &Path) -> Vec<crate::protocol::SshKeyInfo
             Ok(b) => b,
             Err(_) => continue,
         };
-        let public_key_b64 = B64.encode(&ssh_wire);
-
         let comment = ssh_comment(&entry.uid, &entry.card_idents);
         result.push(crate::protocol::SshKeyInfo {
-            public_key: public_key_b64,
+            public_key: ssh_wire,
             fingerprint,
             comment,
         });
@@ -401,7 +397,7 @@ fn openpgp_fp_for_ssh_fp(store_dir: &Path, ssh_fingerprint: &str) -> Result<Stri
 /// respect `flags` (SSH agent sign flags: 0x02 = SHA-256, 0x04 = SHA-512;
 /// anything else defaults to SHA-256).
 ///
-/// Returns the SSH wire-encoded signature as base64.
+/// Returns the raw SSH wire-format signature bytes.
 #[cfg(feature = "pcsc")]
 #[cfg_attr(
     feature = "telemetry",
@@ -413,7 +409,7 @@ pub fn sign_with_card_key(
     pin: &str,
     data: &[u8],
     flags: u32,
-) -> Result<String> {
+) -> Result<Vec<u8>> {
     use crate::pkcs11::card::open_card;
     use openpgp_card_sequoia::types::KeyType;
 
@@ -539,7 +535,7 @@ pub fn sign_with_card_key(
     let wire: Vec<u8> = ssh_sig
         .try_into()
         .map_err(|e: ssh_key::Error| anyhow::anyhow!("SSH wire encoding failed: {e}"))?;
-    Ok(B64.encode(wire))
+    Ok(wire)
 }
 
 /// Sign `data` using the soft key whose SSH fingerprint matches `ssh_fingerprint`.
@@ -549,9 +545,8 @@ pub fn sign_with_card_key(
 /// function resolves the mapping automatically.
 ///
 /// Decrypts the `.sec.asc` file using `passphrase`, then signs `data` with
-/// the auth subkey (falling back to the sign subkey).  Returns the SSH
-/// wire-encoded signature as a base64 string (the format expected by
-/// `SshSignResponse.signature`).
+/// the auth subkey (falling back to the sign subkey).  Returns the raw
+/// SSH wire-format signature bytes.
 #[cfg_attr(
     feature = "telemetry",
     tracing::instrument(skip(passphrase, data), fields(ssh_fingerprint))
@@ -561,7 +556,7 @@ pub fn sign_with_soft_key(
     ssh_fingerprint: &str,
     passphrase: &str,
     data: &[u8],
-) -> Result<String> {
+) -> Result<Vec<u8>> {
     let openpgp_fp = openpgp_fp_for_ssh_fp(store_dir, ssh_fingerprint)?;
     let ks = crate::key_store::store::KeyStore::open(store_dir)?;
     let cert = ks.find_with_secret(&openpgp_fp, passphrase)?;
@@ -602,7 +597,7 @@ pub fn sign_with_soft_key(
         let wire: Vec<u8> = ssh_sig
             .try_into()
             .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
-        return Ok(B64.encode(wire));
+        return Ok(wire);
     }
 
     sign_cert_for_ssh(&cert, data)
@@ -610,7 +605,7 @@ pub fn sign_with_soft_key(
 
 /// Unified signing function: routes Ed25519 through ssh-key and RSA through
 /// the rsa crate directly (working around the ssh-key 0.6.7 RSA bug).
-fn sign_cert_for_ssh(cert: &openpgp::Cert, data: &[u8]) -> Result<String> {
+fn sign_cert_for_ssh(cert: &openpgp::Cert, data: &[u8]) -> Result<Vec<u8>> {
     let policy = StandardPolicy::new();
 
     // Peek at the algorithm to decide which code path to take.
@@ -637,7 +632,7 @@ fn sign_cert_for_ssh(cert: &openpgp::Cert, data: &[u8]) -> Result<String> {
         let sig_bytes: Vec<u8> = sig
             .try_into()
             .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
-        Ok(B64.encode(sig_bytes))
+        Ok(sig_bytes)
     } else {
         let private_key = cert_to_ssh_key(cert, SshKeySlot::Auth)?;
         let sig: Signature = private_key
@@ -646,7 +641,7 @@ fn sign_cert_for_ssh(cert: &openpgp::Cert, data: &[u8]) -> Result<String> {
         let sig_bytes: Vec<u8> = sig
             .try_into()
             .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
-        Ok(B64.encode(sig_bytes))
+        Ok(sig_bytes)
     }
 }
 
@@ -668,7 +663,7 @@ pub fn sign_with_soft_key_and_extract(
     ssh_fingerprint: &str,
     passphrase: &str,
     data: &[u8],
-) -> Result<(String, Option<[u8; 64]>)> {
+) -> Result<(Vec<u8>, Option<[u8; 64]>)> {
     let openpgp_fp = openpgp_fp_for_ssh_fp(store_dir, ssh_fingerprint)?;
     let ks = crate::key_store::store::KeyStore::open(store_dir)?;
     let cert = ks.find_with_secret(&openpgp_fp, passphrase)?;
@@ -709,7 +704,7 @@ pub fn sign_with_soft_key_and_extract(
         let wire: Vec<u8> = ssh_sig
             .try_into()
             .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
-        Ok((B64.encode(wire), None))
+        Ok((wire, None))
     } else {
         // Ed25519: use ssh-key, extract keypair bytes for the hot-path cache.
         let private_key = cert_to_ssh_key(&cert, SshKeySlot::Auth)?;
@@ -723,7 +718,7 @@ pub fn sign_with_soft_key_and_extract(
         let sig_bytes: Vec<u8> = sig
             .try_into()
             .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
-        Ok((B64.encode(sig_bytes), keypair_bytes))
+        Ok((sig_bytes, keypair_bytes))
     }
 }
 
@@ -733,7 +728,7 @@ pub fn sign_with_soft_key_and_extract(
 /// microseconds.  Call this on the hot path after caching the bytes from a
 /// first successful [`sign_with_soft_key_and_extract`].
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip(keypair_bytes, data)))]
-pub fn sign_with_cached_keypair(keypair_bytes: &[u8; 64], data: &[u8]) -> Result<String> {
+pub fn sign_with_cached_keypair(keypair_bytes: &[u8; 64], data: &[u8]) -> Result<Vec<u8>> {
     let kp = Ed25519Keypair::from_bytes(keypair_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to reconstruct Ed25519 keypair: {e}"))?;
     let private_key = PrivateKey::new(KeypairData::Ed25519(kp), "p43")
@@ -747,7 +742,7 @@ pub fn sign_with_cached_keypair(keypair_bytes: &[u8; 64], data: &[u8]) -> Result
         .try_into()
         .map_err(|e: ssh_key::Error| anyhow::anyhow!("Signature encoding failed: {e}"))?;
 
-    Ok(B64.encode(sig_bytes))
+    Ok(sig_bytes)
 }
 
 // ── Direct RSA signing (bypasses ssh-key 0.6.7 bug) ─────────────────────────

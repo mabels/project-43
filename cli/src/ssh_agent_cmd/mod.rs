@@ -3,7 +3,7 @@ pub mod subcmd;
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use p43::bus::{self, load_or_generate_device_key, AuthorityPub, DeviceCsr};
+use p43::bus::{self, load_or_generate_device_key, AuthorityPub, DeviceCsr, DeviceKey};
 use p43::matrix::resolve_agent_room;
 use p43::protocol::{BusCsrRequest, Message};
 use p43::ssh_agent::{card_auth_sign_ssh, load_card_auth_key_info, load_ssh_key, SshKeySlot};
@@ -19,6 +19,7 @@ use std::sync::Arc;
 use subcmd::SshAgentArgs;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 #[cfg(feature = "telemetry")]
 use tracing::Instrument as _;
 
@@ -128,21 +129,42 @@ impl ssh_agent_lib::agent::Session for P43CardSession {
 /// Pending request map: request_id → oneshot sender for the response.
 type PendingMap = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<p43::protocol::Message>>>>;
 
+/// Decryption context shared between the Matrix listener middleware and the
+/// session.  Populated after [`ensure_registered`] completes; `None` during
+/// registration (when only plaintext messages are exchanged).
+type DecryptState = std::sync::Mutex<Option<(Arc<DeviceKey>, [u8; 32])>>;
+
 /// SSH agent session that forwards every request as a p43 protocol message
 /// into a Matrix room and waits for the response from the phone.
+///
+/// Outgoing messages are enqueued on `outbound_tx`; the shared
+/// [`p43::bus::bridge::spawn_encrypt_worker`] task seals and sends them.
+/// Incoming responses arrive on the internal bus (decrypted by the shared
+/// middleware) and are dispatched to the pending map.
 #[derive(Clone)]
 struct MatrixProxySession {
-    room_id: String,
     pending: PendingMap,
+    /// Outbound queue — sends plaintext messages for the encrypt worker.
+    outbound_tx: mpsc::Sender<p43::bus::OutboundBusMessage>,
+    /// X25519 public key of the authority — used as the seal recipient.
+    authority_ecdh_pub: [u8; 32],
 }
 
 impl MatrixProxySession {
-    fn new(room_id: String, pending: PendingMap) -> Self {
-        Self { room_id, pending }
+    fn new(
+        pending: PendingMap,
+        outbound_tx: mpsc::Sender<p43::bus::OutboundBusMessage>,
+        authority_ecdh_pub: [u8; 32],
+    ) -> Self {
+        Self {
+            pending,
+            outbound_tx,
+            authority_ecdh_pub,
+        }
     }
 
-    /// Send `msg` to the Matrix room and block until a matching response
-    /// arrives (or the 30-second deadline expires).
+    /// Enqueue `msg` for encryption and delivery, then block until a matching
+    /// response arrives on the internal bus (or the 30-second deadline expires).
     async fn forward(
         &self,
         msg: p43::protocol::Message,
@@ -153,18 +175,32 @@ impl MatrixProxySession {
             _ => return Err(aerr("not a request type")),
         };
 
+        // Register the oneshot *before* enqueuing so we never miss a fast reply.
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.lock().await.insert(request_id, tx);
 
-        let json = msg.to_json().map_err(|e| aerr(e.to_string()))?;
+        // Build a recipient cert stub carrying only the ECDH pub so the
+        // encrypt worker can seal to the authority without knowing its full cert.
+        let recipient_cert = p43::bus::CertPayload {
+            version: 1,
+            device_id: String::new(),
+            label: String::new(),
+            sign_pubkey: vec![0u8; 32],
+            ecdh_pubkey: self.authority_ecdh_pub.to_vec(),
+            issuer_fp: vec![],
+            iat: 0,
+            exp: None,
+        };
 
-        // Span: time to deliver the request to the Matrix homeserver.
-        #[cfg(feature = "telemetry")]
-        let send_fut = p43::matrix::global::send_message(&self.room_id, &json)
-            .instrument(tracing::info_span!("ssh_agent.matrix_send", room_id = %self.room_id));
-        #[cfg(not(feature = "telemetry"))]
-        let send_fut = p43::matrix::global::send_message(&self.room_id, &json);
-        send_fut.await.map_err(|e| aerr(e.to_string()))?;
+        let outbound = p43::bus::OutboundBusMessage {
+            message: msg,
+            recipient_cert: Some(recipient_cert),
+        };
+
+        self.outbound_tx
+            .send(outbound)
+            .await
+            .map_err(|_| aerr("outbound queue closed"))?;
 
         // Span: time waiting for the phone to respond (phone round-trip latency).
         #[cfg(feature = "telemetry")]
@@ -200,8 +236,7 @@ impl ssh_agent_lib::agent::Session for MatrixProxySession {
                 .keys
                 .iter()
                 .map(|k| {
-                    let bytes = B64.decode(&k.public_key).map_err(|e| aerr(e.to_string()))?;
-                    let pk = ssh_key::public::PublicKey::from_bytes(&bytes)
+                    let pk = ssh_key::public::PublicKey::from_bytes(&k.public_key)
                         .map_err(|e| aerr(e.to_string()))?;
                     Ok(Identity {
                         pubkey: pk.key_data().clone(),
@@ -220,7 +255,6 @@ impl ssh_agent_lib::agent::Session for MatrixProxySession {
             skip(self, request),
             fields(
                 data_len = request.data.len(),
-                room_id  = %self.room_id,
                 fingerprint = tracing::field::Empty,
             )
         )
@@ -232,21 +266,17 @@ impl ssh_agent_lib::agent::Session for MatrixProxySession {
         #[cfg(feature = "telemetry")]
         tracing::Span::current().record("fingerprint", fingerprint.as_str());
 
-        // Encode the raw data as base64 for the JSON payload.
-        let data_b64 = B64.encode(request.data.as_slice());
-
         let req = p43::protocol::Message::SshSignRequest(p43::protocol::SshSignRequest {
             request_id: new_request_id(),
             fingerprint,
-            data: data_b64,
+            data: request.data.to_vec(),
             flags: request.flags,
             description: "SSH sign request".into(),
         });
 
         match self.forward(req).await? {
             p43::protocol::Message::SshSignResponse(r) => {
-                let sig_bytes = B64.decode(&r.signature).map_err(|e| aerr(e.to_string()))?;
-                Signature::try_from(sig_bytes.as_slice()).map_err(|e| aerr(e.to_string()))
+                Signature::try_from(r.signature.as_slice()).map_err(|e| aerr(e.to_string()))
             }
             p43::protocol::Message::Error(e) => Err(aerr(e.message)),
             _ => Err(aerr("unexpected response type")),
@@ -401,9 +431,21 @@ fn run_matrix(
         // 3. Shared pending-request map.
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
-        // 4. Start a background task that reads incoming Matrix messages and
-        //    resolves any pending oneshot channels.
-        let dispatch_pending = Arc::clone(&pending);
+        // Shared decryption context — populated after `ensure_registered` returns.
+        // The decrypt middleware closure reads this via try_lock on each message.
+        let decrypt_state: Arc<DecryptState> = Arc::new(std::sync::Mutex::new(None));
+
+        // 4. Set up the two-layer bus bridge.
+        //
+        //   external_bus  ← raw Matrix messages
+        //   internal_bus  ← decrypted plaintext messages
+        //   outbound_queue ← plaintext messages waiting to be sealed + sent
+        let (external_tx, external_rx) = p43::bus::new_external_bus();
+        let (internal_tx, _initial_rx) = p43::bus::new_internal_bus();
+        let (outbound_tx, outbound_rx) = p43::bus::new_outbound_queue();
+
+        // 4a. Background task: listen_room → external bus.
+        let ext_tx_clone = external_tx.clone();
         let listen_room_id = room_id.clone();
         tokio::spawn(async move {
             let _ = p43::matrix::global::listen_room(
@@ -412,39 +454,127 @@ fn run_matrix(
                 |_| {},
                 move |_sender, body| {
                     if let Ok(msg) = p43::protocol::Message::from_json(&body) {
-                        let request_id = match &msg {
-                            p43::protocol::Message::SshListKeysResponse(r) => {
-                                Some(r.request_id.clone())
-                            }
-                            p43::protocol::Message::SshSignResponse(r) => {
-                                Some(r.request_id.clone())
-                            }
-                            p43::protocol::Message::BusCertResponse(r) => {
-                                Some(r.request_id.clone())
-                            }
-                            p43::protocol::Message::Error(e) => e.request_id.clone(),
-                            _ => None,
-                        };
-                        if let Some(id) = request_id {
-                            // Use try_lock to avoid blocking the sync thread.
-                            if let Ok(mut guard) = dispatch_pending.try_lock() {
-                                if let Some(tx) = guard.remove(&id) {
-                                    let _ = tx.send(msg);
-                                }
-                            }
-                        }
+                        let _ = ext_tx_clone.send(msg);
                     }
                 },
             )
             .await;
         });
 
+        // 4b. Decrypt middleware: external bus → internal bus.
+        //     The closure captures the shared decrypt_state and reads it each time.
+        {
+            let ds = Arc::clone(&decrypt_state);
+            p43::bus::spawn_decrypt_middleware(
+                move |env| {
+                    // Skip messages sent by ourselves (echoed back by the room).
+                    // device_id() is stable once the key exists in decrypt_state.
+                    let Ok(guard) = ds.try_lock() else {
+                        return p43::bus::DecryptResult::Skip;
+                    };
+                    let Some((ref key, ref auth_pub)) = *guard else {
+                        // Not yet registered — ignore encrypted messages.
+                        return p43::bus::DecryptResult::Skip;
+                    };
+                    if env.from == key.device_id() {
+                        return p43::bus::DecryptResult::Skip;
+                    }
+                    match p43::bus::open_protocol_message(key.as_ref(), auth_pub, env) {
+                        Ok((inner, cert)) => p43::bus::DecryptResult::Ok(inner, cert),
+                        Err(e) => p43::bus::DecryptResult::Err(e.to_string()),
+                    }
+                },
+                |_locked_msg| { /* CLI: no UI to notify about locked session */ },
+                external_rx,
+                internal_tx.clone(),
+            );
+        }
+
+        // 4c. Internal bus dispatcher: route responses to the pending map.
+        {
+            let dispatch_pending = Arc::clone(&pending);
+            let mut internal_rx = internal_tx.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    let inbound = match internal_rx.recv().await {
+                        Ok(m) => m,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            eprintln!("[p43::bus] internal_rx lagged, dropped {n} messages");
+                            continue;
+                        }
+                    };
+                    let request_id = match &inbound.message {
+                        p43::protocol::Message::SshListKeysResponse(r) => {
+                            Some(r.request_id.clone())
+                        }
+                        p43::protocol::Message::SshSignResponse(r) => {
+                            Some(r.request_id.clone())
+                        }
+                        p43::protocol::Message::BusCertResponse(r) => {
+                            Some(r.request_id.clone())
+                        }
+                        p43::protocol::Message::Error(e) => e.request_id.clone(),
+                        _ => None,
+                    };
+                    if let Some(id) = request_id {
+                        if let Ok(mut guard) = dispatch_pending.try_lock() {
+                            if let Some(tx) = guard.remove(&id) {
+                                let _ = tx.send(inbound.message);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         // 5. Ensure this device is registered with the bus authority.
         let bus_dir = bus::bus_dir(&store_dir);
-        ensure_registered(&bus_dir, args.device.as_deref(), &room_id, &pending).await?;
+        let (device_label, device_key) =
+            ensure_registered(&bus_dir, args.device.as_deref(), &room_id, &pending).await?;
+
+        // Load the device cert and authority pub for sealing outgoing messages.
+        let cert_bytes = Arc::new(
+            std::fs::read(bus::device_cert_path(&bus_dir, &device_label))
+                .context("read device cert after registration")?,
+        );
+        let authority_pub = AuthorityPub::load(&bus::authority_pub_path(&bus_dir))
+            .context("read authority.pub.cbor after registration")?;
+        let authority_sign_pub = authority_pub
+            .ed25519_pub_array()
+            .context("extract Ed25519 authority signing pubkey")?;
+        let authority_ecdh_pub = authority_pub
+            .x25519_pub_array()
+            .context("extract X25519 authority pub")?;
+        let device_key = Arc::new(device_key);
+
+        // Activate the decrypt context so the middleware can now unwrap
+        // encrypted responses.
+        if let Ok(mut guard) = decrypt_state.lock() {
+            *guard = Some((Arc::clone(&device_key), authority_sign_pub));
+        }
+
+        // 4d. Encrypt worker: outbound queue → seal → Matrix send.
+        //     Spawned after registration so that cert_bytes and device_key are
+        //     available; the worker runs for the lifetime of the agent.
+        {
+            let dk = Arc::clone(&device_key);
+            let cb = Arc::clone(&cert_bytes);
+            p43::bus::spawn_encrypt_worker(
+                move |msg, recipient| {
+                    p43::bus::seal_protocol_message(dk.as_ref(), &cb, recipient, msg).ok()
+                },
+                room_id.clone(),
+                outbound_rx,
+            );
+        }
 
         // 6. Bind the Unix socket and start the agent.
-        let session = MatrixProxySession::new(room_id.clone(), pending);
+        let session = MatrixProxySession::new(
+            Arc::clone(&pending),
+            outbound_tx,
+            authority_ecdh_pub,
+        );
 
         eprintln!(
             "p43 ssh-agent (Matrix proxy → {room_id}): listening on {sock}\n\
@@ -465,12 +595,13 @@ fn run_matrix(
 /// Check that this device has a valid cert; if not, run the CSR flow.
 ///
 /// Blocks until the UI approves the request and sends back a `bus.cert_response`.
+/// Returns `(label, device_key)` for the caller to use when sealing messages.
 async fn ensure_registered(
     bus_dir: &Path,
     device_label: Option<&str>,
     room_id: &str,
     pending: &PendingMap,
-) -> Result<()> {
+) -> Result<(String, DeviceKey)> {
     std::fs::create_dir_all(bus_dir)?;
 
     // ── Find or generate the device key ───────────────────────────────────────
@@ -489,7 +620,7 @@ async fn ensure_registered(
                         "[p43::bus] device '{}' already registered (cert valid)",
                         label
                     );
-                    return Ok(());
+                    return Ok((label, key));
                 }
                 eprintln!(
                     "[p43::bus] cert for '{}' has expired — re-registering",
@@ -573,5 +704,5 @@ async fn ensure_registered(
         auth_pub_path.display(),
     );
 
-    Ok(())
+    Ok((label, key))
 }

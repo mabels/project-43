@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1492606373;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1912541596;
 
 // Section: executor
 
@@ -321,6 +321,39 @@ fn wire__crate__api__simple__bus_init_authority_impl(
         },
     )
 }
+fn wire__crate__api__simple__bus_is_session_unlocked_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "bus_is_session_unlocked",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::simple::bus_is_session_unlocked())?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__bus_list_own_devices_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -385,6 +418,40 @@ fn wire__crate__api__simple__bus_list_peers_impl(
                         Ok(output_ok)
                     })(),
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__simple__bus_lock_session_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "bus_lock_session",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::simple::bus_lock_session();
+                    })?;
+                    Ok(output_ok)
+                })())
             }
         },
     )
@@ -502,6 +569,49 @@ fn wire__crate__api__simple__bus_reseal_authority_excluding_impl(
                             api_exclude_fingerprint,
                             api_use_card,
                             api_unlock_fingerprint,
+                            api_pin,
+                            api_passphrase,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__simple__bus_unlock_session_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "bus_unlock_session",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_use_card = <bool>::sse_decode(&mut deserializer);
+            let api_fingerprint = <Option<String>>::sse_decode(&mut deserializer);
+            let api_pin = <Option<String>>::sse_decode(&mut deserializer);
+            let api_passphrase = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::simple::bus_unlock_session(
+                            api_use_card,
+                            api_fingerprint,
                             api_pin,
                             api_passphrase,
                         )?;
@@ -1481,6 +1591,45 @@ fn wire__crate__api__simple__mx_logout_impl(
         },
     )
 }
+fn wire__crate__api__simple__mx_prime_passphrase_cache_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mx_prime_passphrase_cache",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_fingerprint = <String>::sse_decode(&mut deserializer);
+            let api_passphrase = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::simple::mx_prime_passphrase_cache(
+                            api_fingerprint,
+                            api_passphrase,
+                        );
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__mx_reject_sign_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2267,6 +2416,9 @@ impl SseDecode for crate::api::simple::AppMessage {
                 let mut var_event = <crate::api::simple::BusCsrEvent>::sse_decode(deserializer);
                 return crate::api::simple::AppMessage::BusEvent { event: var_event };
             }
+            2 => {
+                return crate::api::simple::AppMessage::SessionLockRequired;
+            }
             _ => {
                 unimplemented!("");
             }
@@ -2741,96 +2893,112 @@ fn pde_ffi_dispatcher_primary_impl(
         6 => wire__crate__api__simple__bus_has_authority_impl(port, ptr, rust_vec_len, data_len),
         7 => wire__crate__api__simple__bus_import_authority_impl(port, ptr, rust_vec_len, data_len),
         8 => wire__crate__api__simple__bus_init_authority_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__simple__bus_list_own_devices_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__simple__bus_list_peers_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__simple__bus_remove_peer_impl(port, ptr, rust_vec_len, data_len),
-        12 => {
+        9 => wire__crate__api__simple__bus_is_session_unlocked_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        10 => {
+            wire__crate__api__simple__bus_list_own_devices_impl(port, ptr, rust_vec_len, data_len)
+        }
+        11 => wire__crate__api__simple__bus_list_peers_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__simple__bus_lock_session_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__simple__bus_remove_peer_impl(port, ptr, rust_vec_len, data_len),
+        14 => {
             wire__crate__api__simple__bus_reseal_authority_impl(port, ptr, rust_vec_len, data_len)
         }
-        13 => wire__crate__api__simple__bus_reseal_authority_excluding_impl(
+        15 => wire__crate__api__simple__bus_reseal_authority_excluding_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        14 => wire__crate__api__simple__clear_active_traceparent_impl(
+        16 => wire__crate__api__simple__bus_unlock_session_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__simple__clear_active_traceparent_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        15 => wire__crate__api__simple__delete_key_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__simple__generate_key_impl(port, ptr, rust_vec_len, data_len),
-        17 => {
+        18 => wire__crate__api__simple__delete_key_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__simple__generate_key_impl(port, ptr, rust_vec_len, data_len),
+        20 => {
             wire__crate__api__simple__get_card_pin_retries_impl(port, ptr, rust_vec_len, data_len)
         }
-        18 => {
+        21 => {
             wire__crate__api__simple__get_public_key_armored_impl(port, ptr, rust_vec_len, data_len)
         }
-        19 => {
+        22 => {
             wire__crate__api__simple__get_public_key_openssh_impl(port, ptr, rust_vec_len, data_len)
         }
-        20 => wire__crate__api__simple__get_ssh_key_details_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__simple__has_cached_card_pin_impl(port, ptr, rust_vec_len, data_len),
-        22 => {
+        23 => wire__crate__api__simple__get_ssh_key_details_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__simple__has_cached_card_pin_impl(port, ptr, rust_vec_len, data_len),
+        25 => {
             wire__crate__api__simple__has_cached_passphrase_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__simple__import_card_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__simple__import_openpgp_key_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__simple__import_ssh_key_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__simple__init_telemetry_impl(port, ptr, rust_vec_len, data_len),
-        28 => {
+        26 => wire__crate__api__simple__import_card_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__simple__import_openpgp_key_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__simple__import_ssh_key_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__simple__init_telemetry_impl(port, ptr, rust_vec_len, data_len),
+        31 => {
             wire__crate__api__simple__list_connected_cards_impl(port, ptr, rust_vec_len, data_len)
         }
-        29 => wire__crate__api__simple__list_keys_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__simple__mx_clear_caches_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__simple__mx_confirm_verify_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__simple__mx_get_agent_room_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__simple__mx_is_logged_in_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__simple__mx_join_room_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__simple__mx_list_devices_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__simple__mx_list_rooms_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__simple__mx_listen_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__simple__mx_listen_all_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__simple__mx_login_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__simple__mx_logout_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__simple__mx_reject_sign_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__simple__mx_respond_csr_impl(port, ptr, rust_vec_len, data_len),
-        43 => {
+        32 => wire__crate__api__simple__list_keys_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__simple__mx_clear_caches_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__simple__mx_confirm_verify_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__simple__mx_get_agent_room_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__simple__mx_is_logged_in_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__simple__mx_join_room_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__simple__mx_list_devices_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__simple__mx_list_rooms_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__simple__mx_listen_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__simple__mx_listen_all_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__simple__mx_login_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__simple__mx_logout_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__simple__mx_prime_passphrase_cache_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        45 => wire__crate__api__simple__mx_reject_sign_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__simple__mx_respond_csr_impl(port, ptr, rust_vec_len, data_len),
+        47 => {
             wire__crate__api__simple__mx_respond_list_keys_impl(port, ptr, rust_vec_len, data_len)
         }
-        44 => wire__crate__api__simple__mx_respond_sign_impl(port, ptr, rust_vec_len, data_len),
-        45 => {
+        48 => wire__crate__api__simple__mx_respond_sign_impl(port, ptr, rust_vec_len, data_len),
+        49 => {
             wire__crate__api__simple__mx_respond_sign_cached_impl(port, ptr, rust_vec_len, data_len)
         }
-        46 => {
+        50 => {
             wire__crate__api__simple__mx_respond_sign_card_impl(port, ptr, rust_vec_len, data_len)
         }
-        47 => wire__crate__api__simple__mx_respond_sign_card_cached_impl(
+        51 => wire__crate__api__simple__mx_respond_sign_card_cached_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => wire__crate__api__simple__mx_restore_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__simple__mx_send_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__simple__mx_set_agent_room_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__simple__mx_set_cache_key_enabled_impl(
+        52 => wire__crate__api__simple__mx_restore_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__simple__mx_send_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__simple__mx_set_agent_room_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__simple__mx_set_cache_key_enabled_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__simple__mx_start_verify_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__simple__register_card_ident_impl(port, ptr, rust_vec_len, data_len),
-        54 => {
+        56 => wire__crate__api__simple__mx_start_verify_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__simple__register_card_ident_impl(port, ptr, rust_vec_len, data_len),
+        58 => {
             wire__crate__api__simple__set_active_traceparent_impl(port, ptr, rust_vec_len, data_len)
         }
-        55 => wire__crate__api__simple__set_key_enabled_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__simple__set_store_dir_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__simple__shutdown_telemetry_impl(port, ptr, rust_vec_len, data_len),
-        58 => {
+        59 => wire__crate__api__simple__set_key_enabled_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__simple__set_store_dir_impl(port, ptr, rust_vec_len, data_len),
+        61 => wire__crate__api__simple__shutdown_telemetry_impl(port, ptr, rust_vec_len, data_len),
+        62 => {
             wire__crate__api__simple__verify_key_passphrase_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -2896,6 +3064,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::simple::AppMessage {
             crate::api::simple::AppMessage::BusEvent { event } => {
                 [1.into_dart(), event.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::simple::AppMessage::SessionLockRequired => [2.into_dart()].into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -3305,6 +3474,9 @@ impl SseEncode for crate::api::simple::AppMessage {
             crate::api::simple::AppMessage::BusEvent { event } => {
                 <i32>::sse_encode(1, serializer);
                 <crate::api::simple::BusCsrEvent>::sse_encode(event, serializer);
+            }
+            crate::api::simple::AppMessage::SessionLockRequired => {
+                <i32>::sse_encode(2, serializer);
             }
             _ => {
                 unimplemented!("");

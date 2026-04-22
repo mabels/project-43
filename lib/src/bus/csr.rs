@@ -25,10 +25,13 @@ pub struct CsrPayload {
     /// Human-readable device label, e.g. `"my-laptop-ssh-agent"`.
     pub label: String,
     /// Raw 32-byte Ed25519 public key.
+    #[serde(with = "serde_bytes")]
     pub sign_pubkey: Vec<u8>,
     /// Raw 32-byte X25519 public key.
+    #[serde(with = "serde_bytes")]
     pub ecdh_pubkey: Vec<u8>,
     /// 16 random bytes — prevents replay / bind to a point in time.
+    #[serde(with = "serde_bytes")]
     pub nonce: Vec<u8>,
     /// Unix timestamp (seconds).
     pub timestamp: i64,
@@ -152,6 +155,63 @@ pub fn cbor_encode<T: serde::Serialize>(val: &T) -> Result<Vec<u8>> {
 
 pub fn cbor_decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     ciborium::from_reader(bytes).context("CBOR decode")
+}
+
+/// Decode raw CBOR bytes and pretty-print them as JSON.
+///
+/// Every CBOR byte-string field (`Vec<u8>`) is rendered as a base64 string
+/// so the output is human-readable.  All other CBOR types map to their natural
+/// JSON equivalents (integer → number, text → string, map → object, …).
+///
+/// Returns an error if the bytes are not valid CBOR.
+pub fn cbor_to_json_pretty(bytes: &[u8]) -> Result<String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    let value: ciborium::Value =
+        ciborium::from_reader(bytes).context("CBOR decode for display")?;
+
+    fn convert(v: ciborium::Value) -> serde_json::Value {
+        match v {
+            ciborium::Value::Bytes(b) => {
+                serde_json::Value::String(B64.encode(&b))
+            }
+            ciborium::Value::Text(s) => serde_json::Value::String(s),
+            ciborium::Value::Bool(b) => serde_json::Value::Bool(b),
+            ciborium::Value::Null => serde_json::Value::Null,
+            ciborium::Value::Integer(i) => {
+                let n: i128 = i.into();
+                serde_json::Value::Number(
+                    serde_json::Number::from(n as i64),
+                )
+            }
+            ciborium::Value::Float(f) => serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            ciborium::Value::Array(arr) => {
+                serde_json::Value::Array(arr.into_iter().map(convert).collect())
+            }
+            ciborium::Value::Map(pairs) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in pairs {
+                    let key = match k {
+                        ciborium::Value::Text(s) => s,
+                        ciborium::Value::Integer(i) => {
+                            let n: i128 = i.into();
+                            n.to_string()
+                        }
+                        other => format!("{:?}", other),
+                    };
+                    obj.insert(key, convert(v));
+                }
+                serde_json::Value::Object(obj)
+            }
+            // CBOR tags wrap a value — unwrap and recurse.
+            ciborium::Value::Tag(_, inner) => convert(*inner),
+            _ => serde_json::Value::Null,
+        }
+    }
+
+    Ok(serde_json::to_string_pretty(&convert(value))?)
 }
 
 pub fn unix_now() -> Result<i64> {

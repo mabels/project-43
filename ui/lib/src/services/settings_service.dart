@@ -16,6 +16,7 @@ class AgentSettings {
     this.notifyOnSignRequest = true,
     this.otelEndpoint = '',
     this.deviceCertTtlDays = 180,
+    this.defaultKeyFingerprint,
   });
 
   /// When `true` and credentials for the requested key are cached, sign
@@ -58,6 +59,10 @@ class AgentSettings {
   /// no expiry (not recommended for production use).
   final int deviceCertTtlDays;
 
+  /// Fingerprint of the key that is pre-selected in unlock / credential dialogs.
+  /// `null` means use the first available key.
+  final String? defaultKeyFingerprint;
+
   AgentSettings copyWith({
     bool? autoApproveWhenCached,
     bool? cacheDecryptedKey,
@@ -65,6 +70,7 @@ class AgentSettings {
     bool? notifyOnSignRequest,
     String? otelEndpoint,
     int? deviceCertTtlDays,
+    Object? defaultKeyFingerprint = _sentinel,
   }) =>
       AgentSettings(
         autoApproveWhenCached:
@@ -76,6 +82,9 @@ class AgentSettings {
         notifyOnSignRequest: notifyOnSignRequest ?? this.notifyOnSignRequest,
         otelEndpoint: otelEndpoint ?? this.otelEndpoint,
         deviceCertTtlDays: deviceCertTtlDays ?? this.deviceCertTtlDays,
+        defaultKeyFingerprint: defaultKeyFingerprint == _sentinel
+            ? this.defaultKeyFingerprint
+            : defaultKeyFingerprint as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -85,6 +94,7 @@ class AgentSettings {
         'notifyOnSignRequest': notifyOnSignRequest,
         'otelEndpoint': otelEndpoint,
         'deviceCertTtlDays': deviceCertTtlDays,
+        'defaultKeyFingerprint': defaultKeyFingerprint,
       };
 
   factory AgentSettings.fromJson(Map<String, dynamic> json) => AgentSettings(
@@ -95,6 +105,8 @@ class AgentSettings {
         notifyOnSignRequest: json['notifyOnSignRequest'] as bool? ?? true,
         otelEndpoint: json['otelEndpoint'] as String? ?? '',
         deviceCertTtlDays: json['deviceCertTtlDays'] as int? ?? 180,
+        defaultKeyFingerprint:
+            json['defaultKeyFingerprint'] as String?,
       );
 }
 

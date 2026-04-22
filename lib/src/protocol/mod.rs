@@ -41,6 +41,12 @@ pub enum Message {
     #[serde(rename = "bus.cert_response")]
     BusCertResponse(BusCertResponse),
 
+    // ── Encrypted envelope ─────────────────────────────────────────────────
+    /// All protocol messages except [`BusCsrRequest`] and [`BusCertResponse`]
+    /// are wrapped in this envelope once both sides have exchanged certificates.
+    #[serde(rename = "bus.secure")]
+    BusSecure(BusSecureEnvelope),
+
     // ── Shared ─────────────────────────────────────────────────────────────
     #[serde(rename = "error")]
     Error(ErrorResponse),
@@ -57,6 +63,7 @@ impl Message {
             Self::SshSignResponse(_) => "ssh.sign_response",
             Self::BusCsrRequest(_) => "bus.csr_request",
             Self::BusCertResponse(_) => "bus.cert_response",
+            Self::BusSecure(_) => "bus.secure",
             Self::Error(_) => "error",
         }
     }
@@ -94,9 +101,10 @@ pub struct SshListKeysResponse {
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshKeyInfo {
-    /// SSH wire-format public key blob, base64-encoded.
+    /// SSH wire-format public key blob (raw bytes).
     /// Matches what `SSH_AGENT_IDENTITIES_ANSWER` returns on the wire.
-    pub public_key: String,
+    #[serde(with = "serde_bytes")]
+    pub public_key: Vec<u8>,
     /// SHA-256 fingerprint, e.g. `"SHA256:abc…"`.
     pub fingerprint: String,
     /// Human-readable label / comment stored alongside the key.
@@ -111,8 +119,9 @@ pub struct SshSignRequest {
     pub request_id: String,
     /// Must match a `fingerprint` from a prior [`SshListKeysResponse`].
     pub fingerprint: String,
-    /// Raw bytes to sign, base64-encoded.
-    pub data: String,
+    /// Raw bytes to sign.
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,
     /// SSH agent sign flags forwarded verbatim from the SSH client
     /// (0 = default, 2 = rsa-sha2-256, 4 = rsa-sha2-512).
     pub flags: u32,
@@ -125,8 +134,9 @@ pub struct SshSignRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshSignResponse {
     pub request_id: String,
-    /// SSH wire-format signature blob, base64-encoded.
-    pub signature: String,
+    /// SSH wire-format signature blob (raw bytes).
+    #[serde(with = "serde_bytes")]
+    pub signature: Vec<u8>,
 }
 
 // ── Bus registration types ────────────────────────────────────────────────────
@@ -161,6 +171,26 @@ pub struct BusCertResponse {
     pub authority_pub_b64: String,
 }
 
+// ── Encrypted envelope ────────────────────────────────────────────────────────
+
+/// Wrapper around an encrypted + authenticated bus message.
+///
+/// All protocol messages except [`BusCsrRequest`] and [`BusCertResponse`] are
+/// transported as `BusSecure` once both sides have valid device certificates.
+/// The inner message is sealed with X25519 ECDH + AES-256-GCM and signed with
+/// COSE_Sign1 (Ed25519) — see [`p43::bus::seal_protocol_message`].
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusSecureEnvelope {
+    /// Protocol version (currently 1).
+    pub v: u8,
+    /// Sender device-id hex string — visible without decryption for routing /
+    /// logging.
+    pub from: String,
+    /// Base64-encoded CBOR `BusEnvelope` bytes (see `p43::bus::BusEnvelope`).
+    pub envelope_b64: String,
+}
+
 // ── Shared ────────────────────────────────────────────────────────────────────
 
 /// Sent by either side when a request cannot be fulfilled.
@@ -183,7 +213,7 @@ mod tests {
         let msg = Message::SshSignRequest(SshSignRequest {
             request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
             fingerprint: "SHA256:abc123".into(),
-            data: "SGVsbG8gd29ybGQ=".into(),
+            data: b"Hello world".to_vec(),
             flags: 0,
             description: "git push on laptop".into(),
         });

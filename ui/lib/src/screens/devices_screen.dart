@@ -8,7 +8,12 @@ import '../services/settings_service.dart';
 import '../services/window_service.dart';
 
 class DevicesScreen extends StatefulWidget {
-  const DevicesScreen({super.key, this.onCsrRequest, this.busStream});
+  const DevicesScreen({
+    super.key,
+    this.onCsrRequest,
+    this.busStream,
+    this.sessionLockStream,
+  });
 
   /// Called when an incoming CSR arrives so the shell can switch to this tab.
   final VoidCallback? onCsrRequest;
@@ -17,6 +22,11 @@ class DevicesScreen extends StatefulWidget {
   /// [mxListenAll] subscription.  When provided, this screen never starts
   /// its own Matrix listener.
   final Stream<rust.BusCsrEvent>? busStream;
+
+  /// Fires whenever a [BusSecure] message arrives but the authority session is
+  /// locked.  The screen will animate to the Authority tab so the user can
+  /// unlock.
+  final Stream<void>? sessionLockStream;
 
   @override
   State<DevicesScreen> createState() => _DevicesScreenState();
@@ -29,6 +39,11 @@ class _DevicesScreenState extends State<DevicesScreen>
   // ── Room + listener state ─────────────────────────────────────────────────
   String? _agentRoom;
   StreamSubscription<rust.BusCsrEvent>? _busSub;
+  StreamSubscription<void>? _sessionLockSub;
+
+  // Key used to imperatively open the session unlock dialog from outside
+  // the SessionUnlockTile widget when a BusSecure message arrives while locked.
+  final _sessionUnlockKey = GlobalKey<SessionUnlockTileState>();
 
   // ── Registered devices ────────────────────────────────────────────────────
   List<rust.BusPeer> _peers = [];
@@ -46,11 +61,13 @@ class _DevicesScreenState extends State<DevicesScreen>
     _loadAgentRoom();
     _loadPeers();
     _subscribeToStream();
+    _subscribeToSessionLock();
   }
 
   @override
   void dispose() {
     _busSub?.cancel();
+    _sessionLockSub?.cancel();
     _tabCtrl.dispose();
     super.dispose();
   }
@@ -80,6 +97,39 @@ class _DevicesScreenState extends State<DevicesScreen>
         if (_pendingQueue.any((e) => e.requestId == event.requestId)) return;
         _pendingQueue.add(event);
         _drainQueue();
+      },
+      onError: (_) {},
+      onDone: () {},
+    );
+  }
+
+  // ── Session-lock navigation ───────────────────────────────────────────────
+
+  /// When the root shell emits a session-lock signal, animate to the Authority
+  /// tab (index 0) and open the unlock dialog once the animation has settled.
+  void _subscribeToSessionLock() {
+    final stream = widget.sessionLockStream;
+    if (stream == null) return;
+    _sessionLockSub = stream.listen(
+      (_) {
+        if (!mounted) return;
+        _tabCtrl.animateTo(0);
+        NotificationService.instance.show(
+          title: 'Session locked',
+          body: 'Unlock the authority session to process the encrypted request.',
+          stableId: 'session_lock_required',
+          channelId: 'p43_session_lock',
+          channelName: 'Session lock',
+          channelDescription:
+              'Notifications when the authority session must be unlocked',
+        );
+        WindowService.instance.bringToFront();
+        // Open the unlock dialog after the tab animation completes and the
+        // SessionUnlockTile is guaranteed to be in the widget tree.
+        // Flutter's default tab animation is 300 ms; 350 ms gives a buffer.
+        Future.delayed(const Duration(milliseconds: 350), () {
+          _sessionUnlockKey.currentState?.openUnlockDialog();
+        });
       },
       onError: (_) {},
       onDone: () {},
@@ -244,7 +294,7 @@ class _DevicesScreenState extends State<DevicesScreen>
       body: TabBarView(
         controller: _tabCtrl,
         children: [
-          _AuthorityTab(),
+          _AuthorityTab(sessionUnlockKey: _sessionUnlockKey),
           _DevicesTab(
             peers: _peers,
             loading: _loadingPeers,
@@ -260,20 +310,26 @@ class _DevicesScreenState extends State<DevicesScreen>
 // ── Authority tab ─────────────────────────────────────────────────────────────
 
 class _AuthorityTab extends StatelessWidget {
+  const _AuthorityTab({this.sessionUnlockKey});
+
+  final GlobalKey<SessionUnlockTileState>? sessionUnlockKey;
+
   @override
   Widget build(BuildContext context) {
     return ListView(
-      children: const [
-        AuthorityStatusTile(),
-        SizedBox(height: 1),
-        AuthorityQrTile(),
-        SizedBox(height: 1),
-        AuthorityResealTile(),
-        SizedBox(height: 1),
-        AuthorityExportTile(),
-        SizedBox(height: 1),
-        AuthorityImportTile(),
-        SizedBox(height: 32),
+      children: [
+        const AuthorityStatusTile(),
+        const SizedBox(height: 1),
+        SessionUnlockTile(key: sessionUnlockKey),
+        const SizedBox(height: 1),
+        const AuthorityQrTile(),
+        const SizedBox(height: 1),
+        const AuthorityResealTile(),
+        const SizedBox(height: 1),
+        const AuthorityExportTile(),
+        const SizedBox(height: 1),
+        const AuthorityImportTile(),
+        const SizedBox(height: 32),
       ],
     );
   }
@@ -441,6 +497,7 @@ class _CsrApprovalDialogState extends State<_CsrApprovalDialog> {
   String? _selectedFp;
   final _credCtrl = TextEditingController();
   bool _obscure = true;
+  Timer? _obscureTimer;
   bool _busy = false;
   String? _error;
 
@@ -448,14 +505,38 @@ class _CsrApprovalDialogState extends State<_CsrApprovalDialog> {
   void initState() {
     super.initState();
     if (widget.sealedKeys.isNotEmpty) {
-      _selectedFp = widget.sealedKeys.first.fingerprint;
+      final dfp = SettingsService.instance.settings.defaultKeyFingerprint;
+      final hasDefault = dfp != null &&
+          widget.sealedKeys.any((k) => k.fingerprint == dfp);
+      _selectedFp =
+          hasDefault ? dfp : widget.sealedKeys.first.fingerprint;
     }
   }
 
   @override
   void dispose() {
+    _obscureTimer?.cancel();
     _credCtrl.dispose();
     super.dispose();
+  }
+
+  void _toggleObscure() {
+    _obscureTimer?.cancel();
+    if (_obscure) {
+      setState(() => _obscure = false);
+      _obscureTimer = Timer(const Duration(seconds: 10), () {
+        if (mounted) setState(() => _obscure = true);
+      });
+    } else {
+      _obscureTimer = null;
+      setState(() => _obscure = true);
+    }
+  }
+
+  void _resetObscure() {
+    _obscureTimer?.cancel();
+    _obscureTimer = null;
+    if (mounted && !_obscure) setState(() => _obscure = true);
   }
 
   rust.KeySealStatus? get _selectedKey => _selectedFp == null
@@ -576,11 +657,17 @@ class _CsrApprovalDialogState extends State<_CsrApprovalDialog> {
                         enabled: !_busy,
                         onTap: _busy
                             ? null
-                            : () => setState(() {
-                                _selectedFp = widget.sealedKeys[i].fingerprint;
-                                _credCtrl.clear();
-                                _error = null;
-                              }),
+                            : () {
+                                _obscureTimer?.cancel();
+                                _obscureTimer = null;
+                                setState(() {
+                                  _selectedFp =
+                                      widget.sealedKeys[i].fingerprint;
+                                  _credCtrl.clear();
+                                  _error = null;
+                                  _obscure = true;
+                                });
+                              },
                       ),
                     ],
                   ],
@@ -602,7 +689,7 @@ class _CsrApprovalDialogState extends State<_CsrApprovalDialog> {
             TextField(
               key: ValueKey(_isCard),
               controller: _credCtrl,
-              obscureText: _isCard ? true : _obscure,
+              obscureText: _obscure,
               autofocus: true,
               enabled: !_busy,
               style: const TextStyle(fontSize: 14),
@@ -617,21 +704,23 @@ class _CsrApprovalDialogState extends State<_CsrApprovalDialog> {
                   horizontal: 12,
                   vertical: 8,
                 ),
-                suffixIcon: _isCard
-                    ? null
-                    : IconButton(
-                        icon: Icon(
-                          _obscure
-                              ? Icons.visibility_outlined
-                              : Icons.visibility_off_outlined,
-                          size: 18,
-                        ),
-                        onPressed: _busy
-                            ? null
-                            : () => setState(() => _obscure = !_obscure),
-                      ),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _obscure
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                    size: 18,
+                    color: const Color(0xFF8E8E93),
+                  ),
+                  onPressed: _busy ? null : _toggleObscure,
+                ),
               ),
-              onSubmitted: _busy ? null : (_) => _submit(),
+              onSubmitted: _busy
+                  ? null
+                  : (_) {
+                      _resetObscure();
+                      _submit();
+                    },
             ),
             // ── Inline error ────────────────────────────────────────
             if (_error != null) ...[
@@ -684,6 +773,7 @@ class _CsrApprovalDialogState extends State<_CsrApprovalDialog> {
   }
 
   Future<void> _submit() async {
+    _resetObscure();
     final cred = _credCtrl.text.isEmpty ? null : _credCtrl.text;
     setState(() {
       _busy = true;

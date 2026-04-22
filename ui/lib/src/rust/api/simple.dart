@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'simple.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `card_pin_cache`, `default_store_dir`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_signs`, `resolve_secret`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
+// These functions are ignored because they are not marked as `pub`: `authority_session`, `card_pin_cache`, `default_store_dir`, `maybe_seal`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
@@ -398,6 +398,34 @@ Future<List<String>> busAuthorityCheckImportable({required List<int> keyEnc}) =>
 Future<List<String>> busAuthorityKeysNotSealed() =>
     RustLib.instance.api.crateApiSimpleBusAuthorityKeysNotSealed();
 
+/// Unlock the bus authority session.
+///
+/// The authority key is decrypted from `authority.key.enc` and held in memory
+/// until [`bus_lock_session`] or [`mx_clear_caches`] is called.  While unlocked
+/// the app can decrypt incoming `BusSecure` messages and seal outgoing responses.
+Future<void> busUnlockSession({
+  required bool useCard,
+  String? fingerprint,
+  String? pin,
+  String? passphrase,
+}) => RustLib.instance.api.crateApiSimpleBusUnlockSession(
+  useCard: useCard,
+  fingerprint: fingerprint,
+  pin: pin,
+  passphrase: passphrase,
+);
+
+/// Clear the in-memory authority session key.
+///
+/// After this call the app can no longer decrypt `BusSecure` messages or seal
+/// outgoing responses until [`bus_unlock_session`] is called again.
+Future<void> busLockSession() =>
+    RustLib.instance.api.crateApiSimpleBusLockSession();
+
+/// Returns `true` if the authority session key is currently unlocked.
+Future<bool> busIsSessionUnlocked() =>
+    RustLib.instance.api.crateApiSimpleBusIsSessionUnlocked();
+
 /// Returns `true` if cached credentials exist for the given SSH fingerprint,
 /// meaning `mx_respond_sign_cached` can proceed without a passphrase dialog.
 ///
@@ -412,6 +440,18 @@ Future<bool> hasCachedPassphrase({required String fingerprint}) => RustLib
     .instance
     .api
     .crateApiSimpleHasCachedPassphrase(fingerprint: fingerprint);
+
+/// Prime the passphrase cache for a given key fingerprint.
+///
+/// Call after a successful `bus_unlock_session` so that sign requests arriving
+/// shortly after can be auto-approved without asking for the passphrase again.
+Future<void> mxPrimePassphraseCache({
+  required String fingerprint,
+  required String passphrase,
+}) => RustLib.instance.api.crateApiSimpleMxPrimePassphraseCache(
+  fingerprint: fingerprint,
+  passphrase: passphrase,
+);
 
 /// Enable or disable the in-memory signing-key cache.
 ///
@@ -428,7 +468,8 @@ Future<bool> hasCachedPassphrase({required String fingerprint}) => RustLib
 Future<void> mxSetCacheKeyEnabled({required bool enabled}) =>
     RustLib.instance.api.crateApiSimpleMxSetCacheKeyEnabled(enabled: enabled);
 
-/// Clear all in-memory credential caches (passphrase + signing key).
+/// Clear all in-memory credential caches (passphrase + signing key + authority
+/// session).
 ///
 /// Does **not** affect the `KEY_CACHE_ENABLED` flag — the next successful
 /// `mx_respond_sign` will repopulate the caches if caching is still enabled.
@@ -587,6 +628,11 @@ sealed class AppMessage with _$AppMessage {
   /// A bus device-registration CSR event.
   const factory AppMessage.busEvent({required BusCsrEvent event}) =
       AppMessage_BusEvent;
+
+  /// A `BusSecure` message arrived but the authority session is locked.
+  /// The UI should navigate to Devices → Authority so the user can unlock.
+  const factory AppMessage.sessionLockRequired() =
+      AppMessage_SessionLockRequired;
 }
 
 /// Exported authority key bundle — encrypted private scalar + public key.

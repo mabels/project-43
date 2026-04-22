@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use crate::frb_generated::StreamSink;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use flutter_rust_bridge::frb;
@@ -722,6 +723,136 @@ pub async fn mx_respond_list_keys(room_id: String, request_id: String) -> anyhow
     })
     .to_json()?;
     p43::matrix::global::send_message(&room_id, &json).await
+}
+
+// ── Bus registration (authority side) ────────────────────────────────────────
+
+/// A pending device registration request surfaced from the Matrix room.
+#[derive(Clone)]
+pub struct BusCsrEvent {
+    pub request_id: String,
+    pub device_label: String,
+    pub device_id: String,
+    /// Base64-encoded COSE_Sign1 CSR bytes — passed back to mx_respond_csr.
+    pub csr_b64: String,
+}
+
+/// Subscribe to `bus.csr_request` messages in `room_id`.
+///
+/// Each incoming CSR is surfaced as a [`BusCsrEvent`] on `sink`.
+/// Flutter shows a "pending device" tile; user approves by calling
+/// [`mx_respond_csr`].
+#[frb]
+pub fn mx_listen_bus(room_id: String, sink: StreamSink<BusCsrEvent>) {
+    let store_dir = default_store_dir();
+    tokio::spawn(async move {
+        let since = {
+            let cfg = p43::matrix::MatrixConfig::from_store_dir(&store_dir);
+            p43::matrix::client::load_config(&cfg.config_path)
+                .ok()
+                .flatten()
+                .and_then(|c| c.agent_since)
+        };
+
+        let _ = p43::matrix::global::listen_room(
+            &room_id,
+            since.as_deref(),
+            |_| {},
+            move |_sender, body| {
+                if let Ok(p43::protocol::Message::BusCsrRequest(r)) =
+                    p43::protocol::Message::from_json(&body)
+                {
+                    let _ = sink.add(BusCsrEvent {
+                        request_id: r.request_id,
+                        device_label: r.device_label,
+                        device_id: r.device_id,
+                        csr_b64: r.csr_b64,
+                    });
+                }
+            },
+        )
+        .await;
+    });
+}
+
+/// Approve a device registration: verify the CSR, sign a cert with the
+/// authority key, and send `bus.cert_response` back into the room.
+///
+/// The authority key is unlocked using the card PIN (YubiKey) or passphrase
+/// (soft key), following the same priority as other operations:
+///   card=true  → PIN  (YK_PIN env or prompt)
+///   card=false → passphrase (YK_PASSPHRASE env or prompt)
+#[frb]
+pub async fn mx_respond_csr(
+    room_id: String,
+    request_id: String,
+    csr_b64: String,
+    ttl_secs: Option<i64>,
+    use_card: bool,
+    pin: Option<String>,
+    passphrase: Option<String>,
+) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    use p43::bus::{self, AuthorityPub, DeviceCert, DeviceCsr};
+
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+
+    // Decode and verify the CSR self-signature.
+    let csr_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&csr_b64)
+        .context("decode CSR base64")?;
+    let csr_payload = DeviceCsr::verify(&csr_bytes)?;
+
+    // Unlock the authority key.
+    let enc_path = bus::authority_enc_path(&bus_dir);
+    let encrypted =
+        std::fs::read(&enc_path).context("read authority.key.enc — run `p43 bus init` first")?;
+
+    let authority_key = if use_card {
+        let card_pin = resolve_secret(pin, "YK_PIN", "YubiKey PIN: ")?;
+        p43::bus::authority::unlock_card(&encrypted, &card_pin, None)?
+    } else {
+        let phrase = resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
+        let soft_key = std::env::var("YK_KEY_FILE")
+            .map(std::path::PathBuf::from)
+            .context("YK_KEY_FILE not set — needed for soft-key authority unlock")?;
+        p43::bus::authority::unlock_soft(&encrypted, &soft_key, &phrase)?
+    };
+
+    // Issue cert.
+    let cert = DeviceCert::issue(&csr_payload, &authority_key, ttl_secs)?;
+
+    // Load authority public bundle (CBOR) and re-encode for the wire.
+    let authority_pub = AuthorityPub::load(&bus::authority_pub_path(&bus_dir))
+        .context("read authority.pub.cbor — run `p43 bus init` first")?;
+    let authority_pub_cbor = authority_pub.to_cbor_bytes()
+        .context("CBOR encode AuthorityPub for response")?;
+
+    // Send response.
+    let msg = p43::protocol::Message::BusCertResponse(p43::protocol::BusCertResponse {
+        request_id,
+        device_id: cert.payload.device_id.clone(),
+        cert_b64: base64::engine::general_purpose::STANDARD.encode(&cert.cose_bytes),
+        authority_pub_b64: base64::engine::general_purpose::STANDARD.encode(&authority_pub_cbor),
+    });
+    p43::matrix::global::send_message(&room_id, &msg.to_json()?).await?;
+
+    // Also store the cert in peers/ so the authority can later encrypt to this device.
+    let peer_path = bus::peer_cert_path(&bus_dir, &cert.payload.device_id);
+    cert.save(&peer_path)?;
+
+    Ok(())
+}
+
+fn resolve_secret(explicit: Option<String>, env_var: &str, prompt: &str) -> anyhow::Result<String> {
+    if let Some(v) = explicit {
+        return Ok(v);
+    }
+    if let Ok(v) = std::env::var(env_var) {
+        return Ok(v);
+    }
+    Ok(rpassword::prompt_password(prompt)?)
 }
 
 /// Returns `true` if cached credentials exist for the given SSH fingerprint,

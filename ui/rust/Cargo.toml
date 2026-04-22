@@ -15,12 +15,14 @@ p43 = { path = "../../lib", default-features = false, features = [
     "e2e-encryption",
     "ssh",
     "pcsc",
+    "bus",
 ] }
 base64 = "0.22"
 dirs   = "5"
 anyhow = "1"
 # tokio for spawning tasks from StreamSink bridge functions
 tokio = { version = "1", features = ["rt", "sync", "time"] }
+rpassword = "7"
 # Force bundled SQLite so Android doesn't need a system libsqlite3
 rusqlite = { version = "0.37", features = ["bundled"] }
 

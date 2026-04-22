@@ -2,7 +2,7 @@ pub mod subcmd;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use p43::bus::{self, DeviceCert, DeviceCsr, DeviceKey, MsgPayload};
+use p43::bus::{self, AuthorityPub, DeviceCert, DeviceCsr, DeviceKey, MsgPayload};
 use std::path::{Path, PathBuf};
 use subcmd::BusCmd;
 use uuid::Uuid;
@@ -58,9 +58,19 @@ pub fn run(
             &msg,
             &kind,
             out,
+            soft_key.as_deref(),
+            passphrase,
+            pin,
         ),
 
-        BusCmd::Decrypt { file, device } => cmd_decrypt(&bus_dir, &file, device.as_deref()),
+        BusCmd::Decrypt { file, device } => cmd_decrypt(
+            &bus_dir,
+            &file,
+            device.as_deref(),
+            soft_key.as_deref(),
+            passphrase,
+            pin,
+        ),
     }
 }
 
@@ -140,8 +150,9 @@ fn resolve_device_key(bus_dir: &Path, label: Option<&str>) -> Result<(String, Pa
 // ── init ──────────────────────────────────────────────────────────────────────
 
 fn cmd_init(bus_dir: &Path, recipient: &Path, force: bool) -> Result<()> {
-    let pub_path = bus::authority_pubkey_path(bus_dir);
+    let pub_path = bus::authority_pub_path(bus_dir);
     let enc_path = bus::authority_enc_path(bus_dir);
+    let cert_path = bus::authority_cert_path(bus_dir);
 
     if pub_path.exists() && !force {
         bail!(
@@ -150,16 +161,37 @@ fn cmd_init(bus_dir: &Path, recipient: &Path, force: bool) -> Result<()> {
         );
     }
 
-    let (pubkey, encrypted) = p43::bus::authority::generate_and_encrypt(recipient)?;
+    let (authority_key, authority_pub, encrypted) =
+        p43::bus::authority::generate_and_encrypt(&[recipient])?;
 
-    std::fs::create_dir_all(pub_path.parent().unwrap())?;
-    std::fs::write(&pub_path, pubkey)?;
+    std::fs::create_dir_all(bus_dir)?;
+    authority_pub.save(&pub_path)?;
     std::fs::write(&enc_path, &encrypted)?;
 
+    // Self-issue an authority cert so the authority can act as a bus sender.
+    // Construct a synthetic CsrPayload directly from the authority's public keys
+    // (no nonce/self-sig verification needed — authority signs its own cert).
+    let authority_csr_payload = p43::bus::CsrPayload {
+        version: 1,
+        label: "authority".to_string(),
+        sign_pubkey: authority_pub.ed25519_pub.clone(),
+        ecdh_pubkey: authority_pub.x25519_pub.clone(),
+        nonce: vec![0u8; 16],
+        timestamp: p43::bus::unix_now()?,
+    };
+    let authority_cert = DeviceCert::issue(&authority_csr_payload, &authority_key, None)?;
+    authority_cert.save(&cert_path)?;
+
     println!("Authority initialised:");
-    println!("  fingerprint: {}", hex::encode(&pubkey[..8]));
-    println!("  pubkey     : {}", pub_path.display());
+    println!(
+        "  fingerprint: {}",
+        hex::encode(authority_pub.fingerprint())
+    );
+    println!("  ed25519_pub: {}", hex::encode(&authority_pub.ed25519_pub));
+    println!("  x25519_pub : {}", hex::encode(&authority_pub.x25519_pub));
+    println!("  pub.cbor   : {}", pub_path.display());
     println!("  key.enc    : {}", enc_path.display());
+    println!("  cert.cbor  : {}", cert_path.display());
     Ok(())
 }
 
@@ -264,9 +296,20 @@ fn cmd_issue_cert(
     let out_path = out.unwrap_or_else(|| bus::peer_cert_path(bus_dir, &cert.payload.device_id));
     cert.save(&out_path)?;
 
-    // If this cert matches any device key in devices/, also write the cert
-    // alongside that key so encrypt can find it without --from-cert.
-    let own_cert_path = find_own_cert_path(bus_dir, &cert.payload.device_id);
+    // Also write the cert into devices/ so `bus encrypt` can find it without --from-cert.
+    //
+    // When --label was given we know the path directly.  Fall back to scanning
+    // devices/ by device_id when the cert was issued from a raw CSR file.
+    let own_cert_path = if let Some(lbl) = label {
+        let key_path = bus::device_key_path(bus_dir, lbl);
+        if key_path.exists() {
+            Some(bus::device_cert_path(bus_dir, lbl))
+        } else {
+            find_own_cert_path(bus_dir, &cert.payload.device_id)
+        }
+    } else {
+        find_own_cert_path(bus_dir, &cert.payload.device_id)
+    };
     if let Some(ref own_path) = own_cert_path {
         cert.save(own_path)?;
     }
@@ -461,9 +504,22 @@ fn cmd_list_peers(bus_dir: &Path) -> Result<()> {
 /// Resolve `--to` value to a cert file path.
 ///
 /// Accepts:
-///   1. A literal file path that already exists on disk.
-///   2. A label / device-id — looked up first in `peers/`, then in `devices/`.
+///   1. The special token `"authority"` → `authority.cert.cbor`.
+///   2. A literal file path that already exists on disk.
+///   3. A label / device-id — looked up first in `peers/`, then in `devices/`.
 fn resolve_recipient_cert(bus_dir: &Path, to: &str) -> Result<PathBuf> {
+    // Special token: encrypt to the authority itself.
+    if to == "authority" {
+        let auth_cert = bus::authority_cert_path(bus_dir);
+        if !auth_cert.exists() {
+            bail!(
+                "authority cert not found at {}; run `bus init` first",
+                auth_cert.display()
+            );
+        }
+        return Ok(auth_cert);
+    }
+
     let as_path = PathBuf::from(to);
     if as_path.exists() {
         return Ok(as_path);
@@ -498,18 +554,10 @@ fn cmd_encrypt(
     msg: &str,
     kind: &str,
     out: Option<PathBuf>,
+    soft_key: Option<&Path>,
+    passphrase: Option<String>,
+    pin: Option<String>,
 ) -> Result<()> {
-    let (effective_label, _key_path, sender_key) = resolve_device_key(bus_dir, device)?;
-
-    let sender_cert_path = from_cert
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| bus::device_cert_path(bus_dir, &effective_label));
-    let sender_cert_bytes = std::fs::read(&sender_cert_path)
-        .with_context(|| format!("load sender cert from {}", sender_cert_path.display()))?;
-
-    let to_cert_path = resolve_recipient_cert(bus_dir, to)?;
-    let recipient_cert = DeviceCert::load(&to_cert_path)?;
-
     let payload = MsgPayload {
         msg_id: Uuid::new_v4().to_string(),
         timestamp: p43::bus::unix_now()?,
@@ -517,12 +565,47 @@ fn cmd_encrypt(
         body: msg.as_bytes().to_vec(),
     };
 
-    let envelope = bus::encrypt(
-        &sender_key,
-        &sender_cert_bytes,
-        &recipient_cert.payload,
-        &payload,
-    )?;
+    let to_cert_path = resolve_recipient_cert(bus_dir, to)?;
+    let recipient_cert = DeviceCert::load(&to_cert_path)?;
+
+    let envelope = if device == Some("authority") {
+        // Sender is the authority — unlock AuthorityKey and use authority.cert.cbor.
+        let enc_path = bus::authority_enc_path(bus_dir);
+        let encrypted = std::fs::read(&enc_path)
+            .with_context(|| format!("read authority key blob from {}", enc_path.display()))?;
+        let authority_key = if soft_key.is_none() {
+            let card_pin = resolve_secret(pin, "YK_PIN", "YubiKey PIN: ")?;
+            p43::bus::authority::unlock_card(&encrypted, &card_pin, None)?
+        } else {
+            let phrase = resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
+            p43::bus::authority::unlock_soft(&encrypted, soft_key.unwrap(), &phrase)?
+        };
+        let sender_cert_path = from_cert
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| bus::authority_cert_path(bus_dir));
+        let sender_cert_bytes = std::fs::read(&sender_cert_path)
+            .with_context(|| format!("load authority cert from {}", sender_cert_path.display()))?;
+        bus::encrypt(
+            &authority_key,
+            &sender_cert_bytes,
+            &recipient_cert.payload,
+            &payload,
+        )?
+    } else {
+        // Sender is a regular device key.
+        let (effective_label, _key_path, sender_key) = resolve_device_key(bus_dir, device)?;
+        let sender_cert_path = from_cert
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| bus::device_cert_path(bus_dir, &effective_label));
+        let sender_cert_bytes = std::fs::read(&sender_cert_path)
+            .with_context(|| format!("load sender cert from {}", sender_cert_path.display()))?;
+        bus::encrypt(
+            &sender_key,
+            &sender_cert_bytes,
+            &recipient_cert.payload,
+            &payload,
+        )?
+    };
 
     match out {
         Some(path) => {
@@ -541,19 +624,22 @@ fn cmd_encrypt(
 
 // ── decrypt ───────────────────────────────────────────────────────────────────
 
-fn cmd_decrypt(bus_dir: &Path, file: &Path, device: Option<&str>) -> Result<()> {
-    let (_effective_label, _key_path, recipient_key) = resolve_device_key(bus_dir, device)?;
-
-    let pub_path = bus::authority_pubkey_path(bus_dir);
-    let authority_pub_bytes = std::fs::read(&pub_path)
+fn cmd_decrypt(
+    bus_dir: &Path,
+    file: &Path,
+    device: Option<&str>,
+    soft_key: Option<&Path>,
+    passphrase: Option<String>,
+    pin: Option<String>,
+) -> Result<()> {
+    // Load the authority pubkey for sender cert verification.
+    let pub_path = bus::authority_pub_path(bus_dir);
+    let authority_pub = AuthorityPub::load(&pub_path)
         .with_context(|| format!("load authority pubkey from {}", pub_path.display()))?;
-    let authority_pub: [u8; 32] = authority_pub_bytes
-        .as_slice()
-        .try_into()
-        .context("authority pubkey must be 32 bytes")?;
+    let authority_sign_pub = authority_pub.ed25519_pub_array()?;
 
+    // Read the envelope.
     let envelope = if file == Path::new("-") {
-        // stdin: expect base64-encoded envelope (as produced by `bus encrypt` stdout).
         use std::io::Read;
         let mut raw = String::new();
         std::io::stdin().read_to_string(&mut raw)?;
@@ -564,7 +650,23 @@ fn cmd_decrypt(bus_dir: &Path, file: &Path, device: Option<&str>) -> Result<()> 
         std::fs::read(file).with_context(|| format!("read {}", file.display()))?
     };
 
-    let (payload, sender_cert) = bus::decrypt(&recipient_key, &envelope, &authority_pub)?;
+    // Resolve the decryptor: authority key or device key.
+    let (payload, sender_cert) = if device == Some("authority") {
+        let enc_path = bus::authority_enc_path(bus_dir);
+        let encrypted = std::fs::read(&enc_path)
+            .with_context(|| format!("read authority key blob from {}", enc_path.display()))?;
+        let authority_key = if soft_key.is_none() {
+            let card_pin = resolve_secret(pin, "YK_PIN", "YubiKey PIN: ")?;
+            p43::bus::authority::unlock_card(&encrypted, &card_pin, None)?
+        } else {
+            let phrase = resolve_secret(passphrase, "YK_PASSPHRASE", "Key passphrase: ")?;
+            p43::bus::authority::unlock_soft(&encrypted, soft_key.unwrap(), &phrase)?
+        };
+        bus::decrypt(&authority_key, &envelope, &authority_sign_pub)?
+    } else {
+        let (_effective_label, _key_path, recipient_key) = resolve_device_key(bus_dir, device)?;
+        bus::decrypt(&recipient_key, &envelope, &authority_sign_pub)?
+    };
 
     println!("Decrypted message:");
     println!("  msg_id   : {}", payload.msg_id);

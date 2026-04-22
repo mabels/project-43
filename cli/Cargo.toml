@@ -27,3 +27,4 @@ uuid           = { version = "1", features = ["v4"] }
 base64         = "0.22"
 hex            = "0.4"
 tracing        = { version = "0.1", optional = true }
+hostname       = "0.4"

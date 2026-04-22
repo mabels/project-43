@@ -1,8 +1,10 @@
 pub mod subcmd;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use p43::bus::{self, AuthorityPub, DeviceCsr, DeviceKey};
+use p43::protocol::{BusCsrRequest, Message};
 use p43::ssh_agent::{card_auth_sign_ssh, load_card_auth_key_info, load_ssh_key, SshKeySlot};
 use signature::Signer;
 use ssh_agent_lib::agent::listen;
@@ -416,6 +418,9 @@ fn run_matrix(
                             p43::protocol::Message::SshSignResponse(r) => {
                                 Some(r.request_id.clone())
                             }
+                            p43::protocol::Message::BusCertResponse(r) => {
+                                Some(r.request_id.clone())
+                            }
                             p43::protocol::Message::Error(e) => e.request_id.clone(),
                             _ => None,
                         };
@@ -433,7 +438,11 @@ fn run_matrix(
             .await;
         });
 
-        // 5. Bind the Unix socket and start the agent.
+        // 5. Ensure this device is registered with the bus authority.
+        let bus_dir = bus::bus_dir(&store_dir);
+        ensure_registered(&bus_dir, args.device.as_deref(), &room_id, &pending).await?;
+
+        // 6. Bind the Unix socket and start the agent.
         let session = MatrixProxySession::new(room_id.clone(), pending);
 
         eprintln!(
@@ -448,6 +457,204 @@ fn run_matrix(
         listen(listener, session).await?;
         Ok::<_, anyhow::Error>(())
     })
+}
+
+// ── Bus registration ──────────────────────────────────────────────────────────
+
+/// Check that this device has a valid cert; if not, run the CSR flow.
+///
+/// Blocks until the UI approves the request and sends back a `bus.cert_response`.
+async fn ensure_registered(
+    bus_dir: &Path,
+    device_label: Option<&str>,
+    room_id: &str,
+    pending: &PendingMap,
+) -> Result<()> {
+    std::fs::create_dir_all(bus_dir)?;
+
+    // ── Find or generate the device key ───────────────────────────────────────
+    let (label, key) = load_or_generate_device_key(bus_dir, device_label)?;
+
+    // ── Check cert validity ───────────────────────────────────────────────────
+    let cert_path = bus::device_cert_path(bus_dir, &label);
+    if cert_path.exists() {
+        match p43::bus::DeviceCert::load(&cert_path) {
+            Ok(cert) => {
+                // Check expiry.
+                let now = p43::bus::unix_now()?;
+                let expired = cert.payload.exp.map(|e| now > e).unwrap_or(false);
+                if !expired {
+                    eprintln!(
+                        "[p43::bus] device '{}' already registered (cert valid)",
+                        label
+                    );
+                    return Ok(());
+                }
+                eprintln!(
+                    "[p43::bus] cert for '{}' has expired — re-registering",
+                    label
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[p43::bus] could not load cert for '{}': {} — re-registering",
+                    label, e
+                );
+            }
+        }
+    }
+
+    // ── Generate CSR ──────────────────────────────────────────────────────────
+    let csr = DeviceCsr::generate(&key)?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    // Register a oneshot in the pending map *before* sending, so we don't miss
+    // a very fast response.
+    let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
+    pending.lock().await.insert(request_id.clone(), tx);
+
+    // ── Send csr_request ──────────────────────────────────────────────────────
+    let msg = Message::BusCsrRequest(BusCsrRequest {
+        request_id: request_id.clone(),
+        device_label: label.clone(),
+        device_id: key.device_id(),
+        csr_b64: B64.encode(&csr.cose_bytes),
+    });
+    p43::matrix::global::send_message(room_id, &msg.to_json()?).await?;
+
+    eprintln!(
+        "[p43::bus] CSR sent for device '{}' ({})\n\
+         Waiting for approval in the p43 app…",
+        label,
+        key.device_id()
+    );
+
+    // ── Block until cert_response arrives ─────────────────────────────────────
+    let response = rx.await.context("bus registration channel closed")?;
+    let cert_resp = match response {
+        Message::BusCertResponse(r) => r,
+        Message::Error(e) => bail!("bus registration rejected: {}", e.message),
+        other => bail!(
+            "unexpected message during registration: {}",
+            other.type_name()
+        ),
+    };
+
+    // ── Persist cert + authority pubkey ───────────────────────────────────────
+    let cert_bytes = B64
+        .decode(&cert_resp.cert_b64)
+        .context("decode cert base64")?;
+    let authority_pub_bytes = B64
+        .decode(&cert_resp.authority_pub_b64)
+        .context("decode authority_pub base64")?;
+
+    // Parse CBOR AuthorityPub and verify the cert against its Ed25519 key.
+    let authority_pub = AuthorityPub::from_cbor_bytes(&authority_pub_bytes)
+        .context("decode CBOR AuthorityPub from BusCertResponse")?;
+    let authority_sign_pub = authority_pub.ed25519_pub_array()?;
+    let cert_payload = p43::bus::DeviceCert::verify(&cert_bytes, &authority_sign_pub)?;
+
+    // Write cert alongside the device key.
+    std::fs::write(&cert_path, &cert_bytes)
+        .with_context(|| format!("write cert to {}", cert_path.display()))?;
+
+    // Write authority pub.cbor alongside the cert (canonical bus location).
+    let auth_pub_path = bus::authority_pub_path(bus_dir);
+    authority_pub
+        .save(&auth_pub_path)
+        .with_context(|| format!("write authority pubkey to {}", auth_pub_path.display()))?;
+
+    eprintln!(
+        "[p43::bus] registered: device_id={} label={}\n  cert: {}\n  authority: {}",
+        cert_payload.device_id,
+        cert_payload.label,
+        cert_path.display(),
+        auth_pub_path.display(),
+    );
+
+    Ok(())
+}
+
+/// Load the device key for `label`, or generate a new one if it doesn't exist.
+fn load_or_generate_device_key(bus_dir: &Path, label: Option<&str>) -> Result<(String, DeviceKey)> {
+    // If label given, load or create that specific key.
+    if let Some(lbl) = label {
+        let path = bus::device_key_path(bus_dir, lbl);
+        if path.exists() {
+            let key = DeviceKey::load(&path)
+                .with_context(|| format!("load device key {}", path.display()))?;
+            return Ok((lbl.to_string(), key));
+        }
+        // Generate fresh key with this label.
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        let key = DeviceKey::generate(lbl);
+        key.save(&path)?;
+        eprintln!(
+            "[p43::bus] generated new device key '{}' at {}",
+            lbl,
+            path.display()
+        );
+        return Ok((lbl.to_string(), key));
+    }
+
+    // No label: auto-detect exactly one existing key in devices/.
+    let devices_dir = bus::devices_dir(bus_dir);
+    if devices_dir.exists() {
+        let mut found: Vec<(String, PathBuf)> = Vec::new();
+        for entry in std::fs::read_dir(&devices_dir)?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("cbor") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if stem.ends_with(".key") {
+                        let lbl = stem.trim_end_matches(".key").to_string();
+                        found.push((lbl, path));
+                    }
+                }
+            }
+        }
+        if found.len() == 1 {
+            let (lbl, path) = found.remove(0);
+            let key = DeviceKey::load(&path)?;
+            return Ok((lbl, key));
+        }
+        if found.len() > 1 {
+            let labels: Vec<_> = found.iter().map(|(l, _)| l.as_str()).collect();
+            bail!(
+                "multiple device keys found; specify one with --device: {}",
+                labels.join(", ")
+            );
+        }
+    }
+
+    // No keys at all: generate a new one using hostname as label.
+    let hostname = hostname_label();
+    let path = bus::device_key_path(bus_dir, &hostname);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let key = DeviceKey::generate(&hostname);
+    key.save(&path)?;
+    eprintln!(
+        "[p43::bus] generated new device key '{}' at {}",
+        hostname,
+        path.display()
+    );
+    Ok((hostname, key))
+}
+
+/// Best-effort hostname sanitised for use as a device label.
+fn hostname_label() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "device".to_string())
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 /// Resolve which room the agent should use.

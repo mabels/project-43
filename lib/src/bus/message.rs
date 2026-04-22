@@ -25,10 +25,52 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
 use super::{
+    authority::{AuthorityKey, AuthorityPub},
     cert::CertPayload,
     csr::{cbor_decode, cbor_encode},
     device_key::DeviceKey,
+    signer::BusSigner,
 };
+
+// ── Traits ────────────────────────────────────────────────────────────────────
+
+/// Anything that can be an ECDH *recipient* in a [`BusEnvelope`].
+pub trait BusRecipient {
+    fn recipient_ecdh_pub(&self) -> [u8; 32];
+}
+
+impl BusRecipient for CertPayload {
+    fn recipient_ecdh_pub(&self) -> [u8; 32] {
+        self.ecdh_pubkey[..]
+            .try_into()
+            .expect("ecdh_pubkey must be 32 bytes")
+    }
+}
+
+impl BusRecipient for AuthorityPub {
+    fn recipient_ecdh_pub(&self) -> [u8; 32] {
+        self.x25519_pub[..]
+            .try_into()
+            .expect("x25519_pub must be 32 bytes")
+    }
+}
+
+/// Anything that can perform the ECDH *decryption* side of a [`BusEnvelope`].
+pub trait BusDecryptor {
+    fn ecdh_exchange(&self, peer_pub: &[u8; 32]) -> [u8; 32];
+}
+
+impl BusDecryptor for DeviceKey {
+    fn ecdh_exchange(&self, peer_pub: &[u8; 32]) -> [u8; 32] {
+        self.ecdh_exchange(peer_pub)
+    }
+}
+
+impl BusDecryptor for AuthorityKey {
+    fn ecdh_exchange(&self, peer_pub: &[u8; 32]) -> [u8; 32] {
+        self.ecdh_exchange(peer_pub)
+    }
+}
 
 // ── HKDF info string ──────────────────────────────────────────────────────────
 
@@ -74,9 +116,9 @@ pub struct MsgPayload {
 /// - `recipient`   : recipient's cert payload (need `ecdh_pubkey`)
 /// - `payload`     : message to seal
 pub fn encrypt(
-    sender_key: &DeviceKey,
+    sender_key: &dyn BusSigner,
     sender_cert: &[u8],
-    recipient: &CertPayload,
+    recipient: &dyn BusRecipient,
     payload: &MsgPayload,
 ) -> Result<Vec<u8>> {
     // 1. Sign the payload as COSE_Sign1.
@@ -85,9 +127,7 @@ pub fn encrypt(
     // 2. ECDH key agreement.
     let eph_priv = StaticSecret::random_from_rng(OsRng);
     let eph_pub = X25519Public::from(&eph_priv);
-    let recipient_pub: [u8; 32] = recipient.ecdh_pubkey[..]
-        .try_into()
-        .context("recipient ECDH key must be 32 bytes")?;
+    let recipient_pub = recipient.recipient_ecdh_pub();
     let shared = eph_priv.diffie_hellman(&X25519Public::from(recipient_pub));
     let aes_key = derive_key(shared.as_bytes())?;
 
@@ -114,7 +154,7 @@ pub fn encrypt(
 /// Returns the decrypted [`MsgPayload`] and the sender's [`CertPayload`]
 /// (already signature-verified against `authority_sign_pubkey`).
 pub fn decrypt(
-    recipient_key: &DeviceKey,
+    recipient_key: &dyn BusDecryptor,
     envelope_bytes: &[u8],
     authority_sign_pubkey: &[u8; 32],
 ) -> Result<(MsgPayload, CertPayload)> {
@@ -160,7 +200,7 @@ fn derive_key(shared_secret: &[u8]) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn sign_payload(key: &DeviceKey, payload: &MsgPayload) -> Result<Vec<u8>> {
+fn sign_payload(key: &dyn BusSigner, payload: &MsgPayload) -> Result<Vec<u8>> {
     let payload_cbor = cbor_encode(payload)?;
     let protected = HeaderBuilder::new()
         .algorithm(iana::Algorithm::EdDSA)
@@ -172,7 +212,11 @@ fn sign_payload(key: &DeviceKey, payload: &MsgPayload) -> Result<Vec<u8>> {
         .protected(protected)
         .unprotected(unprotected)
         .payload(payload_cbor)
-        .create_signature(b"", |sig_input| key.sign_bytes(sig_input).to_vec())
+        .create_signature(b"", |sig_input| {
+            key.sign_bytes(sig_input)
+                .expect("bus message signing failed")
+                .to_vec()
+        })
         .build();
     cose.to_tagged_vec()
         .map_err(|e| anyhow::anyhow!("encode inner COSE_Sign1: {:?}", e))

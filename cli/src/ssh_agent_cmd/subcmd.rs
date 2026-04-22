@@ -72,4 +72,11 @@ pub struct SshAgentArgs {
     /// Only used in local YubiKey mode (--local --card).
     #[arg(long, default_value_t = 1)]
     pub concurrency: usize,
+
+    /// Device label to use for bus registration (Matrix mode only).
+    ///
+    /// Selects which key in <bus_dir>/devices/ represents this machine.
+    /// Auto-detected when exactly one device key exists.
+    #[arg(long)]
+    pub device: Option<String>,
 }

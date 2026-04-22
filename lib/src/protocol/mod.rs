@@ -34,6 +34,13 @@ pub enum Message {
     #[serde(rename = "ssh.sign_response")]
     SshSignResponse(SshSignResponse),
 
+    // ── Bus registration ───────────────────────────────────────────────────
+    #[serde(rename = "bus.csr_request")]
+    BusCsrRequest(BusCsrRequest),
+
+    #[serde(rename = "bus.cert_response")]
+    BusCertResponse(BusCertResponse),
+
     // ── Shared ─────────────────────────────────────────────────────────────
     #[serde(rename = "error")]
     Error(ErrorResponse),
@@ -48,6 +55,8 @@ impl Message {
             Self::SshListKeysResponse(_) => "ssh.list_keys_response",
             Self::SshSignRequest(_) => "ssh.sign_request",
             Self::SshSignResponse(_) => "ssh.sign_response",
+            Self::BusCsrRequest(_) => "bus.csr_request",
+            Self::BusCertResponse(_) => "bus.cert_response",
             Self::Error(_) => "error",
         }
     }
@@ -118,6 +127,38 @@ pub struct SshSignResponse {
     pub request_id: String,
     /// SSH wire-format signature blob, base64-encoded.
     pub signature: String,
+}
+
+// ── Bus registration types ────────────────────────────────────────────────────
+
+/// Device → Room: request a certificate from the authority.
+///
+/// Sent unencrypted because the device has no cert yet and cannot do ECDH.
+/// The CSR is already self-signed COSE_Sign1 proving key possession.
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusCsrRequest {
+    pub request_id: String,
+    /// Human-readable device label (from the device key).
+    pub device_label: String,
+    /// Hex device-id (first 8 bytes of signing pubkey) — for display.
+    pub device_id: String,
+    /// Base64-encoded COSE_Sign1 CSR bytes.
+    pub csr_b64: String,
+}
+
+/// Phone → Room: signed certificate + authority public key.
+///
+/// Sent unencrypted so the device can receive it without a prior cert.
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusCertResponse {
+    pub request_id: String,
+    pub device_id: String,
+    /// Base64-encoded COSE_Sign1 cert bytes.
+    pub cert_b64: String,
+    /// Base64-encoded 32-byte raw Ed25519 authority public key.
+    pub authority_pub_b64: String,
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────

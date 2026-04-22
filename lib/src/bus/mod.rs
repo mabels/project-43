@@ -30,10 +30,11 @@ pub mod signer;
 
 // ── Convenience re-exports ────────────────────────────────────────────────────
 
+pub use authority::{AuthorityKey, AuthorityPub};
 pub use cert::{CertPayload, DeviceCert};
 pub use csr::{unix_now, CsrPayload, DeviceCsr};
 pub use device_key::DeviceKey;
-pub use message::{decrypt, encrypt, BusEnvelope, MsgPayload};
+pub use message::{decrypt, encrypt, BusDecryptor, BusEnvelope, BusRecipient, MsgPayload};
 pub use signer::BusSigner;
 
 // ── Directory helpers ─────────────────────────────────────────────────────────
@@ -83,10 +84,16 @@ pub fn device_cert_path(bus_dir: &Path, label: &str) -> PathBuf {
     devices_dir(bus_dir).join(format!("{}.cert.cbor", label_filename(label)))
 }
 
-/// Path to the authority's public key (32 raw Ed25519 bytes) — distribute to
-/// devices so they can verify certs without the authority private key.
-pub fn authority_pubkey_path(bus_dir: &Path) -> PathBuf {
-    bus_dir.join("authority.pub.bin")
+/// Path to the authority's CBOR public key bundle (`AuthorityPub`).
+/// Distribute to devices so they can verify certs and encrypt to the phone.
+pub fn authority_pub_path(bus_dir: &Path) -> PathBuf {
+    bus_dir.join("authority.pub.cbor")
+}
+
+/// Path to the authority's self-issued device cert.
+/// Used when the authority is a message sender (authority → device).
+pub fn authority_cert_path(bus_dir: &Path) -> PathBuf {
+    bus_dir.join("authority.cert.cbor")
 }
 
 /// Path to the OpenPGP-encrypted authority private scalar.

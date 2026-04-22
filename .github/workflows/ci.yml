@@ -48,10 +48,19 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # rust_lib_p43 (Flutter bridge) uses crypto-rust and is built by Flutter,
+        # not Rust CI.  Exclude it to avoid the crypto-nettle vs crypto-rust
+        # feature-unification conflict in sequoia-openpgp.
+        # Do NOT use --all-features: crypto-nettle and crypto-rust are mutually
+        # exclusive and must never be enabled together.
+        run: >
+          cargo clippy
+          --workspace --exclude rust_lib_p43
+          --all-targets
+          -- -D warnings
 
       - name: build
-        run: cargo build --all
+        run: cargo build --workspace --exclude rust_lib_p43
 
       - name: test
-        run: cargo test --all
+        run: cargo test --workspace --exclude rust_lib_p43

@@ -24,6 +24,17 @@ pub trait BusSigner {
     fn sign_bytes(&self, data: &[u8]) -> Result<[u8; 64]>;
 }
 
+// ── AuthorityKey ──────────────────────────────────────────────────────────────
+
+impl BusSigner for super::authority::AuthorityKey {
+    fn sign_pubkey(&self) -> [u8; 32] {
+        self.signing.verifying_key().to_bytes()
+    }
+    fn sign_bytes(&self, data: &[u8]) -> Result<[u8; 64]> {
+        Ok(self.signing.sign(data).to_bytes())
+    }
+}
+
 // ── ed25519_dalek::SigningKey ──────────────────────────────────────────────────
 
 /// The unlocked authority key (decrypted from `authority.key.enc`) satisfies

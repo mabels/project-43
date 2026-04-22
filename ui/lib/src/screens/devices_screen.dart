@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:p43/src/rust/api/simple.dart' as rust;
 import 'settings/authority_section.dart';
+import '../services/notification_service.dart';
 import '../services/settings_service.dart';
 import '../services/window_service.dart';
 
@@ -91,7 +92,16 @@ class _DevicesScreenState extends State<DevicesScreen>
     if (_approvalInFlight || _pendingQueue.isEmpty || !mounted) return;
     final event = _pendingQueue.removeAt(0);
     _approvalInFlight = true;
-    // Switch to the Devices tab and bring the window to the front.
+    // Notify the user, switch to the Devices tab, and bring the window up.
+    NotificationService.instance.show(
+      title: 'Approve device',
+      body: event.deviceLabel.isNotEmpty ? event.deviceLabel : event.deviceId,
+      stableId: event.deviceId,
+      channelId: 'p43_csr_requests',
+      channelName: 'Device approvals',
+      channelDescription:
+          'Notifications for incoming device registration requests',
+    );
     _tabCtrl.animateTo(1);
     widget.onCsrRequest?.call();
     WindowService.instance.bringToFront();

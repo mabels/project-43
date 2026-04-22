@@ -115,10 +115,17 @@ class _AgentScreenState extends State<AgentScreen> {
               details?.name ?? '',
               details?.cardIdents ?? [],
             );
-            NotificationService.instance.showSignRequest(
-              keyLabel: label,
-              algo: details?.algo ?? '',
-              fingerprint: fp,
+            final algo = details?.algo ?? '';
+            NotificationService.instance.show(
+              title: 'Sign request',
+              body: label.isNotEmpty
+                  ? (algo.isNotEmpty ? '$label ($algo)' : label)
+                  : fp,
+              stableId: fp,
+              channelId: 'p43_sign_requests',
+              channelName: 'Sign requests',
+              channelDescription:
+                  'Notifications for incoming SSH sign requests',
             );
           }
 

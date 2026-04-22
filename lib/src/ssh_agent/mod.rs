@@ -242,11 +242,11 @@ fn ssh_comment(uid: &str, card_idents: &[String]) -> String {
 /// Strips the manufacturer prefix before the colon, then groups the remaining
 /// digits in threes from the right with underscores.
 fn cardno_label(ident: &str) -> String {
-    let serial = ident.split(':').last().unwrap_or(ident);
+    let serial = ident.split(':').next_back().unwrap_or(ident);
     let mut buf = String::with_capacity(serial.len() + 4);
     for (i, ch) in serial.chars().enumerate() {
         let from_right = serial.len() - i;
-        if i > 0 && from_right % 3 == 0 {
+        if i > 0 && from_right.is_multiple_of(3) {
             buf.push('_');
         }
         buf.push(ch);

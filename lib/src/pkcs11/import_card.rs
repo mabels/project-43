@@ -191,7 +191,7 @@ pub fn import_card_cert(
 
         (uid_sig, auth_sig_opt, enc_sig_opt)
     };
-    drop(sign_card);
+    let _ = sign_card; // explicitly end the card borrow before assembling the cert
 
     // ── 6. Assemble and save ──────────────────────────────────────────────────
 

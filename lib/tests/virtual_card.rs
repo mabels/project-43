@@ -163,14 +163,21 @@ fn virtual_card_decrypt_verify_wrong_signer_fails() {
 }
 
 // ── rsa4096 variant ───────────────────────────────────────────────────────────
+//
+// Key generation for RSA 4096 is slow in pure Rust (~60 s in CI).  Instead of
+// generating a fresh key on every run we import a pre-generated fixture.
+// The fixture was created once with gpg --batch --gen-key (libgcrypt, fast)
+// and committed to lib/tests/fixtures/.  There is no security concern: the
+// key is only used for functional correctness checks in a throwaway tempdir.
 
 #[test]
 fn virtual_card_rsa4096_sign_verify() {
     let dir = tempfile::tempdir().unwrap();
     let ks = store::KeyStore::open(dir.path()).unwrap();
-    let cert = keygen::generate("RSA <rsa@test>", "rsa4096", None).unwrap();
+
+    let sec_bytes = include_bytes!("fixtures/rsa4096_test.sec.asc");
+    let cert = ks.import(sec_bytes).unwrap();
     let fp = cert.fingerprint().to_hex();
-    ks.save(&cert, None).unwrap();
 
     let card = VirtualCard::new(ks.sec_file_path(&fp), "");
     let sig = card.card_sign(b"rsa test").unwrap();

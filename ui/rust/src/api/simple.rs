@@ -313,7 +313,10 @@ pub fn get_ssh_key_details(fingerprint: String) -> Option<SshKeyDetails> {
 /// Generates a new soft key, saves it, and returns the updated key list.
 /// `passphrase: None` skips encryption (not recommended).
 #[frb]
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(passphrase), fields(uid, algo)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(passphrase), fields(uid, algo))
+)]
 pub fn generate_key(
     uid: String,
     algo: String,
@@ -511,7 +514,10 @@ fn mx_verify_slot() -> &'static tokio::sync::Mutex<Option<tokio::sync::oneshot::
 
 /// Password login.  Persists session under the app support directory.
 #[frb]
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(password), fields(homeserver, username)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(password), fields(homeserver, username))
+)]
 pub async fn mx_login(
     homeserver: String,
     username: String,
@@ -703,7 +709,10 @@ pub fn mx_listen_agent(room_id: String, sink: StreamSink<AgentRequest>) {
 
 /// Respond to an `ssh.list_keys_request` with the keys held in the local store.
 #[frb]
-#[cfg_attr(feature = "telemetry", tracing::instrument(fields(request_id, room_id)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(fields(request_id, room_id))
+)]
 pub async fn mx_respond_list_keys(room_id: String, request_id: String) -> anyhow::Result<()> {
     let store_dir = default_store_dir();
     let keys = p43::ssh_agent::list_ssh_public_keys(&store_dir);
@@ -789,7 +798,10 @@ pub fn mx_clear_caches() {
 /// - If "cache decrypted key" is enabled, the decrypted Ed25519 keypair bytes
 ///   are also cached so subsequent auto-approve signs skip the KDF entirely.
 #[frb]
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(passphrase), fields(request_id, room_id)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(passphrase), fields(request_id, room_id))
+)]
 pub async fn mx_respond_sign(
     room_id: String,
     request_id: String,
@@ -847,7 +859,10 @@ pub async fn mx_respond_sign(
 /// On success the PIN is cached in memory keyed by card AID ident so that
 /// `mx_respond_sign_card_cached` can skip the PIN dialog for subsequent requests.
 #[frb]
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(pin), fields(request_id, room_id)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(pin), fields(request_id, room_id))
+)]
 pub async fn mx_respond_sign_card(
     room_id: String,
     request_id: String,
@@ -906,7 +921,10 @@ pub fn has_cached_card_pin(card_ident: String) -> bool {
 /// Returns an error if no PIN is cached for any card associated with this key.
 /// This is the auto-approve path after the first successful `mx_respond_sign_card`.
 #[frb]
-#[cfg_attr(feature = "telemetry", tracing::instrument(fields(request_id, room_id)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(fields(request_id, room_id))
+)]
 pub async fn mx_respond_sign_card_cached(
     room_id: String,
     request_id: String,
@@ -976,7 +994,10 @@ pub fn get_card_pin_retries(card_ident: String) -> anyhow::Result<u8> {
 /// This is also the entry point for biometric-gated approval: once the
 /// platform biometric check succeeds, call this directly.
 #[frb]
-#[cfg_attr(feature = "telemetry", tracing::instrument(fields(request_id, room_id)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(fields(request_id, room_id))
+)]
 pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyhow::Result<()> {
     let pending = pending_signs()
         .lock()
@@ -1031,7 +1052,10 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
 
 /// Reject an `ssh.sign_request`: send an error response and discard the request.
 #[frb]
-#[cfg_attr(feature = "telemetry", tracing::instrument(fields(request_id, room_id)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(fields(request_id, room_id))
+)]
 pub async fn mx_reject_sign(room_id: String, request_id: String) -> anyhow::Result<()> {
     // Discard from pending map.
     let _ = pending_signs()

@@ -1,9 +1,11 @@
+mod bus_cmd;
 mod key_mgmt;
 mod matrix_cmd;
 mod pgp;
 mod ssh_agent_cmd;
 
 use anyhow::Result;
+use bus_cmd::subcmd::BusCmd;
 use clap::{Parser, Subcommand};
 use key_mgmt::subcmd::KeyCmd;
 use matrix_cmd::subcmd::MatrixCmd;
@@ -48,6 +50,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Bus — device registration, cert issuance, encrypted messaging
+    #[command(subcommand)]
+    Bus(BusCmd),
+
     /// Key management — generate, list, export, import, delete
     #[command(subcommand)]
     Key(KeyCmd),
@@ -83,6 +89,13 @@ fn main() -> Result<()> {
     // Build one only for async subcommands, and use it for telemetry init
     // so the OTLP batch exporter has the runtime context it requires.
     match cli.command {
+        Command::Bus(cmd) => {
+            let passphrase = cli
+                .passphrase
+                .or_else(|| std::env::var("YK_PASSPHRASE").ok());
+            let pin = cli.pin.or_else(|| std::env::var("YK_PIN").ok());
+            bus_cmd::run(cmd, &store_dir, soft_key, passphrase, pin)
+        }
         Command::Key(cmd) => {
             // Sync — local fmt tracing only (no runtime needed for OTLP).
             p43::telemetry::init("")?;

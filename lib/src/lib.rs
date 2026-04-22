@@ -5,6 +5,9 @@
 pub mod key_store;
 pub mod protocol;
 
+#[cfg(feature = "bus")]
+pub mod bus;
+
 #[cfg(feature = "matrix")]
 pub mod matrix;
 
@@ -13,6 +16,5 @@ pub mod pkcs11;
 
 #[cfg(feature = "ssh")]
 pub mod ssh_agent;
-
 
 pub mod telemetry;

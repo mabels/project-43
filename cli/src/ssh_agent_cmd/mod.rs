@@ -14,10 +14,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use subcmd::SshAgentArgs;
-#[cfg(feature = "telemetry")]
-use tracing::Instrument as _;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
+#[cfg(feature = "telemetry")]
+use tracing::Instrument as _;
 
 use p43::pkcs11::card_queue::CardQueue;
 
@@ -165,8 +165,9 @@ impl MatrixProxySession {
 
         // Span: time waiting for the phone to respond (phone round-trip latency).
         #[cfg(feature = "telemetry")]
-        let wait_fut = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-            .instrument(tracing::info_span!("ssh_agent.matrix_wait", timeout_secs = 30));
+        let wait_fut = tokio::time::timeout(std::time::Duration::from_secs(30), rx).instrument(
+            tracing::info_span!("ssh_agent.matrix_wait", timeout_secs = 30),
+        );
         #[cfg(not(feature = "telemetry"))]
         let wait_fut = tokio::time::timeout(std::time::Duration::from_secs(30), rx);
         wait_fut
@@ -298,7 +299,8 @@ pub fn run(
                 socket = %socket_path.display(),
                 local  = args.local,
                 card   = args.card,
-            ).entered();
+            )
+            .entered();
             // _s drops here → span complete → enqueued for export
         }
         eprintln!("[p43::ssh_agent] startup span dropped");
@@ -337,11 +339,11 @@ fn run_local(
             socket_path.display(),
         );
         rt.block_on(async move {
-                let listener = UnixListener::bind(&socket_path)
-                    .with_context(|| format!("Failed to bind to {}", socket_path.display()))?;
-                listen(listener, session).await?;
-                Ok::<_, anyhow::Error>(())
-            })
+            let listener = UnixListener::bind(&socket_path)
+                .with_context(|| format!("Failed to bind to {}", socket_path.display()))?;
+            listen(listener, session).await?;
+            Ok::<_, anyhow::Error>(())
+        })
     } else {
         let key_file = key_file.context(
             "ssh-agent --local requires --key-file <FILE> (or YK_KEY_FILE),\n\
@@ -356,91 +358,96 @@ fn run_local(
             socket_path.display(),
         );
         rt.block_on(async move {
-                let listener = UnixListener::bind(&socket_path)
-                    .with_context(|| format!("Failed to bind to {}", socket_path.display()))?;
-                listen(listener, session).await?;
-                Ok::<_, anyhow::Error>(())
-            })
-    }
-}
-
-// ── Matrix proxy mode ─────────────────────────────────────────────────────────
-
-fn run_matrix(args: SshAgentArgs, socket_path: PathBuf, store_dir: &Path, rt: &tokio::runtime::Runtime) -> Result<()> {
-    let store_dir = store_dir.to_path_buf();
-
-    rt.block_on(async move {
-            // 1. Restore saved Matrix session.
-            let logged_in = p43::matrix::global::restore(&store_dir)
-                .await
-                .context("Failed to read Matrix session")?;
-
-            if !logged_in {
-                eprintln!(
-                    "No Matrix session found.  Run:\n\
-                     \n  p43 matrix login --homeserver <URL> --user <@you:server>\n\
-                     \n  p43 matrix join  --room <#room:server>\n\
-                     \nThen re-run p43 ssh-agent."
-                );
-                return Ok(());
-            }
-
-            // 2. Resolve which room to use.
-            let room_id = resolve_agent_room(args.room.as_deref(), &store_dir).await?;
-
-            // 3. Shared pending-request map.
-            let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-
-            // 4. Start a background task that reads incoming Matrix messages and
-            //    resolves any pending oneshot channels.
-            let dispatch_pending = Arc::clone(&pending);
-            let listen_room_id = room_id.clone();
-            tokio::spawn(async move {
-                let _ = p43::matrix::global::listen_room(
-                    &listen_room_id,
-                    None,
-                    |_| {},
-                    move |_sender, body| {
-                        if let Ok(msg) = p43::protocol::Message::from_json(&body) {
-                            let request_id = match &msg {
-                                p43::protocol::Message::SshListKeysResponse(r) => {
-                                    Some(r.request_id.clone())
-                                }
-                                p43::protocol::Message::SshSignResponse(r) => {
-                                    Some(r.request_id.clone())
-                                }
-                                p43::protocol::Message::Error(e) => e.request_id.clone(),
-                                _ => None,
-                            };
-                            if let Some(id) = request_id {
-                                // Use try_lock to avoid blocking the sync thread.
-                                if let Ok(mut guard) = dispatch_pending.try_lock() {
-                                    if let Some(tx) = guard.remove(&id) {
-                                        let _ = tx.send(msg);
-                                    }
-                                }
-                            }
-                        }
-                    },
-                )
-                .await;
-            });
-
-            // 5. Bind the Unix socket and start the agent.
-            let session = MatrixProxySession::new(room_id.clone(), pending);
-
-            eprintln!(
-                "p43 ssh-agent (Matrix proxy → {room_id}): listening on {sock}\n\
-                 Run:  export SSH_AUTH_SOCK={sock}",
-                room_id = room_id,
-                sock = socket_path.display(),
-            );
-
             let listener = UnixListener::bind(&socket_path)
                 .with_context(|| format!("Failed to bind to {}", socket_path.display()))?;
             listen(listener, session).await?;
             Ok::<_, anyhow::Error>(())
         })
+    }
+}
+
+// ── Matrix proxy mode ─────────────────────────────────────────────────────────
+
+fn run_matrix(
+    args: SshAgentArgs,
+    socket_path: PathBuf,
+    store_dir: &Path,
+    rt: &tokio::runtime::Runtime,
+) -> Result<()> {
+    let store_dir = store_dir.to_path_buf();
+
+    rt.block_on(async move {
+        // 1. Restore saved Matrix session.
+        let logged_in = p43::matrix::global::restore(&store_dir)
+            .await
+            .context("Failed to read Matrix session")?;
+
+        if !logged_in {
+            eprintln!(
+                "No Matrix session found.  Run:\n\
+                     \n  p43 matrix login --homeserver <URL> --user <@you:server>\n\
+                     \n  p43 matrix join  --room <#room:server>\n\
+                     \nThen re-run p43 ssh-agent."
+            );
+            return Ok(());
+        }
+
+        // 2. Resolve which room to use.
+        let room_id = resolve_agent_room(args.room.as_deref(), &store_dir).await?;
+
+        // 3. Shared pending-request map.
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+
+        // 4. Start a background task that reads incoming Matrix messages and
+        //    resolves any pending oneshot channels.
+        let dispatch_pending = Arc::clone(&pending);
+        let listen_room_id = room_id.clone();
+        tokio::spawn(async move {
+            let _ = p43::matrix::global::listen_room(
+                &listen_room_id,
+                None,
+                |_| {},
+                move |_sender, body| {
+                    if let Ok(msg) = p43::protocol::Message::from_json(&body) {
+                        let request_id = match &msg {
+                            p43::protocol::Message::SshListKeysResponse(r) => {
+                                Some(r.request_id.clone())
+                            }
+                            p43::protocol::Message::SshSignResponse(r) => {
+                                Some(r.request_id.clone())
+                            }
+                            p43::protocol::Message::Error(e) => e.request_id.clone(),
+                            _ => None,
+                        };
+                        if let Some(id) = request_id {
+                            // Use try_lock to avoid blocking the sync thread.
+                            if let Ok(mut guard) = dispatch_pending.try_lock() {
+                                if let Some(tx) = guard.remove(&id) {
+                                    let _ = tx.send(msg);
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+            .await;
+        });
+
+        // 5. Bind the Unix socket and start the agent.
+        let session = MatrixProxySession::new(room_id.clone(), pending);
+
+        eprintln!(
+            "p43 ssh-agent (Matrix proxy → {room_id}): listening on {sock}\n\
+                 Run:  export SSH_AUTH_SOCK={sock}",
+            room_id = room_id,
+            sock = socket_path.display(),
+        );
+
+        let listener = UnixListener::bind(&socket_path)
+            .with_context(|| format!("Failed to bind to {}", socket_path.display()))?;
+        listen(listener, session).await?;
+        Ok::<_, anyhow::Error>(())
+    })
 }
 
 /// Resolve which room the agent should use.

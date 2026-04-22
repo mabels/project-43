@@ -66,7 +66,10 @@ impl KeyStore {
         })
     }
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self, cert, _passphrase), fields(fp)))]
+    #[cfg_attr(
+        feature = "telemetry",
+        tracing::instrument(skip(self, cert, _passphrase), fields(fp))
+    )]
     pub fn save(&self, cert: &Cert, _passphrase: Option<&str>) -> Result<()> {
         let fp = cert.fingerprint().to_hex();
 

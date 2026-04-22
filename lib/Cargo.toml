@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 # Full desktop feature set — default for the CLI.
-default = ["matrix", "pcsc", "ssh", "e2e-encryption", "crypto-nettle"]
+default = ["matrix", "pcsc", "ssh", "e2e-encryption", "crypto-nettle", "bus"]
 
 # sequoia-openpgp crypto backends — pick exactly one.
 # crypto-nettle: links against GNU Nettle (C library); fast, desktop-only.
@@ -25,6 +25,10 @@ pcsc = ["dep:openpgp-card-sequoia", "dep:card-backend-pcsc"]
 
 # SSH agent support.
 ssh = ["dep:ssh-key", "dep:signature", "dep:rsa", "dep:sha2"]
+
+# Bus: device registration and encrypted messaging.
+bus = ["dep:coset", "dep:ciborium", "dep:ed25519-dalek", "dep:x25519-dalek",
+       "dep:rand", "dep:hkdf", "dep:aes-gcm", "dep:sha2"]
 
 # End-to-end encryption for the Matrix session.
 e2e-encryption = ["matrix-sdk/e2e-encryption", "matrix-sdk/sqlite"]
@@ -67,6 +71,15 @@ signature = { version = "2", optional = true }
 rsa       = { version = "0.9", features = ["sha2"], optional = true }
 sha2      = { version = "0.10", optional = true }
 
+# bus feature
+coset         = { version = "0.3", optional = true }
+ciborium      = { version = "0.2", optional = true }
+ed25519-dalek = { version = "2", features = ["rand_core"], optional = true }
+x25519-dalek  = { version = "2", features = ["static_secrets"], optional = true }
+rand          = { version = "0.8", optional = true }
+hkdf          = { version = "0.12", optional = true }
+aes-gcm       = { version = "0.10", optional = true }
+
 # telemetry feature
 tracing                            = { version = "0.1", optional = true }
 tracing-subscriber                 = { version = "0.3", features = ["env-filter"], optional = true }
@@ -75,6 +88,7 @@ opentelemetry                      = { version = "0.27", optional = true }
 opentelemetry_sdk                  = { version = "0.27", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp                 = { version = "0.27", features = ["http-proto", "reqwest-client"], optional = true }
 opentelemetry-semantic-conventions = { version = "0.27", optional = true }
+
 
 [dev-dependencies]
 tempfile = "3"

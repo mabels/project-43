@@ -140,7 +140,7 @@ pub fn list_connected_cards() -> Result<Vec<ConnectedCard>> {
 /// opened or does not expose PW status bytes.
 pub fn card_pin_retries(ident: Option<&str>) -> Result<u8> {
     let mut card = open_card(ident)?;
-    let mut tx = card
+    let tx = card
         .transaction()
         .context("Failed to open card transaction")?;
     let pw = tx

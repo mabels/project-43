@@ -80,16 +80,16 @@ mod inner {
         let export_url = format!("{}/v1/traces", endpoint.trim_end_matches('/'));
         eprintln!("[p43::telemetry] OTLP mode — exporting to {export_url}");
 
-        let resource = Resource::new(vec![opentelemetry::KeyValue::new(
-            SERVICE_NAME,
-            "p43",
-        )]);
+        let resource = Resource::new(vec![opentelemetry::KeyValue::new(SERVICE_NAME, "p43")]);
 
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_endpoint(export_url)
             .build()
-            .map_err(|e| { eprintln!("[p43::telemetry] exporter build failed: {e}"); e })?;
+            .map_err(|e| {
+                eprintln!("[p43::telemetry] exporter build failed: {e}");
+                e
+            })?;
         eprintln!("[p43::telemetry] exporter built OK");
 
         let provider = opentelemetry_sdk::trace::TracerProvider::builder()
@@ -105,21 +105,22 @@ mod inner {
         // OTel layer has NO EnvFilter — all spans reach the collector regardless
         // of RUST_LOG.  A separate fmt layer is gated by RUST_LOG for local
         // debugging (defaults to off when the env var is not set).
-        let otel_layer = tracing_opentelemetry::layer()
-            .with_tracer(provider.tracer("p43"));
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("p43"));
 
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off")),
-            );
+        let fmt_layer = tracing_subscriber::fmt::layer().with_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off")),
+        );
 
         let result = tracing_subscriber::registry()
             .with(otel_layer)
             .with(fmt_layer)
             .try_init()
             .map_err(|e| anyhow::anyhow!("tracing subscriber install failed: {e}"));
-        eprintln!("[p43::telemetry] subscriber init: {:?}", result.as_ref().map(|_| "ok").map_err(|e| e.to_string()));
+        eprintln!(
+            "[p43::telemetry] subscriber init: {:?}",
+            result.as_ref().map(|_| "ok").map_err(|e| e.to_string())
+        );
         result
     }
 

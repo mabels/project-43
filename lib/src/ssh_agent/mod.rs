@@ -4,7 +4,8 @@ use openpgp::packet::key::SecretKeyMaterial;
 use openpgp::policy::StandardPolicy;
 use openpgp::types::Curve;
 use sequoia_openpgp as openpgp;
-use signature::Signer as _; // Ed25519 PrivateKey::try_sign
+#[allow(unused_imports)]
+use signature::Signer as _; // Ed25519 PrivateKey::try_sign — trait must be in scope
 use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData, RsaKeypair, RsaPrivateKey};
 use ssh_key::public::{Ed25519PublicKey, KeyData, RsaPublicKey};
 use ssh_key::{HashAlg, Mpint, PrivateKey, Signature};
@@ -304,7 +305,10 @@ pub struct SshKeyMeta {
 ///
 /// Returns `None` if no matching key is found.  Used by the UI to display key
 /// information in sign-request tiles and the passphrase dialog.
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(store_dir), fields(ssh_fingerprint)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(store_dir), fields(ssh_fingerprint))
+)]
 pub fn get_ssh_key_meta(store_dir: &Path, ssh_fingerprint: &str) -> Option<SshKeyMeta> {
     use ssh_key::public::PublicKey;
 
@@ -399,7 +403,10 @@ fn openpgp_fp_for_ssh_fp(store_dir: &Path, ssh_fingerprint: &str) -> Result<Stri
 ///
 /// Returns the SSH wire-encoded signature as base64.
 #[cfg(feature = "pcsc")]
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(pin, data), fields(ssh_fingerprint)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(pin, data), fields(ssh_fingerprint))
+)]
 pub fn sign_with_card_key(
     store_dir: &Path,
     ssh_fingerprint: &str,
@@ -545,7 +552,10 @@ pub fn sign_with_card_key(
 /// the auth subkey (falling back to the sign subkey).  Returns the SSH
 /// wire-encoded signature as a base64 string (the format expected by
 /// `SshSignResponse.signature`).
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(passphrase, data), fields(ssh_fingerprint)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(passphrase, data), fields(ssh_fingerprint))
+)]
 pub fn sign_with_soft_key(
     store_dir: &Path,
     ssh_fingerprint: &str,
@@ -649,7 +659,10 @@ fn sign_cert_for_ssh(cert: &openpgp::Cert, data: &[u8]) -> Result<String> {
 ///
 /// Pass the returned bytes to [`sign_with_cached_keypair`] for zero-KDF
 /// subsequent signs.
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(passphrase, data), fields(ssh_fingerprint)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(passphrase, data), fields(ssh_fingerprint))
+)]
 pub fn sign_with_soft_key_and_extract(
     store_dir: &Path,
     ssh_fingerprint: &str,
@@ -990,7 +1003,10 @@ pub fn load_card_auth_key_info() -> Result<CardKeyInfo> {
 /// `0x04` → SHA-512 (`rsa-sha2-512`), otherwise SHA-256 (`rsa-sha2-256`).
 /// For Ed25519 keys `flags` is ignored — the card runs PureEdDSA internally.
 #[cfg(feature = "pcsc")]
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip(data, pin), fields(is_rsa)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip(data, pin), fields(is_rsa))
+)]
 pub fn card_auth_sign_ssh(data: &[u8], pin: &str, flags: u32, is_rsa: bool) -> Result<Signature> {
     let mut card = open_first_card()?;
     let mut tx = card.transaction()?;
@@ -1052,6 +1068,69 @@ pub fn mpi_to_openssh_string(mpis: &mpi::PublicKey, comment: &str) -> Option<Str
     let key_data = mpi_pubkey_to_ssh_keydata(mpis).ok()?;
     let pub_key = PublicKey::new(key_data, comment);
     pub_key.to_openssh().ok()
+}
+
+/// Extract the raw 32-byte Ed25519 public key from an OpenPGP EdDSA MPI.
+/// Returns an error for non-Ed25519 keys.
+pub fn mpi_ed25519_pubkey_raw(mpis: &mpi::PublicKey) -> Result<[u8; 32]> {
+    match mpis {
+        mpi::PublicKey::EdDSA {
+            curve: Curve::Ed25519,
+            q,
+        } => {
+            let q_bytes = q.value();
+            anyhow::ensure!(
+                q_bytes.len() == 33 && q_bytes[0] == 0x40,
+                "unexpected EdDSA public-key encoding (expected 0x40 prefix)"
+            );
+            q_bytes[1..33]
+                .try_into()
+                .context("EdDSA public key is not 32 bytes")
+        }
+        _ => anyhow::bail!("key is not Ed25519"),
+    }
+}
+
+/// Read the raw 32-byte Ed25519 public key from the card's auth slot.
+/// No PIN required.
+#[cfg(feature = "pcsc")]
+pub fn card_auth_pubkey_raw(ident: Option<&str>) -> Result<[u8; 32]> {
+    use crate::pkcs11::card::open_card;
+    use openpgp_card_sequoia::types::KeyType;
+    let mut card = open_card(ident)?;
+    let mut tx = card.transaction().context("open card transaction")?;
+    let pub_key = tx
+        .public_key(KeyType::Authentication)
+        .context("read card auth public key")?
+        .context("no auth key loaded on card")?;
+    mpi_ed25519_pubkey_raw(pub_key.mpis())
+}
+
+/// Sign `data` with the card's Ed25519 auth slot and return raw 64-byte
+/// signature bytes.  Requires user PIN.
+#[cfg(feature = "pcsc")]
+pub fn card_auth_sign_raw(data: &[u8], pin: &str, ident: Option<&str>) -> Result<[u8; 64]> {
+    use crate::pkcs11::card::open_card;
+    let mut card = open_card(ident)?;
+    let mut tx = card.transaction().context("open card transaction")?;
+    tx.verify_user_pin(pin)
+        .context("card user PIN verification failed")?;
+    let mut user_card = tx.to_user_card(None).context("to_user_card")?;
+    let mut auth = user_card
+        .authenticator(&|| eprintln!("Touch YubiKey now…"))
+        .context("obtain card authenticator")?;
+    let mpi_sig = auth
+        .sign(openpgp::types::HashAlgorithm::SHA512, data)
+        .context("card Ed25519 auth-slot signing failed")?;
+    match &mpi_sig {
+        mpi::Signature::EdDSA { r, s } => {
+            let mut sig = [0u8; 64];
+            sig[..32].copy_from_slice(&r.value_padded(32).context("EdDSA r padding")?);
+            sig[32..].copy_from_slice(&s.value_padded(32).context("EdDSA s padding")?);
+            Ok(sig)
+        }
+        other => anyhow::bail!("expected EdDSA sig from card, got {:?}", other),
+    }
 }
 
 fn mpi_pubkey_to_ssh_keydata(mpis: &mpi::PublicKey) -> Result<KeyData> {

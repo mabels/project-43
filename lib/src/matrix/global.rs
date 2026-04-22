@@ -51,7 +51,10 @@ pub struct BridgeDeviceInfo {
 // ── Session management ────────────────────────────────────────────────────────
 
 /// Full password login; stores the resulting client globally.
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all, fields(homeserver, username)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip_all, fields(homeserver, username))
+)]
 pub async fn login(
     homeserver: &str,
     username: &str,
@@ -110,7 +113,10 @@ pub async fn list_rooms() -> Result<Vec<BridgeRoomInfo>> {
 }
 
 /// Join a room and return its basic info.
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all, fields(room_spec)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip_all, fields(room_spec))
+)]
 pub async fn join_room(room_spec: &str) -> Result<BridgeRoomInfo> {
     let client = take_client().await.context("Not logged in to Matrix")?;
     let result = super::room::join_room(&client, room_spec).await?;
@@ -158,7 +164,10 @@ pub async fn list_devices() -> Result<Vec<BridgeDeviceInfo>> {
 ///
 /// Returns the last [`super::room::ListenPointer`] observed so the caller can
 /// use it as a final `since` on the next invocation.
-#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all, fields(room_id, since)))]
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip_all, fields(room_id, since))
+)]
 pub async fn listen_room<F, P>(
     room_id: &str,
     since: Option<&str>,

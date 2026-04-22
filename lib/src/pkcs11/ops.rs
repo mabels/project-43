@@ -146,8 +146,15 @@ pub fn encrypt(data: &[u8], recipient_path: &Path) -> Result<String> {
 }
 
 pub fn decrypt(data: &[u8], pin: &str) -> Result<Vec<u8>> {
+    decrypt_with_card(data, pin, None)
+}
+
+/// Like [`decrypt`] but lets you specify which card to use by AID ident
+/// string.  Pass `None` to use the first connected card.
+pub fn decrypt_with_card(data: &[u8], pin: &str, ident: Option<&str>) -> Result<Vec<u8>> {
+    use crate::pkcs11::card::open_card;
     let policy = &StandardPolicy::new();
-    let mut card = open_first_card()?;
+    let mut card = open_card(ident)?;
     let mut tx = card.transaction()?;
     tx.verify_user_pin(pin).context("PIN verification failed")?;
     let mut user_card = tx.to_user_card(None)?;

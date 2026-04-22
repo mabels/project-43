@@ -34,6 +34,10 @@ pub mod signer;
 // ── Convenience re-exports ────────────────────────────────────────────────────
 
 pub use authority::{AuthorityKey, AuthorityPub};
+pub use bridge::{
+    new_external_bus, new_internal_bus, new_outbound_queue, spawn_decrypt_middleware,
+    spawn_encrypt_worker, DecryptResult, InboundBusMessage, OutboundBusMessage,
+};
 pub use cert::{CertPayload, DeviceCert};
 pub use csr::{unix_now, CsrPayload, DeviceCsr};
 pub use device::{hostname_label, load_or_generate_device_key};
@@ -41,10 +45,6 @@ pub use device_key::DeviceKey;
 pub use list::{
     delete_device_key, list_own_devices, list_peers, remove_peer, resolve_device_key,
     resolve_own_device_label, resolve_recipient_cert, OwnDeviceInfo, PeerInfo,
-};
-pub use bridge::{
-    new_external_bus, new_internal_bus, new_outbound_queue, spawn_decrypt_middleware,
-    spawn_encrypt_worker, DecryptResult, InboundBusMessage, OutboundBusMessage,
 };
 pub use message::{
     decrypt, encrypt, open_protocol_message, seal_protocol_message, BusDecryptor, BusEnvelope,

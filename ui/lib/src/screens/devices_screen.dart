@@ -13,6 +13,10 @@ class DevicesScreen extends StatefulWidget {
     this.onCsrRequest,
     this.busStream,
     this.sessionLockStream,
+    this.unlockRequestStream,
+    this.externalLockStream,
+    this.onSessionUnlocked,
+    this.sessionUnlockKey,
   });
 
   /// Called when an incoming CSR arrives so the shell can switch to this tab.
@@ -25,8 +29,27 @@ class DevicesScreen extends StatefulWidget {
 
   /// Fires whenever a [BusSecure] message arrives but the authority session is
   /// locked.  The screen will animate to the Authority tab so the user can
-  /// unlock.
+  /// unlock and shows an OS notification.
   final Stream<void>? sessionLockStream;
+
+  /// Fires when the user taps the global AppBar lock button while the session
+  /// is locked.  Same behaviour as [sessionLockStream] but without the OS
+  /// notification — the user is already looking at the screen.
+  final Stream<void>? unlockRequestStream;
+
+  /// Fires whenever the session is locked externally (AppBar lock button,
+  /// screen-lock lifecycle).  Forwarded to [SessionUnlockTile] so its visual
+  /// stays in sync with the root shell's lock icon.
+  final Stream<void>? externalLockStream;
+
+  /// Called after the user successfully unlocks the authority session so the
+  /// root shell can refresh the global lock icon.
+  final VoidCallback? onSessionUnlocked;
+
+  /// Optional external key for [SessionUnlockTile].  Pass this from the root
+  /// shell so it can imperatively call [SessionUnlockTileState.openUnlockDialog]
+  /// from the global AppBar lock button.
+  final GlobalKey<SessionUnlockTileState>? sessionUnlockKey;
 
   @override
   State<DevicesScreen> createState() => _DevicesScreenState();
@@ -40,10 +63,13 @@ class _DevicesScreenState extends State<DevicesScreen>
   String? _agentRoom;
   StreamSubscription<rust.BusCsrEvent>? _busSub;
   StreamSubscription<void>? _sessionLockSub;
+  StreamSubscription<void>? _unlockRequestSub;
 
   // Key used to imperatively open the session unlock dialog from outside
   // the SessionUnlockTile widget when a BusSecure message arrives while locked.
-  final _sessionUnlockKey = GlobalKey<SessionUnlockTileState>();
+  // Prefer the external key passed via widget.sessionUnlockKey (root shell holds
+  // it so the global AppBar lock button can also trigger the dialog).
+  late final GlobalKey<SessionUnlockTileState> _sessionUnlockKey;
 
   // ── Registered devices ────────────────────────────────────────────────────
   List<rust.BusPeer> _peers = [];
@@ -56,18 +82,22 @@ class _DevicesScreenState extends State<DevicesScreen>
 
   @override
   void initState() {
+    _sessionUnlockKey =
+        widget.sessionUnlockKey ?? GlobalKey<SessionUnlockTileState>();
     super.initState();
     _tabCtrl = TabController(length: 2, vsync: this, initialIndex: 1);
     _loadAgentRoom();
     _loadPeers();
     _subscribeToStream();
     _subscribeToSessionLock();
+    _subscribeToUnlockRequest();
   }
 
   @override
   void dispose() {
     _busSub?.cancel();
     _sessionLockSub?.cancel();
+    _unlockRequestSub?.cancel();
     _tabCtrl.dispose();
     super.dispose();
   }
@@ -128,6 +158,26 @@ class _DevicesScreenState extends State<DevicesScreen>
         // SessionUnlockTile is guaranteed to be in the widget tree.
         // Flutter's default tab animation is 300 ms; 350 ms gives a buffer.
         Future.delayed(const Duration(milliseconds: 350), () {
+          _sessionUnlockKey.currentState?.openUnlockDialog();
+        });
+      },
+      onError: (_) {},
+      onDone: () {},
+    );
+  }
+
+  /// When the root shell emits a user-initiated unlock request (AppBar lock
+  /// button tapped while locked), animate to the Authority tab and open the
+  /// dialog — same as [_subscribeToSessionLock] but without the OS notification.
+  void _subscribeToUnlockRequest() {
+    final stream = widget.unlockRequestStream;
+    if (stream == null) return;
+    _unlockRequestSub = stream.listen(
+      (_) {
+        if (!mounted) return;
+        _tabCtrl.animateTo(0);
+        Future.delayed(const Duration(milliseconds: 350), () {
+          if (!mounted) return;
           _sessionUnlockKey.currentState?.openUnlockDialog();
         });
       },
@@ -294,7 +344,11 @@ class _DevicesScreenState extends State<DevicesScreen>
       body: TabBarView(
         controller: _tabCtrl,
         children: [
-          _AuthorityTab(sessionUnlockKey: _sessionUnlockKey),
+          _AuthorityTab(
+            sessionUnlockKey: _sessionUnlockKey,
+            onSessionUnlocked: widget.onSessionUnlocked,
+            externalLockStream: widget.externalLockStream,
+          ),
           _DevicesTab(
             peers: _peers,
             loading: _loadingPeers,
@@ -310,9 +364,15 @@ class _DevicesScreenState extends State<DevicesScreen>
 // ── Authority tab ─────────────────────────────────────────────────────────────
 
 class _AuthorityTab extends StatelessWidget {
-  const _AuthorityTab({this.sessionUnlockKey});
+  const _AuthorityTab({
+    this.sessionUnlockKey,
+    this.onSessionUnlocked,
+    this.externalLockStream,
+  });
 
   final GlobalKey<SessionUnlockTileState>? sessionUnlockKey;
+  final VoidCallback? onSessionUnlocked;
+  final Stream<void>? externalLockStream;
 
   @override
   Widget build(BuildContext context) {
@@ -320,7 +380,11 @@ class _AuthorityTab extends StatelessWidget {
       children: [
         const AuthorityStatusTile(),
         const SizedBox(height: 1),
-        SessionUnlockTile(key: sessionUnlockKey),
+        SessionUnlockTile(
+          key: sessionUnlockKey,
+          onUnlocked: onSessionUnlocked,
+          externalLockStream: externalLockStream,
+        ),
         const SizedBox(height: 1),
         const AuthorityQrTile(),
         const SizedBox(height: 1),

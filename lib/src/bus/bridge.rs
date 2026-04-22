@@ -138,9 +138,7 @@ pub fn spawn_decrypt_middleware(
                 Ok(msg) => msg,
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!(
-                        "[p43::bus::bridge] external_rx lagged, dropped {n} messages"
-                    );
+                    eprintln!("[p43::bus::bridge] external_rx lagged, dropped {n} messages");
                     continue;
                 }
             };
@@ -173,7 +171,10 @@ pub fn spawn_decrypt_middleware(
 
             // Drop the send result — no subscribers yet is fine (lagged receivers
             // will be warned via the recv side).
-            let _ = internal_tx.send(InboundBusMessage { message: msg, sender_cert });
+            let _ = internal_tx.send(InboundBusMessage {
+                message: msg,
+                sender_cert,
+            });
         }
     })
 }
@@ -194,9 +195,7 @@ pub fn spawn_decrypt_middleware(
 ///   with a warning).
 /// - `room_id` — Matrix room ID to send into.
 pub fn spawn_encrypt_worker(
-    seal: impl Fn(&protocol::Message, &CertPayload) -> Option<protocol::Message>
-        + Send
-        + 'static,
+    seal: impl Fn(&protocol::Message, &CertPayload) -> Option<protocol::Message> + Send + 'static,
     room_id: String,
     mut outbound_rx: mpsc::Receiver<OutboundBusMessage>,
 ) -> tokio::task::JoinHandle<()> {
@@ -219,9 +218,7 @@ pub fn spawn_encrypt_worker(
 
             match json_result {
                 Ok(json) => {
-                    if let Err(e) =
-                        crate::matrix::global::send_message(&room_id, &json).await
-                    {
+                    if let Err(e) = crate::matrix::global::send_message(&room_id, &json).await {
                         eprintln!("[p43::bus::bridge] send_message: {e}");
                     }
                 }

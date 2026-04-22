@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'simple.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `authority_session`, `card_pin_cache`, `default_store_dir`, `maybe_seal`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `passphrase_cache`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
+// These functions are ignored because they are not marked as `pub`: `authority_session`, `credential_cache`, `default_store_dir`, `external_tx_cell`, `locked_msg_queue`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `outbound_tx_cell`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `send_via_bridge`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
@@ -259,6 +259,12 @@ Future<void> mxRespondListKeys({
 ///   [`AppMessage::AgentEvent`] → `AgentScreen`
 ///   [`AppMessage::BusEvent`]   → `DevicesScreen`
 ///
+/// Internally sets up the two-layer bus bridge:
+///   - Raw Matrix messages → **external bus** (broadcast)
+///   - Decrypt middleware → **internal bus** (broadcast, plaintext)
+///   - Application dispatcher subscribes to internal bus → `AppMessage` stream
+///   - **Outbound queue** (mpsc) → encrypt worker → Matrix send
+///
 /// The `agent_since` pointer (persisted in `matrix-config.json`) is respected
 /// and updated on every sync batch so reconnects never replay seen messages.
 Stream<AppMessage> mxListenAll({required String roomId}) =>
@@ -429,9 +435,10 @@ Future<bool> busIsSessionUnlocked() =>
 /// Returns `true` if cached credentials exist for the given SSH fingerprint,
 /// meaning `mx_respond_sign_cached` can proceed without a passphrase dialog.
 ///
-/// Returns `true` when either:
-/// - A decrypted keypair is cached (key-cache enabled) → fast, microseconds.
-/// - A passphrase is cached (key-cache disabled) → slow, re-runs KDF (~9 s).
+/// Returns `true` when any of:
+/// - A passphrase is cached in the credential cache (slow KDF path).
+/// - A decrypted Ed25519 keypair is cached (fast, microseconds).
+/// - A decrypted RSA key is cached (fast, zero KDF).
 ///
 /// Dart uses this to decide whether to auto-approve or show the dialog.
 /// When biometric approval is added, this is also the gate for whether
@@ -441,10 +448,10 @@ Future<bool> hasCachedPassphrase({required String fingerprint}) => RustLib
     .api
     .crateApiSimpleHasCachedPassphrase(fingerprint: fingerprint);
 
-/// Prime the passphrase cache for a given key fingerprint.
+/// Prime the credential cache for a given key fingerprint.
 ///
-/// Call after a successful `bus_unlock_session` so that sign requests arriving
-/// shortly after can be auto-approved without asking for the passphrase again.
+/// `bus_unlock_session` already calls this internally; use this function when
+/// you need to prime the cache from a path that bypasses `bus_unlock_session`.
 Future<void> mxPrimePassphraseCache({
   required String fingerprint,
   required String passphrase,
@@ -468,13 +475,33 @@ Future<void> mxPrimePassphraseCache({
 Future<void> mxSetCacheKeyEnabled({required bool enabled}) =>
     RustLib.instance.api.crateApiSimpleMxSetCacheKeyEnabled(enabled: enabled);
 
-/// Clear all in-memory credential caches (passphrase + signing key + authority
-/// session).
+/// Update the credential cache timeout.
 ///
-/// Does **not** affect the `KEY_CACHE_ENABLED` flag — the next successful
-/// `mx_respond_sign` will repopulate the caches if caching is still enabled.
+/// Pass the value of `AgentSettings.cacheTimeoutMinutes * 60` (converted to
+/// seconds), or `0` to disable automatic expiry.
 ///
-/// Call when the configured session timeout expires or the screen locks.
+/// Call at startup and whenever the setting changes.
+Future<void> credentialCacheSetTimeout({required BigInt timeoutSecs}) => RustLib
+    .instance
+    .api
+    .crateApiSimpleCredentialCacheSetTimeout(timeoutSecs: timeoutSecs);
+
+/// Lock the session and purge **all** in-memory credentials.
+///
+/// Clears:
+/// - Credential cache (all PINs and passphrases)
+/// - Derived signing-key cache (decrypted Ed25519 / RSA keypairs)
+/// - Authority session key
+///
+/// Does **not** affect `KEY_CACHE_ENABLED` — caching resumes on the next
+/// successful sign if still enabled.
+///
+/// Call from the global lock button and on screen-lock / app-background events.
+Future<void> lockAll() => RustLib.instance.api.crateApiSimpleLockAll();
+
+/// Clear all in-memory credential caches.
+///
+/// Delegates to [`lock_all`].  Kept for backwards compatibility.
 Future<void> mxClearCaches() =>
     RustLib.instance.api.crateApiSimpleMxClearCaches();
 

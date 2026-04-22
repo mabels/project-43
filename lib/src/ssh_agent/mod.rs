@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-
 // ── rsa-crate imports (direct RSA signing, bypasses ssh-key 0.6.7 bug) ───────
 // ssh-key 0.6.7 TryFrom<&RsaKeypair> passes [p, p] instead of [p, q] to
 // rsa::RsaPrivateKey::from_components, causing a cryptographic error on every
@@ -344,6 +343,35 @@ pub fn get_ssh_key_meta(store_dir: &Path, ssh_fingerprint: &str) -> Option<SshKe
         }
     }
     None
+}
+
+/// Derive the SSH SHA-256 fingerprint for the key-store entry identified by
+/// its OpenPGP hex fingerprint.
+///
+/// Loads the cert, picks the auth subkey (falling back to signing / any), and
+/// returns the SSH SHA-256 fingerprint string.  Returns `None` if the entry
+/// cannot be found or has no usable subkey.
+///
+/// Used by `bus_unlock_session` to prime the credential cache with the correct
+/// key so that sign requests (which carry SSH fingerprints) can hit the cache.
+pub fn ssh_fp_for_openpgp_fp(store_dir: &Path, openpgp_fp: &str) -> Option<String> {
+    use ssh_key::public::PublicKey;
+    let ks = crate::key_store::store::KeyStore::open(store_dir).ok()?;
+    let cert = ks.find(openpgp_fp).ok()?;
+    let policy = StandardPolicy::new();
+    let ka = cert
+        .keys()
+        .with_policy(&policy, None)
+        .for_authentication()
+        .next()
+        .or_else(|| cert.keys().with_policy(&policy, None).for_signing().next())
+        .or_else(|| cert.keys().with_policy(&policy, None).next())?;
+    let key_data = mpi_pubkey_to_ssh_keydata(ka.key().mpis()).ok()?;
+    Some(
+        PublicKey::new(key_data, "")
+            .fingerprint(HashAlg::Sha256)
+            .to_string(),
+    )
 }
 
 /// Resolve an SSH SHA-256 fingerprint (e.g. `SHA256:AbCd…`) to the OpenPGP

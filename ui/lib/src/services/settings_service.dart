@@ -145,8 +145,9 @@ class SettingsService extends ChangeNotifier {
         // Corrupt file — fall back to defaults.
       }
     }
-    // Sync the key-cache flag to Rust at startup.
+    // Sync Rust caches with the persisted settings on startup.
     mxSetCacheKeyEnabled(enabled: _settings.cacheDecryptedKey);
+    _syncCacheTimeout(_settings.cacheTimeoutMinutes);
     notifyListeners();
   }
 
@@ -157,13 +158,20 @@ class SettingsService extends ChangeNotifier {
     if (updated.cacheDecryptedKey != prev.cacheDecryptedKey) {
       mxSetCacheKeyEnabled(enabled: updated.cacheDecryptedKey);
     }
-    // If the timeout changed, restart the timer with the new value so the
-    // change takes effect immediately rather than on the next sign.
-    if (updated.cacheTimeoutMinutes != prev.cacheTimeoutMinutes &&
-        _cacheTimer?.isActive == true) {
-      resetCacheTimer();
+    if (updated.cacheTimeoutMinutes != prev.cacheTimeoutMinutes) {
+      _syncCacheTimeout(updated.cacheTimeoutMinutes);
+      // Restart the Dart-side timer so the new value takes effect immediately.
+      if (_cacheTimer?.isActive == true) {
+        resetCacheTimer();
+      }
     }
     await _file?.writeAsString(jsonEncode(_settings.toJson()));
+  }
+
+  /// Sync the credential cache timeout to Rust.
+  void _syncCacheTimeout(int? minutes) {
+    final secs = (minutes != null && minutes > 0) ? minutes * 60 : 0;
+    credentialCacheSetTimeout(timeoutSecs: BigInt.from(secs));
   }
 
   /// Call after every successful sign to (re)start the session timeout.
@@ -178,18 +186,18 @@ class SettingsService extends ChangeNotifier {
     }
   }
 
-  /// Clear caches immediately and cancel any pending timer.
+  /// Lock the session and purge all in-memory credentials immediately.
   ///
-  /// Call on screen-lock / app-background events.
+  /// Call on screen-lock / app-background events and from the global lock button.
   void invalidateCache() {
     _cacheTimer?.cancel();
     _cacheTimer = null;
-    mxClearCaches();
+    lockAll();
   }
 
   void _onCacheExpired() {
     _cacheTimer = null;
-    mxClearCaches();
+    lockAll();
   }
 
   @override

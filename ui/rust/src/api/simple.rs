@@ -138,30 +138,26 @@ fn pending_signs() -> &'static Mutex<HashMap<String, PendingSign>> {
     PENDING_SIGNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-// ── Passphrase cache ──────────────────────────────────────────────────────────
+// ── Credential cache ──────────────────────────────────────────────────────────
 //
-// Keyed by SSH fingerprint (`SHA256:…`).  Lives in memory only — never written
-// to disk.  A successful `mx_respond_sign` populates the cache; subsequent
-// approvals for the same key skip the passphrase dialog.
+// Unified store for PINs and passphrases.  Keyed by:
+//   - OpenPGP hex fingerprint for soft keys
+//   - Card AID ident (e.g. `"0006:17684870"`) for card keys
 //
-// When biometric approval is added later, the biometric success path calls
-// `mx_respond_sign_cached` directly — no changes to this Rust layer needed.
-
-static PASSPHRASE_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-
-fn passphrase_cache() -> &'static Mutex<HashMap<String, String>> {
-    PASSPHRASE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-// ── Card PIN cache ────────────────────────────────────────────────────────────
+// Default timeout: 15 minutes (mirrors AgentSettings.cacheTimeoutMinutes).
+// Call `credential_cache_set_timeout` whenever the setting changes.
 //
-// Keyed by card AID ident string (e.g. `"0006:17684870"`).  Populated on a
-// successful `mx_respond_sign_card`; cleared by `mx_clear_caches`.
+// `get` resets the sliding-window expiry timer; `peek` does not.
+// `purge` is called by `lock_all` (screen-lock / global lock button).
+//
+// Designed for biometric protection: a future revision will seal each
+// entry with a biometric-unlocked key — the public API is unchanged.
 
-static CARD_PIN_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static CREDENTIAL_CACHE: OnceLock<Mutex<p43::credential_cache::CredentialCache>> = OnceLock::new();
 
-fn card_pin_cache() -> &'static Mutex<HashMap<String, String>> {
-    CARD_PIN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn credential_cache() -> &'static Mutex<p43::credential_cache::CredentialCache> {
+    CREDENTIAL_CACHE
+        .get_or_init(|| Mutex::new(p43::credential_cache::CredentialCache::new(15 * 60u32)))
 }
 
 // ── Authority session ─────────────────────────────────────────────────────────
@@ -188,8 +184,7 @@ fn authority_session() -> &'static Mutex<Option<(p43::bus::AuthorityKey, Vec<u8>
 static OUTBOUND_TX: OnceLock<Mutex<Option<mpsc::Sender<p43::bus::OutboundBusMessage>>>> =
     OnceLock::new();
 
-fn outbound_tx_cell()
--> &'static Mutex<Option<mpsc::Sender<p43::bus::OutboundBusMessage>>> {
+fn outbound_tx_cell() -> &'static Mutex<Option<mpsc::Sender<p43::bus::OutboundBusMessage>>> {
     OUTBOUND_TX.get_or_init(|| Mutex::new(None))
 }
 
@@ -202,8 +197,8 @@ static EXTERNAL_TX: OnceLock<
     Mutex<Option<tokio::sync::broadcast::Sender<p43::protocol::Message>>>,
 > = OnceLock::new();
 
-fn external_tx_cell()
--> &'static Mutex<Option<tokio::sync::broadcast::Sender<p43::protocol::Message>>> {
+fn external_tx_cell(
+) -> &'static Mutex<Option<tokio::sync::broadcast::Sender<p43::protocol::Message>>> {
     EXTERNAL_TX.get_or_init(|| Mutex::new(None))
 }
 
@@ -214,12 +209,10 @@ fn external_tx_cell()
 // `bus_unlock_session` drains this queue and replays each message onto the
 // external bus so the full decrypt → internal-bus → AppMessage pipeline runs.
 
-static LOCKED_MSG_QUEUE: OnceLock<
-    Mutex<std::collections::VecDeque<p43::protocol::Message>>,
-> = OnceLock::new();
+static LOCKED_MSG_QUEUE: OnceLock<Mutex<std::collections::VecDeque<p43::protocol::Message>>> =
+    OnceLock::new();
 
-fn locked_msg_queue()
--> &'static Mutex<std::collections::VecDeque<p43::protocol::Message>> {
+fn locked_msg_queue() -> &'static Mutex<std::collections::VecDeque<p43::protocol::Message>> {
     LOCKED_MSG_QUEUE.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
 }
 
@@ -892,9 +885,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                         Ok(m) => m,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!(
-                                "[p43::bridge] internal_rx lagged, dropped {n} messages"
-                            );
+                            eprintln!("[p43::bridge] internal_rx lagged, dropped {n} messages");
                             continue;
                         }
                     };
@@ -930,16 +921,14 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                                 },
                             })
                         }
-                        p43::protocol::Message::BusCsrRequest(r) => {
-                            Some(AppMessage::BusEvent {
-                                event: BusCsrEvent {
-                                    request_id: r.request_id,
-                                    device_label: r.device_label,
-                                    device_id: r.device_id,
-                                    csr_b64: r.csr_b64,
-                                },
-                            })
-                        }
+                        p43::protocol::Message::BusCsrRequest(r) => Some(AppMessage::BusEvent {
+                            event: BusCsrEvent {
+                                request_id: r.request_id,
+                                device_label: r.device_label,
+                                device_id: r.device_id,
+                                csr_b64: r.csr_b64,
+                            },
+                        }),
                         _ => None,
                     };
                     if let Some(m) = event {
@@ -1428,20 +1417,34 @@ pub fn bus_unlock_session(
     // Prime the signing-credential caches with the credentials just used so
     // that any replayed sign requests (see below) can be auto-approved without
     // showing a second PIN / passphrase dialog.
+    //
+    // For card keys: the unlock dialog hands us an OpenPGP hex fingerprint, NOT
+    // an SSH SHA-256 fingerprint.  `get_ssh_key_meta` matches by SSH fingerprint
+    // and would return None here.  Instead we look up `card_idents` directly from
+    // the KeyStore by OpenPGP fingerprint — the AID ident is the same for all
+    // three card slots (SIG / AUTH / ENC), so one PIN entry covers all of them.
     let store_dir = default_store_dir();
     if use_card {
         if let (Some(fp), Some(ref pin_val)) = (fingerprint.as_deref(), &pin) {
-            if let Some(meta) = p43::ssh_agent::get_ssh_key_meta(&store_dir, fp) {
-                if let Ok(mut cache) = card_pin_cache().lock() {
-                    for ident in &meta.card_idents {
-                        cache.insert(ident.clone(), pin_val.clone());
+            if let Ok(ks) = p43::key_store::store::KeyStore::open(&store_dir) {
+                if let Ok(entries) = ks.list() {
+                    if let Some(entry) = entries.into_iter().find(|e| e.fingerprint == fp) {
+                        if let Ok(mut cache) = credential_cache().lock() {
+                            for ident in &entry.card_idents {
+                                cache.insert(ident.clone(), pin_val.clone());
+                            }
+                        }
                     }
                 }
             }
         }
     } else if let (Some(fp), Some(ref phrase)) = (fingerprint.as_deref(), &passphrase) {
-        if let Ok(mut cache) = passphrase_cache().lock() {
-            cache.insert(fp.to_string(), phrase.clone());
+        // Sign requests carry SSH SHA-256 fingerprints; convert so the cache key
+        // matches what mx_respond_sign_cached will look up.
+        let cache_key =
+            p43::ssh_agent::ssh_fp_for_openpgp_fp(&store_dir, fp).unwrap_or_else(|| fp.to_string());
+        if let Ok(mut cache) = credential_cache().lock() {
+            cache.insert(cache_key, phrase.clone());
         }
     }
 
@@ -1500,10 +1503,8 @@ async fn send_via_bridge(
     msg: p43::protocol::Message,
     sender_cert: Option<p43::bus::CertPayload>,
 ) -> anyhow::Result<()> {
-    let tx_opt: Option<mpsc::Sender<p43::bus::OutboundBusMessage>> = outbound_tx_cell()
-        .lock()
-        .ok()
-        .and_then(|g| g.clone());
+    let tx_opt: Option<mpsc::Sender<p43::bus::OutboundBusMessage>> =
+        outbound_tx_cell().lock().ok().and_then(|g| g.clone());
 
     if let Some(tx) = tx_opt {
         tx.send(p43::bus::OutboundBusMessage {
@@ -1517,15 +1518,14 @@ async fn send_via_bridge(
 
     // Fallback: no bridge yet — inline seal + send.
     let json = if let Some(cert) = sender_cert.as_ref() {
-        let sealed_opt = authority_session()
-            .lock()
-            .ok()
-            .and_then(|guard| {
-                guard.as_ref().and_then(|(auth_key, auth_cert_bytes)| {
-                    p43::bus::seal_protocol_message(auth_key, auth_cert_bytes, cert, &msg).ok()
-                })
-            });
-        sealed_opt.map(|s| s.to_json()).unwrap_or_else(|| msg.to_json())?
+        let sealed_opt = authority_session().lock().ok().and_then(|guard| {
+            guard.as_ref().and_then(|(auth_key, auth_cert_bytes)| {
+                p43::bus::seal_protocol_message(auth_key, auth_cert_bytes, cert, &msg).ok()
+            })
+        });
+        sealed_opt
+            .map(|s| s.to_json())
+            .unwrap_or_else(|| msg.to_json())?
     } else {
         msg.to_json()?
     };
@@ -1545,38 +1545,38 @@ fn resolve_secret(explicit: Option<String>, env_var: &str, prompt: &str) -> anyh
 /// Returns `true` if cached credentials exist for the given SSH fingerprint,
 /// meaning `mx_respond_sign_cached` can proceed without a passphrase dialog.
 ///
-/// Returns `true` when either:
-/// - A decrypted keypair is cached (key-cache enabled) → fast, microseconds.
-/// - A passphrase is cached (key-cache disabled) → slow, re-runs KDF (~9 s).
+/// Returns `true` when any of:
+/// - A passphrase is cached in the credential cache (slow KDF path).
+/// - A decrypted Ed25519 keypair is cached (fast, microseconds).
+/// - A decrypted RSA key is cached (fast, zero KDF).
 ///
 /// Dart uses this to decide whether to auto-approve or show the dialog.
 /// When biometric approval is added, this is also the gate for whether
 /// biometric confirmation suffices or the user must type their passphrase.
 #[frb]
 pub fn has_cached_passphrase(fingerprint: String) -> bool {
+    // peek: check existence without resetting the expiry timer.
+    let has_credential = credential_cache()
+        .lock()
+        .map(|mut c| c.peek(&fingerprint))
+        .unwrap_or(false);
     let has_key = signing_key_cache()
         .lock()
         .map(|m| m.contains_key(&fingerprint))
         .unwrap_or(false);
-    let has_passphrase = passphrase_cache()
-        .lock()
-        .map(|m| m.contains_key(&fingerprint))
-        .unwrap_or(false);
-    // RSA keys are too large for the 64-byte Ed25519 slot; they have their own cache.
     let has_rsa_key = p43::ssh_agent::has_cached_rsa_key(&fingerprint);
-    has_key || has_passphrase || has_rsa_key
+    has_credential || has_key || has_rsa_key
 }
 
-/// Prime the passphrase cache for a given key fingerprint.
+/// Prime the credential cache for a given key fingerprint.
 ///
-/// Call after a successful `bus_unlock_session` so that sign requests arriving
-/// shortly after can be auto-approved without asking for the passphrase again.
+/// `bus_unlock_session` already calls this internally; use this function when
+/// you need to prime the cache from a path that bypasses `bus_unlock_session`.
 #[frb]
 pub fn mx_prime_passphrase_cache(fingerprint: String, passphrase: String) {
-    passphrase_cache()
-        .lock()
-        .unwrap()
-        .insert(fingerprint, passphrase);
+    if let Ok(mut cache) = credential_cache().lock() {
+        cache.insert(fingerprint, passphrase);
+    }
 }
 
 /// Enable or disable the in-memory signing-key cache.
@@ -1601,28 +1601,51 @@ pub fn mx_set_cache_key_enabled(enabled: bool) {
     }
 }
 
-/// Clear all in-memory credential caches (passphrase + signing key + authority
-/// session).
+/// Update the credential cache timeout.
 ///
-/// Does **not** affect the `KEY_CACHE_ENABLED` flag — the next successful
-/// `mx_respond_sign` will repopulate the caches if caching is still enabled.
+/// Pass the value of `AgentSettings.cacheTimeoutMinutes * 60` (converted to
+/// seconds), or `0` to disable automatic expiry.
 ///
-/// Call when the configured session timeout expires or the screen locks.
+/// Call at startup and whenever the setting changes.
 #[frb]
-pub fn mx_clear_caches() {
-    if let Ok(mut cache) = passphrase_cache().lock() {
-        cache.clear();
+pub fn credential_cache_set_timeout(timeout_secs: u64) {
+    if let Ok(mut cache) = credential_cache().lock() {
+        // Saturate at u32::MAX (~136 years) — any realistic timeout fits easily.
+        cache.set_timeout(timeout_secs.min(u32::MAX as u64) as u32);
+    }
+}
+
+/// Lock the session and purge **all** in-memory credentials.
+///
+/// Clears:
+/// - Credential cache (all PINs and passphrases)
+/// - Derived signing-key cache (decrypted Ed25519 / RSA keypairs)
+/// - Authority session key
+///
+/// Does **not** affect `KEY_CACHE_ENABLED` — caching resumes on the next
+/// successful sign if still enabled.
+///
+/// Call from the global lock button and on screen-lock / app-background events.
+#[frb]
+pub fn lock_all() {
+    if let Ok(mut cache) = credential_cache().lock() {
+        cache.purge();
     }
     if let Ok(mut cache) = signing_key_cache().lock() {
         cache.clear();
     }
-    if let Ok(mut cache) = card_pin_cache().lock() {
-        cache.clear();
-    }
+    p43::ssh_agent::clear_rsa_key_cache();
     if let Ok(mut session) = authority_session().lock() {
         *session = None;
     }
-    p43::ssh_agent::clear_rsa_key_cache();
+}
+
+/// Clear all in-memory credential caches.
+///
+/// Delegates to [`lock_all`].  Kept for backwards compatibility.
+#[frb]
+pub fn mx_clear_caches() {
+    lock_all();
 }
 
 /// Approve an `ssh.sign_request` using an explicitly supplied passphrase.
@@ -1673,8 +1696,8 @@ pub async fn mx_respond_sign(
         )?
     };
 
-    // Always cache the passphrase as a fallback for when key-cache is later disabled.
-    if let Ok(mut cache) = passphrase_cache().lock() {
+    // Cache the passphrase so subsequent signs can be auto-approved.
+    if let Ok(mut cache) = credential_cache().lock() {
         cache.insert(pending.fingerprint, passphrase);
     }
 
@@ -1721,7 +1744,7 @@ pub async fn mx_respond_sign_card(
 
     // Cache the PIN keyed by each card AID associated with this fingerprint.
     if let Some(meta) = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint) {
-        if let Ok(mut cache) = card_pin_cache().lock() {
+        if let Ok(mut cache) = credential_cache().lock() {
             for ident in &meta.card_idents {
                 cache.insert(ident.clone(), pin.clone());
             }
@@ -1741,9 +1764,10 @@ pub async fn mx_respond_sign_card(
 /// `card_ident` is one of the strings from `KeyInfo.cardIdents`.
 #[frb]
 pub fn has_cached_card_pin(card_ident: String) -> bool {
-    card_pin_cache()
+    // peek: check existence without resetting the expiry timer.
+    credential_cache()
         .lock()
-        .map(|m| m.contains_key(&card_ident))
+        .map(|mut c| c.peek(&card_ident))
         .unwrap_or(false)
 }
 
@@ -1773,12 +1797,13 @@ pub async fn mx_respond_sign_card_cached(
         .ok_or_else(|| anyhow::anyhow!("No key metadata found for fingerprint"))?;
 
     let pin = {
-        let cache = card_pin_cache()
+        let mut cache = credential_cache()
             .lock()
-            .map_err(|e| anyhow::anyhow!("card PIN cache lock poisoned: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("credential cache lock poisoned: {e}"))?;
         meta.card_idents
             .iter()
-            .find_map(|id| cache.get(id).cloned())
+            // get: retrieves credential and resets its expiry timer.
+            .find_map(|id| cache.get(id))
             .ok_or_else(|| anyhow::anyhow!("No cached PIN for this card — enter PIN first"))?
     };
 
@@ -1852,11 +1877,11 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
         p43::ssh_agent::sign_with_cached_keypair(&keypair_bytes, &pending.data)?
     } else {
         // ── Slow fallback: re-run KDF with cached passphrase ─────────────────
-        let passphrase = passphrase_cache()
+        // get: retrieves the passphrase and resets its expiry timer.
+        let passphrase = credential_cache()
             .lock()
-            .map_err(|e| anyhow::anyhow!("passphrase cache lock poisoned: {e}"))?
+            .map_err(|e| anyhow::anyhow!("credential cache lock poisoned: {e}"))?
             .get(&pending.fingerprint)
-            .cloned()
             .ok_or_else(|| anyhow::anyhow!("No cached passphrase for this key"))?;
 
         let store_dir = default_store_dir();

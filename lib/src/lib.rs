@@ -2,6 +2,7 @@
 // on rustc ≥ 1.92.  Mirrors the fix applied to the vendored matrix-sdk crate.
 #![recursion_limit = "256"]
 
+pub mod credential_cache;
 pub mod key_store;
 pub mod protocol;
 pub mod util;

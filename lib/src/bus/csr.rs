@@ -167,22 +167,17 @@ pub fn cbor_decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 pub fn cbor_to_json_pretty(bytes: &[u8]) -> Result<String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
-    let value: ciborium::Value =
-        ciborium::from_reader(bytes).context("CBOR decode for display")?;
+    let value: ciborium::Value = ciborium::from_reader(bytes).context("CBOR decode for display")?;
 
     fn convert(v: ciborium::Value) -> serde_json::Value {
         match v {
-            ciborium::Value::Bytes(b) => {
-                serde_json::Value::String(B64.encode(&b))
-            }
+            ciborium::Value::Bytes(b) => serde_json::Value::String(B64.encode(&b)),
             ciborium::Value::Text(s) => serde_json::Value::String(s),
             ciborium::Value::Bool(b) => serde_json::Value::Bool(b),
             ciborium::Value::Null => serde_json::Value::Null,
             ciborium::Value::Integer(i) => {
                 let n: i128 = i.into();
-                serde_json::Value::Number(
-                    serde_json::Number::from(n as i64),
-                )
+                serde_json::Value::Number(serde_json::Number::from(n as i64))
             }
             ciborium::Value::Float(f) => serde_json::Number::from_f64(f)
                 .map(serde_json::Value::Number)

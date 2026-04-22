@@ -887,7 +887,7 @@ class _UnlockDialogState extends State<_UnlockDialog> {
     try {
       await widget.onConfirm(
         _isCard,
-        _isCard ? null : _selectedFp,
+        _selectedFp, // always pass fingerprint — Rust needs it to look up card AID idents for the credential cache
         _isCard ? cred : null,
         _isCard ? null : cred,
       );
@@ -1894,7 +1894,20 @@ class _AuthorityQrDialogState extends State<_AuthorityQrDialog> {
 /// a [GlobalKey<SessionUnlockTileState>], pass it as the widget key, and call
 /// [SessionUnlockTileState.openUnlockDialog] when needed.
 class SessionUnlockTile extends StatefulWidget {
-  const SessionUnlockTile({super.key});
+  const SessionUnlockTile({
+    super.key,
+    this.onUnlocked,
+    this.externalLockStream,
+  });
+
+  /// Called after the user successfully unlocks the session.  Use this to
+  /// refresh any parent-level lock indicators (e.g. the root shell's AppBar).
+  final VoidCallback? onUnlocked;
+
+  /// Fires whenever the session is locked externally (AppBar lock button or
+  /// screen-lock lifecycle event).  The tile immediately reflects the locked
+  /// state so it stays in sync with the root shell's lock icon.
+  final Stream<void>? externalLockStream;
 
   @override
   State<SessionUnlockTile> createState() => SessionUnlockTileState();
@@ -1903,21 +1916,45 @@ class SessionUnlockTile extends StatefulWidget {
 class SessionUnlockTileState extends State<SessionUnlockTile> {
   bool _unlocked = false;
   bool _busy = false;
+  StreamSubscription<void>? _lockSub;
 
   @override
   void initState() {
     super.initState();
     _refresh();
+    _subscribeLockStream();
   }
 
-  /// Open the unlock dialog.  No-op when already unlocked or not mounted.
-  void openUnlockDialog() {
+  @override
+  void didUpdateWidget(SessionUnlockTile old) {
+    super.didUpdateWidget(old);
+    if (widget.externalLockStream != old.externalLockStream) {
+      _lockSub?.cancel();
+      _subscribeLockStream();
+    }
+  }
+
+  void _subscribeLockStream() {
+    _lockSub = widget.externalLockStream?.listen((_) {
+      if (mounted) setState(() => _unlocked = false);
+    });
+  }
+
+  /// Open the unlock dialog.
+  ///
+  /// Always re-queries Rust for the current lock state first so the tile stays
+  /// correct even when it was locked externally (AppBar button / screen lock)
+  /// without this widget's knowledge.
+  Future<void> openUnlockDialog() async {
+    if (!mounted) return;
+    await _refresh();
     if (!mounted || _unlocked) return;
     _showUnlockDialog();
   }
 
   @override
   void dispose() {
+    _lockSub?.cancel();
     super.dispose();
   }
 
@@ -1931,7 +1968,9 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
   Future<void> _lock() async {
     setState(() => _busy = true);
     try {
-      await rust.busLockSession();
+      // lockAll clears authority session + credential cache + signing-key cache.
+      rust.lockAll();
+      SettingsService.instance.invalidateCache();
       if (mounted) {
         setState(() {
           _unlocked = false;
@@ -1987,20 +2026,11 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
             pin: pin,
             passphrase: passphrase,
           );
-          // Prime the signing credential cache so that a sign request
-          // arriving shortly after does not require the passphrase again.
-          if (!useCard &&
-              fp != null &&
-              fp.isNotEmpty &&
-              passphrase != null &&
-              passphrase.isNotEmpty) {
-            await rust.mxPrimePassphraseCache(
-              fingerprint: fp,
-              passphrase: passphrase,
-            );
-            SettingsService.instance.resetCacheTimer();
-          }
+          // busUnlockSession already primes the credential cache.
+          // Start the session timeout so auto-approve works immediately.
+          SettingsService.instance.resetCacheTimer();
           if (mounted) setState(() => _unlocked = true);
+          widget.onUnlocked?.call();
         },
       ),
     );

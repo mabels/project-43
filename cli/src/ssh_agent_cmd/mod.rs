@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use subcmd::SshAgentArgs;
 use tokio::net::UnixListener;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 #[cfg(feature = "telemetry")]
 use tracing::Instrument as _;
 
@@ -508,12 +508,8 @@ fn run_matrix(
                         p43::protocol::Message::SshListKeysResponse(r) => {
                             Some(r.request_id.clone())
                         }
-                        p43::protocol::Message::SshSignResponse(r) => {
-                            Some(r.request_id.clone())
-                        }
-                        p43::protocol::Message::BusCertResponse(r) => {
-                            Some(r.request_id.clone())
-                        }
+                        p43::protocol::Message::SshSignResponse(r) => Some(r.request_id.clone()),
+                        p43::protocol::Message::BusCertResponse(r) => Some(r.request_id.clone()),
                         p43::protocol::Message::Error(e) => e.request_id.clone(),
                         _ => None,
                     };
@@ -570,11 +566,8 @@ fn run_matrix(
         }
 
         // 6. Bind the Unix socket and start the agent.
-        let session = MatrixProxySession::new(
-            Arc::clone(&pending),
-            outbound_tx,
-            authority_ecdh_pub,
-        );
+        let session =
+            MatrixProxySession::new(Arc::clone(&pending), outbound_tx, authority_ecdh_pub);
 
         eprintln!(
             "p43 ssh-agent (Matrix proxy → {room_id}): listening on {sock}\n\

@@ -71,6 +71,9 @@ class _RootShell extends StatefulWidget {
 class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   int _tabIndex = 0;
   late bool _loggedIn;
+  bool _sessionUnlocked = false;
+
+  static const _tabTitles = ['Keys', 'Agent', 'Devices', 'Settings'];
 
   // ── Unified Matrix listener ───────────────────────────────────────────────
   // A single mxListenAll subscription fans out to two broadcast controllers.
@@ -81,6 +84,15 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
       StreamController<BusCsrEvent>.broadcast();
   final StreamController<void> _sessionLockCtrl =
       StreamController<void>.broadcast();
+  /// Emitted when the user taps the AppBar lock icon while locked.
+  /// Consumed by [DevicesScreen] to navigate to the Authority sub-tab and open
+  /// the unlock dialog without showing an OS notification.
+  final StreamController<void> _unlockRequestCtrl =
+      StreamController<void>.broadcast();
+  /// Emitted whenever the session is locked (AppBar button or lifecycle event).
+  /// Forwarded to [SessionUnlockTile] so its visual stays in sync.
+  final StreamController<void> _externalLockCtrl =
+      StreamController<void>.broadcast();
   StreamSubscription<AppMessage>? _allSub;
 
   @override
@@ -89,6 +101,7 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     _loggedIn = widget.initiallyLoggedIn;
     WidgetsBinding.instance.addObserver(this);
     _initListener();
+    _refreshLockState();
   }
 
   @override
@@ -97,8 +110,31 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     _agentCtrl.close();
     _busCtrl.close();
     _sessionLockCtrl.close();
+    _unlockRequestCtrl.close();
+    _externalLockCtrl.close();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  Future<void> _refreshLockState() async {
+    try {
+      final v = await busIsSessionUnlocked();
+      if (mounted) setState(() => _sessionUnlocked = v);
+    } catch (_) {}
+  }
+
+  void _lockAll() {
+    lockAll();
+    SettingsService.instance.invalidateCache();
+    _externalLockCtrl.add(null);
+    setState(() => _sessionUnlocked = false);
+  }
+
+  /// Switches to the Devices tab and emits on [_unlockRequestCtrl] so
+  /// [DevicesScreen] can animate to the Authority sub-tab and open the dialog.
+  void _openUnlockDialog() {
+    if (_tabIndex != 2) setState(() => _tabIndex = 2);
+    _unlockRequestCtrl.add(null);
   }
 
   Future<void> _initListener() async {
@@ -119,7 +155,11 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
         } else if (msg is AppMessage_SessionLockRequired) {
           if (_tabIndex != 2) setState(() => _tabIndex = 2);
           _sessionLockCtrl.add(null);
+          _externalLockCtrl.add(null);
           WindowService.instance.bringToFront();
+          // A BusSecure message arrived that we couldn't decrypt — reflect
+          // the locked state in the global lock icon immediately.
+          if (mounted) setState(() => _sessionUnlocked = false);
         }
       },
       onError: (_) {},
@@ -140,6 +180,10 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
       SettingsService.instance.invalidateCache();
+      _externalLockCtrl.add(null);
+      if (mounted) setState(() => _sessionUnlocked = false);
+    } else if (state == AppLifecycleState.resumed) {
+      _refreshLockState();
     }
   }
 
@@ -149,6 +193,34 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1C1C1E),
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        centerTitle: false,
+        title: Text(
+          _tabTitles[_tabIndex],
+          style: const TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        actions: [
+          IconButton(
+            tooltip: _sessionUnlocked ? 'Lock session' : 'Unlock session',
+            icon: Icon(
+              _sessionUnlocked
+                  ? Icons.lock_open_outlined
+                  : Icons.lock_outlined,
+            ),
+            color: _sessionUnlocked
+                ? const Color(0xFFFF9F0A) // amber — something to lock
+                : Colors.grey,
+            onPressed: _sessionUnlocked ? _lockAll : _openUnlockDialog,
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
       body: IndexedStack(
         index: _tabIndex,
         children: [
@@ -163,9 +235,12 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
           DevicesScreen(
             busStream: _busCtrl.stream,
             sessionLockStream: _sessionLockCtrl.stream,
+            unlockRequestStream: _unlockRequestCtrl.stream,
+            externalLockStream: _externalLockCtrl.stream,
             onCsrRequest: () {
               if (_tabIndex != 2) setState(() => _tabIndex = 2);
             },
+            onSessionUnlocked: _refreshLockState,
           ),
           SettingsScreen(
             loggedIn: _loggedIn,
@@ -177,7 +252,12 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
       bottomNavigationBar: NavigationBar(
         backgroundColor: const Color(0xFF1C1C1E),
         selectedIndex: _tabIndex,
-        onDestinationSelected: (i) => setState(() => _tabIndex = i),
+        onDestinationSelected: (i) {
+          setState(() => _tabIndex = i);
+          // Refresh lock icon when navigating — the user may have just
+          // unlocked the session from the Devices tab.
+          _refreshLockState();
+        },
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.key_outlined),

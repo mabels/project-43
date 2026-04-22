@@ -3,6 +3,11 @@ name = "p43"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+# No doc examples exist in this crate; skipping avoids a rustdoc/rustc
+# binary mismatch when Homebrew's rustc and rustup's rustc are both present.
+doctest = false
+
 [features]
 # Full desktop feature set — default for the CLI.
 default = ["matrix", "pcsc", "ssh", "e2e-encryption", "crypto-rust", "crypto-experimental", "bus"]

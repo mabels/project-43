@@ -1,4 +1,4 @@
 [toolchain]
-# Pin to rustup's stable — ensures the rustup-managed rustc (with iOS targets)
-# is used even when Homebrew's standalone rustc is earlier in PATH.
-channel = "stable"
+# Pinned to 1.95.0 to match the Homebrew-installed rustc on the dev machine.
+# Update this when upgrading Homebrew's rustc.
+channel = "1.95.0"

@@ -162,9 +162,20 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
           if (mounted) setState(() => _sessionUnlocked = false);
         }
       },
-      onError: (_) {},
-      onDone: () {},
+      onError: (_) => _scheduleReconnect(roomId),
+      onDone: () => _scheduleReconnect(roomId),
     );
+  }
+
+  /// Reconnects the Matrix listener after a short delay.
+  ///
+  /// Called from both [onDone] (server closed the sync connection — normal
+  /// after a long idle) and [onError] (network blip).  The 5 s delay avoids
+  /// tight retry loops when the server is transiently unavailable.
+  void _scheduleReconnect(String roomId) {
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted) _startAllListening(roomId);
+    });
   }
 
   /// Called by [AgentScreen] when the user selects a different agent room.

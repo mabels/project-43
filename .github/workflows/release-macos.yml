@@ -1,0 +1,301 @@
+name: Release — macOS
+
+# Triggered on version tags (v1.2.3) or manually via the Actions UI.
+# Produces a signed, notarized DMG and attaches it to the GitHub release.
+#
+# Required GitHub environment: "release"
+# Create it at: Settings → Environments → New environment → name it "release"
+# Then add the following secrets and variables to that environment:
+#
+# SECRETS  (Settings → Environments → release → Environment secrets)
+#   APPLE_CERTIFICATE           base64-encoded Developer ID Application .p12
+#                               base64 -i cert.p12 | pbcopy
+#   APPLE_CERTIFICATE_PASSWORD  passphrase set when exporting the .p12
+#   KEYCHAIN_PASSWORD           any random string (e.g. openssl rand -hex 20)
+#   APPLE_ID                    your Apple ID email
+#   APPLE_APP_SPECIFIC_PASSWORD app-specific password from appleid.apple.com
+#                               → Sign-In and Security → App-Specific Passwords
+#
+# VARIABLES  (Settings → Environments → release → Environment variables)
+#   APPLE_TEAM_ID               YHM7YAL8HR
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# softprops/action-gh-release needs write access to create/update releases.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+
+jobs:
+  build-macos:
+    name: Build, sign & notarize
+    runs-on: macos-latest      # arm64 Apple Silicon runner (Xcode 16.x)
+    environment: release       # gates the job on the "release" environment;
+                               # exposes its secrets/vars and any required reviewers
+
+    steps:
+      # ── source ────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        # rust-toolchain.toml in the repo root overrides the channel;
+        # dtolnay/rust-toolchain@stable still installs the components we need.
+
+      # ── Flutter stable ─────────────────────────────────────────────────────
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # ── caches ─────────────────────────────────────────────────────────────
+      - name: Cache cargo registry & build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Cache Flutter pub cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: macos-pub-${{ hashFiles('ui/pubspec.lock') }}
+          restore-keys: macos-pub-
+
+      # ── signing certificate ────────────────────────────────────────────────
+      # Store these three values in repo Settings → Secrets and variables:
+      #   APPLE_CERTIFICATE         base64-encoded .p12 (Developer ID Application)
+      #   APPLE_CERTIFICATE_PASSWORD  passphrase used when exporting the .p12
+      #   KEYCHAIN_PASSWORD           any random string, used only for the temp keychain
+      #
+      # Export the cert from Keychain Access:
+      #   1. Open Keychain Access → My Certificates
+      #   2. Right-click "Developer ID Application: <name> (YHM7YAL8HR)" → Export
+      #   3. Save as .p12 with a passphrase
+      #   4. base64 -i cert.p12 | pbcopy  → paste as APPLE_CERTIFICATE secret
+      - name: Import Developer ID certificate into temporary keychain
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"   # 6-hour lock timeout
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Allow codesign to access the key without prompting.
+          security set-key-partition-list -S "apple-tool:,apple:" \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Make this keychain visible to Xcode / codesign.
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      # ── Flutter dependencies ───────────────────────────────────────────────
+      - name: flutter pub get
+        working-directory: ui
+        run: flutter pub get
+
+      # ── build CLI (Rust) ───────────────────────────────────────────────────
+      # The CLI uses crypto-rust (pure Rust, no C deps) and links against the
+      # macOS system PCSC.framework — no Homebrew dependencies.
+      # SDKROOT / CPATH in .cargo/config.toml match the Xcode SDK on the runner.
+      #
+      # We add the x86_64 target so we can produce a universal (fat) binary that
+      # runs on both Apple Silicon and Intel Macs.
+      - name: Add x86_64-apple-darwin target
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Build CLI (arm64 + x86_64)
+        run: |
+          cargo build --release --target aarch64-apple-darwin -p p43-cli
+          cargo build --release --target x86_64-apple-darwin  -p p43-cli
+
+      - name: Create universal CLI binary
+        run: |
+          lipo -create \
+            target/aarch64-apple-darwin/release/p43 \
+            target/x86_64-apple-darwin/release/p43 \
+            -output "$RUNNER_TEMP/p43-cli"
+          # Sanity check
+          file "$RUNNER_TEMP/p43-cli"
+          lipo -info "$RUNNER_TEMP/p43-cli"
+
+      # ── build Flutter app ──────────────────────────────────────────────────
+      # cargokit builds the bridge crate (crypto-rust, no C deps) as part of
+      # flutter build.  The resulting .app is arm64-only (native runner arch).
+      # If you need a universal .app, that requires a separate matrix job.
+      - name: Build macOS release (flutter)
+        working-directory: ui
+        run: flutter build macos --release
+
+      # ── bundle CLI inside the .app ─────────────────────────────────────────
+      # Place the CLI at Contents/Resources/p43 — the same pattern used by
+      # VS Code, 1Password, and other developer tools.  The GUI can later offer
+      # "Install CLI Tool" that symlinks this path into /usr/local/bin.
+      #
+      # We sign the CLI binary explicitly BEFORE signing the outer .app bundle.
+      # This is the correct inside-out order required for notarization: nested
+      # executables must be signed independently before the outer bundle is sealed.
+      - name: Bundle CLI into .app and sign inside-out
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          APP_PATH=$(find ui/build/macos/Build/Products/Release \
+            -maxdepth 1 -name "*.app" | head -1)
+          CLI_DEST="$APP_PATH/Contents/Resources/p43"
+
+          echo "Bundling CLI into: $CLI_DEST"
+          cp "$RUNNER_TEMP/p43-cli" "$CLI_DEST"
+          chmod 755 "$CLI_DEST"
+
+          # Sign the CLI binary with Hardened Runtime.
+          # A plain CLI needs no special entitlements beyond the runtime flag.
+          codesign \
+            --force \
+            --sign "Developer ID Application" \
+            --options runtime \
+            --timestamp \
+            "$CLI_DEST"
+
+          codesign --verify --strict --verbose=2 "$CLI_DEST"
+          echo "CLI signed OK"
+
+          # Now sign the outer .app bundle (inside-out order satisfied above).
+          # Expand $(AppIdentifierPrefix) → "<TEAM_ID>." for the entitlements file.
+          PROCESSED_ENTITLEMENTS="$RUNNER_TEMP/release.entitlements"
+          sed "s/\$(AppIdentifierPrefix)/${APPLE_TEAM_ID}./g" \
+            ui/macos/Runner/Release.entitlements \
+            > "$PROCESSED_ENTITLEMENTS"
+
+          codesign \
+            --force \
+            --deep \
+            --sign "Developer ID Application" \
+            --options runtime \
+            --entitlements "$PROCESSED_ENTITLEMENTS" \
+            --timestamp \
+            "$APP_PATH"
+
+          # Verify the whole bundle
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl --assess --type execute --verbose "$APP_PATH" 2>&1 || true
+          # spctl will show "rejected" until notarization is stapled — expected.
+
+      # ── notarization ──────────────────────────────────────────────────────
+      # Additional secrets needed:
+      #   APPLE_ID                  your Apple ID email (e.g. meno@example.com)
+      #   APPLE_APP_SPECIFIC_PASSWORD  app-specific password from appleid.apple.com
+      #                               (NOT your regular Apple ID password)
+      #
+      # Alternative (more CI-friendly): use an App Store Connect API key instead
+      # of Apple ID + password.  Replace --apple-id / --password / --team-id with
+      # --key /path/to/AuthKey_XXXX.p8 --key-id XXXX --issuer-id <UUID>.
+      # Store the key file contents as APPLE_API_KEY secret and decode it in a step.
+      - name: Notarize app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          APP_PATH=$(find ui/build/macos/Build/Products/Release \
+            -maxdepth 1 -name "*.app" | head -1)
+
+          # notarytool requires a zip or dmg — we use zip for the submission.
+          NOTARIZE_ZIP="$RUNNER_TEMP/p43-notarize.zip"
+          ditto -c -k --keepParent "$APP_PATH" "$NOTARIZE_ZIP"
+
+          xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --apple-id  "$APPLE_ID" \
+            --password  "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id   "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 15m
+
+          # Staple the approval ticket to the .app so it works offline.
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+
+      # ── package as DMG ─────────────────────────────────────────────────────
+      - name: Create DMG
+        run: |
+          brew install create-dmg   # pre-installed on some runner versions; harmless if already present
+
+          APP_PATH=$(find ui/build/macos/Build/Products/Release \
+            -maxdepth 1 -name "*.app" | head -1)
+          APP_NAME=$(basename "$APP_PATH" .app)
+          DMG_NAME="${APP_NAME}-${{ github.ref_name }}.dmg"
+
+          create-dmg \
+            --volname "p43" \
+            --window-pos  200 120 \
+            --window-size 600 400 \
+            --icon-size   100 \
+            --icon "$APP_NAME.app" 150 185 \
+            --app-drop-link 450 185 \
+            "$DMG_NAME" \
+            "$APP_PATH"
+
+          echo "DMG_PATH=$DMG_NAME" >> "$GITHUB_ENV"
+
+      # Sign the DMG itself (notarytool also accepts DMGs directly).
+      - name: Sign & notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          codesign \
+            --sign "Developer ID Application" \
+            --timestamp \
+            "$DMG_PATH"
+
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id  "$APPLE_ID" \
+            --password  "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id   "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 15m
+
+          xcrun stapler staple "$DMG_PATH"
+
+      # ── upload artefact ────────────────────────────────────────────────────
+      - name: Upload DMG as workflow artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p43-macos-${{ github.ref_name }}
+          path: ${{ env.DMG_PATH }}
+          retention-days: 14
+
+      # Attach to the GitHub release created by the tag push.
+      - name: Attach DMG to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.DMG_PATH }}
+
+      # ── cleanup ────────────────────────────────────────────────────────────
+      - name: Delete temporary keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true

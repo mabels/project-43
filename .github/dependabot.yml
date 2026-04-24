@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  # ── GitHub Actions ──────────────────────────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "ci"
+
+  # ── Rust (workspace) ────────────────────────────────────────────────────────
+  # Covers lib/, cli/, and ui/rust/ via the workspace Cargo.toml.
+  # The vendored matrix-sdk in vendor/ is ignored — it is a patched local copy
+  # managed manually; see docs/decisions/0003-vendored-matrix-sdk.md.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      # Vendored — updated manually when upstream fixes the recursion-limit bug.
+      - dependency-name: matrix-sdk
+
+  # ── Flutter / Dart ──────────────────────────────────────────────────────────
+  - package-ecosystem: pub
+    directory: /ui
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"

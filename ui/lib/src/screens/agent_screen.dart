@@ -110,17 +110,24 @@ class _AgentScreenState extends State<AgentScreen> {
           }
           if (!mounted) return;
 
-          if (SettingsService.instance.settings.notifyOnSignRequest) {
+          {
             final label = keyLabel(
               details?.name ?? '',
               details?.cardIdents ?? [],
             );
             final algo = details?.algo ?? '';
+            final keyPart = label.isNotEmpty
+                ? (algo.isNotEmpty ? '$label ($algo)' : label)
+                : fp;
+            final srcLabel = event.deviceLabel;
+            final srcId = event.deviceId;
+            final srcPart = srcLabel.isNotEmpty
+                ? srcLabel
+                : (srcId.isNotEmpty ? srcId : null);
+            final body = srcPart != null ? '$keyPart · from $srcPart' : keyPart;
             NotificationService.instance.show(
               title: 'Sign request',
-              body: label.isNotEmpty
-                  ? (algo.isNotEmpty ? '$label ($algo)' : label)
-                  : fp,
+              body: body,
               stableId: fp,
               channelId: 'p43_sign_requests',
               channelName: 'Sign requests',
@@ -144,6 +151,8 @@ class _AgentScreenState extends State<AgentScreen> {
                   keyAlgo: details?.algo,
                   cardIdents: details?.cardIdents ?? const [],
                   status: RequestStatus.responding,
+                  sourceLabel: event.deviceLabel,
+                  sourceDeviceId: event.deviceId,
                 ),
               ),
             );
@@ -165,6 +174,8 @@ class _AgentScreenState extends State<AgentScreen> {
               keyAlgo: details?.algo,
               cardIdents: details?.cardIdents ?? const [],
               status: RequestStatus.pending,
+              sourceLabel: event.deviceLabel,
+              sourceDeviceId: event.deviceId,
             );
             setState(() => _log.insert(0, newEntry));
             _approveSign(newEntry);

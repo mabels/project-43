@@ -2459,10 +2459,14 @@ impl SseDecode for crate::api::simple::AgentRequest {
                 let mut var_requestId = <String>::sse_decode(deserializer);
                 let mut var_fingerprint = <String>::sse_decode(deserializer);
                 let mut var_description = <String>::sse_decode(deserializer);
+                let mut var_deviceLabel = <String>::sse_decode(deserializer);
+                let mut var_deviceId = <String>::sse_decode(deserializer);
                 return crate::api::simple::AgentRequest::Sign {
                     request_id: var_requestId,
                     fingerprint: var_fingerprint,
                     description: var_description,
+                    device_label: var_deviceLabel,
+                    device_id: var_deviceId,
                 };
             }
             _ => {
@@ -3113,11 +3117,15 @@ impl flutter_rust_bridge::IntoDart for crate::api::simple::AgentRequest {
                 request_id,
                 fingerprint,
                 description,
+                device_label,
+                device_id,
             } => [
                 1.into_dart(),
                 request_id.into_into_dart().into_dart(),
                 fingerprint.into_into_dart().into_dart(),
                 description.into_into_dart().into_dart(),
+                device_label.into_into_dart().into_dart(),
+                device_id.into_into_dart().into_dart(),
             ]
             .into_dart(),
             _ => {
@@ -3533,11 +3541,15 @@ impl SseEncode for crate::api::simple::AgentRequest {
                 request_id,
                 fingerprint,
                 description,
+                device_label,
+                device_id,
             } => {
                 <i32>::sse_encode(1, serializer);
                 <String>::sse_encode(request_id, serializer);
                 <String>::sse_encode(fingerprint, serializer);
                 <String>::sse_encode(description, serializer);
+                <String>::sse_encode(device_label, serializer);
+                <String>::sse_encode(device_id, serializer);
             }
             _ => {
                 unimplemented!("");

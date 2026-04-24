@@ -15,6 +15,8 @@ class RequestEntry {
     this.keyAlgo,
     this.cardIdents = const [],
     this.errorMessage,
+    this.sourceLabel = '',
+    this.sourceDeviceId = '',
   });
 
   final String type;
@@ -27,12 +29,20 @@ class RequestEntry {
   final RequestStatus status;
   final String? errorMessage;
 
+  /// Label from the sender's bus certificate (empty for unauthenticated requests).
+  final String sourceLabel;
+
+  /// Stable device identifier from the sender's bus certificate.
+  final String sourceDeviceId;
+
   RequestEntry copyWith({
     RequestStatus? status,
     String? keyName,
     String? keyAlgo,
     List<String>? cardIdents,
     String? errorMessage,
+    String? sourceLabel,
+    String? sourceDeviceId,
   }) => RequestEntry(
     type: type,
     requestId: requestId,
@@ -43,5 +53,7 @@ class RequestEntry {
     keyAlgo: keyAlgo ?? this.keyAlgo,
     cardIdents: cardIdents ?? this.cardIdents,
     errorMessage: errorMessage ?? this.errorMessage,
+    sourceLabel: sourceLabel ?? this.sourceLabel,
+    sourceDeviceId: sourceDeviceId ?? this.sourceDeviceId,
   );
 }

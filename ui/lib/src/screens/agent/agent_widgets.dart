@@ -215,6 +215,45 @@ class AgentLogTile extends StatelessWidget {
                           fontFamily: 'monospace',
                         ),
                       ),
+                      if (entry.sourceLabel.isNotEmpty ||
+                          entry.sourceDeviceId.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.devices_other,
+                              size: 10,
+                              color: Color(0xFF636366),
+                            ),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                entry.sourceLabel.isNotEmpty
+                                    ? entry.sourceLabel
+                                    : entry.sourceDeviceId,
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: Color(0xFF636366),
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (entry.sourceLabel.isNotEmpty &&
+                                entry.sourceDeviceId.isNotEmpty) ...[
+                              const SizedBox(width: 4),
+                              Text(
+                                entry.sourceDeviceId,
+                                style: const TextStyle(
+                                  fontSize: 9,
+                                  fontFamily: 'monospace',
+                                  color: Color(0xFF48484A),
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
                     ],
                   ),
                 ),

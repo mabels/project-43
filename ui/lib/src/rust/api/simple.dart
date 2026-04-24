@@ -641,6 +641,12 @@ sealed class AgentRequest with _$AgentRequest {
     required String requestId,
     required String fingerprint,
     required String description,
+
+    /// Label from the sender's bus certificate (empty if unauthenticated).
+    required String deviceLabel,
+
+    /// Stable device identifier from the sender's bus certificate (empty if unauthenticated).
+    required String deviceId,
   }) = AgentRequest_Sign;
 }
 

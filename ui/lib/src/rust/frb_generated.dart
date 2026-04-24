@@ -2398,6 +2398,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           requestId: dco_decode_String(raw[1]),
           fingerprint: dco_decode_String(raw[2]),
           description: dco_decode_String(raw[3]),
+          deviceLabel: dco_decode_String(raw[4]),
+          deviceId: dco_decode_String(raw[5]),
         );
       default:
         throw Exception("unreachable");
@@ -2815,10 +2817,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_requestId = sse_decode_String(deserializer);
         var var_fingerprint = sse_decode_String(deserializer);
         var var_description = sse_decode_String(deserializer);
+        var var_deviceLabel = sse_decode_String(deserializer);
+        var var_deviceId = sse_decode_String(deserializer);
         return AgentRequest_Sign(
           requestId: var_requestId,
           fingerprint: var_fingerprint,
           description: var_description,
+          deviceLabel: var_deviceLabel,
+          deviceId: var_deviceId,
         );
       default:
         throw UnimplementedError('');
@@ -3366,11 +3372,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         requestId: final requestId,
         fingerprint: final fingerprint,
         description: final description,
+        deviceLabel: final deviceLabel,
+        deviceId: final deviceId,
       ):
         sse_encode_i_32(1, serializer);
         sse_encode_String(requestId, serializer);
         sse_encode_String(fingerprint, serializer);
         sse_encode_String(description, serializer);
+        sse_encode_String(deviceLabel, serializer);
+        sse_encode_String(deviceId, serializer);
     }
   }
 

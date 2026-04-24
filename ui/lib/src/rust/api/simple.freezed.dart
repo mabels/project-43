@@ -25,19 +25,33 @@ mixin _$AgentRequest {
       String requestId,
       String fingerprint,
       String description,
+      String deviceLabel,
+      String deviceId,
     )
     sign,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function(String requestId)? listKeys,
-    TResult? Function(String requestId, String fingerprint, String description)?
+    TResult? Function(
+      String requestId,
+      String fingerprint,
+      String description,
+      String deviceLabel,
+      String deviceId,
+    )?
     sign,
   }) => throw _privateConstructorUsedError;
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
     TResult Function(String requestId)? listKeys,
-    TResult Function(String requestId, String fingerprint, String description)?
+    TResult Function(
+      String requestId,
+      String fingerprint,
+      String description,
+      String deviceLabel,
+      String deviceId,
+    )?
     sign,
     required TResult orElse(),
   }) => throw _privateConstructorUsedError;
@@ -184,6 +198,8 @@ class _$AgentRequest_ListKeysImpl extends AgentRequest_ListKeys {
       String requestId,
       String fingerprint,
       String description,
+      String deviceLabel,
+      String deviceId,
     )
     sign,
   }) {
@@ -194,7 +210,13 @@ class _$AgentRequest_ListKeysImpl extends AgentRequest_ListKeys {
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function(String requestId)? listKeys,
-    TResult? Function(String requestId, String fingerprint, String description)?
+    TResult? Function(
+      String requestId,
+      String fingerprint,
+      String description,
+      String deviceLabel,
+      String deviceId,
+    )?
     sign,
   }) {
     return listKeys?.call(requestId);
@@ -204,7 +226,13 @@ class _$AgentRequest_ListKeysImpl extends AgentRequest_ListKeys {
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
     TResult Function(String requestId)? listKeys,
-    TResult Function(String requestId, String fingerprint, String description)?
+    TResult Function(
+      String requestId,
+      String fingerprint,
+      String description,
+      String deviceLabel,
+      String deviceId,
+    )?
     sign,
     required TResult orElse(),
   }) {
@@ -271,7 +299,13 @@ abstract class _$$AgentRequest_SignImplCopyWith<$Res>
   ) = __$$AgentRequest_SignImplCopyWithImpl<$Res>;
   @override
   @useResult
-  $Res call({String requestId, String fingerprint, String description});
+  $Res call({
+    String requestId,
+    String fingerprint,
+    String description,
+    String deviceLabel,
+    String deviceId,
+  });
 }
 
 /// @nodoc
@@ -291,6 +325,8 @@ class __$$AgentRequest_SignImplCopyWithImpl<$Res>
     Object? requestId = null,
     Object? fingerprint = null,
     Object? description = null,
+    Object? deviceLabel = null,
+    Object? deviceId = null,
   }) {
     return _then(
       _$AgentRequest_SignImpl(
@@ -306,6 +342,14 @@ class __$$AgentRequest_SignImplCopyWithImpl<$Res>
             ? _value.description
             : description // ignore: cast_nullable_to_non_nullable
                   as String,
+        deviceLabel: null == deviceLabel
+            ? _value.deviceLabel
+            : deviceLabel // ignore: cast_nullable_to_non_nullable
+                  as String,
+        deviceId: null == deviceId
+            ? _value.deviceId
+            : deviceId // ignore: cast_nullable_to_non_nullable
+                  as String,
       ),
     );
   }
@@ -318,6 +362,8 @@ class _$AgentRequest_SignImpl extends AgentRequest_Sign {
     required this.requestId,
     required this.fingerprint,
     required this.description,
+    required this.deviceLabel,
+    required this.deviceId,
   }) : super._();
 
   @override
@@ -327,9 +373,17 @@ class _$AgentRequest_SignImpl extends AgentRequest_Sign {
   @override
   final String description;
 
+  /// Label from the sender's bus certificate (empty if unauthenticated).
+  @override
+  final String deviceLabel;
+
+  /// Stable device identifier from the sender's bus certificate (empty if unauthenticated).
+  @override
+  final String deviceId;
+
   @override
   String toString() {
-    return 'AgentRequest.sign(requestId: $requestId, fingerprint: $fingerprint, description: $description)';
+    return 'AgentRequest.sign(requestId: $requestId, fingerprint: $fingerprint, description: $description, deviceLabel: $deviceLabel, deviceId: $deviceId)';
   }
 
   @override
@@ -342,12 +396,22 @@ class _$AgentRequest_SignImpl extends AgentRequest_Sign {
             (identical(other.fingerprint, fingerprint) ||
                 other.fingerprint == fingerprint) &&
             (identical(other.description, description) ||
-                other.description == description));
+                other.description == description) &&
+            (identical(other.deviceLabel, deviceLabel) ||
+                other.deviceLabel == deviceLabel) &&
+            (identical(other.deviceId, deviceId) ||
+                other.deviceId == deviceId));
   }
 
   @override
-  int get hashCode =>
-      Object.hash(runtimeType, requestId, fingerprint, description);
+  int get hashCode => Object.hash(
+    runtimeType,
+    requestId,
+    fingerprint,
+    description,
+    deviceLabel,
+    deviceId,
+  );
 
   /// Create a copy of AgentRequest
   /// with the given fields replaced by the non-null parameter values.
@@ -368,32 +432,52 @@ class _$AgentRequest_SignImpl extends AgentRequest_Sign {
       String requestId,
       String fingerprint,
       String description,
+      String deviceLabel,
+      String deviceId,
     )
     sign,
   }) {
-    return sign(requestId, fingerprint, description);
+    return sign(requestId, fingerprint, description, deviceLabel, deviceId);
   }
 
   @override
   @optionalTypeArgs
   TResult? whenOrNull<TResult extends Object?>({
     TResult? Function(String requestId)? listKeys,
-    TResult? Function(String requestId, String fingerprint, String description)?
+    TResult? Function(
+      String requestId,
+      String fingerprint,
+      String description,
+      String deviceLabel,
+      String deviceId,
+    )?
     sign,
   }) {
-    return sign?.call(requestId, fingerprint, description);
+    return sign?.call(
+      requestId,
+      fingerprint,
+      description,
+      deviceLabel,
+      deviceId,
+    );
   }
 
   @override
   @optionalTypeArgs
   TResult maybeWhen<TResult extends Object?>({
     TResult Function(String requestId)? listKeys,
-    TResult Function(String requestId, String fingerprint, String description)?
+    TResult Function(
+      String requestId,
+      String fingerprint,
+      String description,
+      String deviceLabel,
+      String deviceId,
+    )?
     sign,
     required TResult orElse(),
   }) {
     if (sign != null) {
-      return sign(requestId, fingerprint, description);
+      return sign(requestId, fingerprint, description, deviceLabel, deviceId);
     }
     return orElse();
   }
@@ -435,6 +519,8 @@ abstract class AgentRequest_Sign extends AgentRequest {
     required final String requestId,
     required final String fingerprint,
     required final String description,
+    required final String deviceLabel,
+    required final String deviceId,
   }) = _$AgentRequest_SignImpl;
   const AgentRequest_Sign._() : super._();
 
@@ -442,6 +528,12 @@ abstract class AgentRequest_Sign extends AgentRequest {
   String get requestId;
   String get fingerprint;
   String get description;
+
+  /// Label from the sender's bus certificate (empty if unauthenticated).
+  String get deviceLabel;
+
+  /// Stable device identifier from the sender's bus certificate (empty if unauthenticated).
+  String get deviceId;
 
   /// Create a copy of AgentRequest
   /// with the given fields replaced by the non-null parameter values.

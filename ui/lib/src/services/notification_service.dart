@@ -62,12 +62,16 @@ class NotificationService {
 
     final details = NotificationDetails(
       macOS: const DarwinNotificationDetails(
-        presentAlert: true,
+        presentAlert: true, // legacy path (macOS < 12)
+        presentBanner: true, // banner drop-down (macOS 12+)
+        presentList: true, // show in Notification Centre list
         presentBadge: false,
         presentSound: false,
       ),
       iOS: const DarwinNotificationDetails(
         presentAlert: true,
+        presentBanner: true,
+        presentList: true,
         presentBadge: false,
         presentSound: false,
       ),

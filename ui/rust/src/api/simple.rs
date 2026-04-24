@@ -679,6 +679,10 @@ pub enum AgentRequest {
         request_id: String,
         fingerprint: String,
         description: String,
+        /// Label from the sender's bus certificate (empty if unauthenticated).
+        device_label: String,
+        /// Stable device identifier from the sender's bus certificate (empty if unauthenticated).
+        device_id: String,
     },
 }
 
@@ -902,6 +906,14 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                             })
                         }
                         p43::protocol::Message::SshSignRequest(r) => {
+                            let dev_label = sender_cert
+                                .as_ref()
+                                .map(|c| c.label.clone())
+                                .unwrap_or_default();
+                            let dev_id = sender_cert
+                                .as_ref()
+                                .map(|c| c.device_id.clone())
+                                .unwrap_or_default();
                             if let Ok(mut map) = pending_signs().lock() {
                                 map.insert(
                                     r.request_id.clone(),
@@ -918,6 +930,8 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                                     request_id: r.request_id,
                                     fingerprint: r.fingerprint,
                                     description: r.description,
+                                    device_label: dev_label,
+                                    device_id: dev_id,
                                 },
                             })
                         }

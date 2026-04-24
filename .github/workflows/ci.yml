@@ -25,8 +25,12 @@ jobs:
             pkg-config \
             libpcsclite-dev
 
-      - name: install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: install Rust toolchain
+        # @master without a toolchain: input reads rust-toolchain.toml (1.95.0)
+        # and installs the requested components for that exact version.
+        # dtolnay/rust-toolchain@stable defaults to "stable" which diverges from
+        # the pinned toolchain and leaves rustfmt/clippy on the wrong version.
+        uses: dtolnay/rust-toolchain@master
         with:
           components: rustfmt, clippy
 

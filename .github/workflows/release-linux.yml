@@ -66,11 +66,16 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       # ── Flutter stable ──────────────────────────────────────────────────────
+      # subosito/flutter-action@v2 fails to resolve the stable version on arm64
+      # Linux runners.  Installing directly from git is simpler and more reliable.
       - name: Install Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
+        run: |
+          git clone --depth 1 -b stable \
+            https://github.com/flutter/flutter.git "$HOME/flutter"
+          echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Flutter precache (linux)
+        run: flutter precache --linux
 
       # ── caches ─────────────────────────────────────────────────────────────
       - name: Cache cargo

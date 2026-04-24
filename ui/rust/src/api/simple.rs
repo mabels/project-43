@@ -847,7 +847,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                     };
                     let auth_sign_pub: [u8; 32] = auth_key.sign_pubkey();
                     match p43::bus::open_protocol_message(auth_key, &auth_sign_pub, env) {
-                        Ok((inner, cert)) => p43::bus::DecryptResult::Ok(inner, cert),
+                        Ok((inner, cert)) => p43::bus::DecryptResult::Ok(inner, Box::new(cert)),
                         Err(e) => p43::bus::DecryptResult::Err(e.to_string()),
                     }
                 },
@@ -987,7 +987,7 @@ pub async fn mx_respond_csr(
     passphrase: Option<String>,
 ) -> anyhow::Result<()> {
     use base64::Engine as _;
-    use p43::bus::{self, AuthorityPub, DeviceCert, DeviceCsr};
+    use p43::bus::{self, DeviceCert, DeviceCsr};
 
     let store_dir = default_store_dir();
     let bus_dir = bus::bus_dir(&store_dir);

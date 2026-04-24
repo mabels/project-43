@@ -82,7 +82,7 @@ jobs:
 
       # ── caches ─────────────────────────────────────────────────────────────
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -92,7 +92,7 @@ jobs:
           restore-keys: linux-${{ matrix.arch }}-cargo-
 
       - name: Cache Flutter pub
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.pub-cache
           key: linux-pub-${{ hashFiles('ui/pubspec.lock') }}

@@ -421,8 +421,8 @@ fn cmd_list_peers(bus_dir: &Path) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<16}  {:<24}  {:<12}  {}",
-        "device_id", "label", "issued_at", "expires_at"
+        "{:<16}  {:<24}  {:<12}  expires_at",
+        "device_id", "label", "issued_at"
     );
     println!("{}", "-".repeat(68));
     for p in items {

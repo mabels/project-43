@@ -480,7 +480,7 @@ fn run_matrix(
                         return p43::bus::DecryptResult::Skip;
                     }
                     match p43::bus::open_protocol_message(key.as_ref(), auth_pub, env) {
-                        Ok((inner, cert)) => p43::bus::DecryptResult::Ok(inner, cert),
+                        Ok((inner, cert)) => p43::bus::DecryptResult::Ok(inner, Box::new(cert)),
                         Err(e) => p43::bus::DecryptResult::Err(e.to_string()),
                     }
                 },

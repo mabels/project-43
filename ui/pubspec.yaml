@@ -42,7 +42,7 @@ dependencies:
     path: rust_builder
   flutter_local_notifications: ^21.0.0
   file_picker: ^11.0.2
-  window_manager: ^0.4.3
+  window_manager: ^0.5.1
   # OpenTelemetry — traces exported via OTLP HTTP to Jaeger / any OTel collector.
   # https://pub.dev/packages/opentelemetry
   opentelemetry: ^0.18.11

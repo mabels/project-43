@@ -189,7 +189,7 @@ jobs:
 
       # ── upload ──────────────────────────────────────────────────────────────
       - name: Upload AppImage as workflow artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: p43-linux-${{ matrix.arch }}-${{ github.ref_name }}
           path: ${{ env.APPIMAGE_PATH }}

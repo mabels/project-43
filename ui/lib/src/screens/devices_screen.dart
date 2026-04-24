@@ -106,12 +106,19 @@ class _DevicesScreenState extends State<DevicesScreen>
 
   /// Load the saved agent room ID so we know where to send CSR responses.
   /// Does NOT start a Matrix listener — that is owned by the root shell.
-  Future<void> _loadAgentRoom() async {
+  ///
+  /// Safe to call multiple times — only updates state when the value changes.
+  Future<String?> _loadAgentRoom() async {
     try {
       final room = await rust.mxGetAgentRoom();
-      if (!mounted || room == null || room == _agentRoom) return;
-      setState(() => _agentRoom = room);
-    } catch (_) {}
+      if (!mounted) return _agentRoom;
+      if (room != null && room != _agentRoom) {
+        setState(() => _agentRoom = room);
+      }
+      return room ?? _agentRoom;
+    } catch (_) {
+      return _agentRoom;
+    }
   }
 
   // ── Stream subscription ───────────────────────────────────────────────────
@@ -146,7 +153,8 @@ class _DevicesScreenState extends State<DevicesScreen>
         _tabCtrl.animateTo(0);
         NotificationService.instance.show(
           title: 'Session locked',
-          body: 'Unlock the authority session to process the encrypted request.',
+          body:
+              'Unlock the authority session to process the encrypted request.',
           stableId: 'session_lock_required',
           channelId: 'p43_session_lock',
           channelName: 'Session lock',
@@ -212,8 +220,20 @@ class _DevicesScreenState extends State<DevicesScreen>
   }
 
   Future<void> _showApprovalDialog(rust.BusCsrEvent event) async {
-    final roomId = _agentRoom;
+    // Re-fetch the room each time — the user may have configured it after the
+    // widget was first built (e.g. via the Agent tab → pick room).
+    final roomId = await _loadAgentRoom();
     if (roomId == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'No agent room configured — select a room in the Agent tab first.',
+            ),
+            duration: Duration(seconds: 6),
+          ),
+        );
+      }
       _approvalInFlight = false;
       _drainQueue();
       return;
@@ -570,10 +590,9 @@ class _CsrApprovalDialogState extends State<_CsrApprovalDialog> {
     super.initState();
     if (widget.sealedKeys.isNotEmpty) {
       final dfp = SettingsService.instance.settings.defaultKeyFingerprint;
-      final hasDefault = dfp != null &&
-          widget.sealedKeys.any((k) => k.fingerprint == dfp);
-      _selectedFp =
-          hasDefault ? dfp : widget.sealedKeys.first.fingerprint;
+      final hasDefault =
+          dfp != null && widget.sealedKeys.any((k) => k.fingerprint == dfp);
+      _selectedFp = hasDefault ? dfp : widget.sealedKeys.first.fingerprint;
     }
   }
 

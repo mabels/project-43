@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:p43/src/rust/api/simple.dart' show listKeys;
+import '../services/biometric_service.dart';
 import '../services/settings_service.dart';
 import 'matrix_login_screen.dart';
 import 'matrix_room_list_screen.dart';
@@ -93,6 +95,11 @@ class SettingsScreen extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 8),
+
+              // ── Biometric secrets ─────────────────────────────────────
+              const Divider(height: 32),
+              SettingsSectionHeader('Biometric sealed secrets'),
+              const _BiometricSecretsSection(),
 
               // ── Agent ─────────────────────────────────────────────────
               const Divider(height: 32),
@@ -210,13 +217,147 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
+// ── Biometric secrets section ─────────────────────────────────────────────────
+
+class _BiometricSecretsSection extends StatefulWidget {
+  const _BiometricSecretsSection();
+
+  @override
+  State<_BiometricSecretsSection> createState() =>
+      _BiometricSecretsSectionState();
+}
+
+class _BiometricSecretsSectionState extends State<_BiometricSecretsSection> {
+  List<BiometricEntry>? _entries;
+  // fingerprint → UID resolved from the keystore (best-effort)
+  Map<String, String> _uidCache = {};
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final entries = await BiometricService.instance.savedEntries();
+
+    // Resolve UIDs from the keystore so we can show a human-readable name.
+    Map<String, String> cache = {};
+    try {
+      final keys = await listKeys();
+      for (final e in entries) {
+        final match = keys.where(
+          (k) => k.fingerprint.toUpperCase() == e.fingerprint.toUpperCase(),
+        );
+        if (match.isNotEmpty) cache[e.fingerprint] = match.first.uid;
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    setState(() {
+      _entries = entries;
+      _uidCache = cache;
+      _loading = false;
+    });
+  }
+
+  Future<void> _delete(String fingerprint) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2C2C2E),
+        title: const Text('Remove sealed secret'),
+        content: const Text(
+          'The saved credential will be deleted from the keychain. '
+          'You will need to re-enter your PIN or passphrase next time.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFFFF453A),
+            ),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await BiometricService.instance.delete(fingerprint);
+    await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    final entries = _entries ?? [];
+    if (entries.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Text(
+          'No credentials saved in the secure keychain.',
+          style: TextStyle(fontSize: 13, color: Color(0xFF8E8E93)),
+        ),
+      );
+    }
+
+    return Column(
+      children: entries.map((e) {
+        final uid = _uidCache[e.fingerprint];
+        final fp = e.fingerprint;
+        // Show last 8 hex chars as a short fingerprint suffix
+        final shortFp = fp.length >= 8
+            ? '…${fp.substring(fp.length - 8).toUpperCase()}'
+            : fp.toUpperCase();
+        final typeLabel = e.isCard ? 'PIN (card)' : 'passphrase';
+
+        return ListTile(
+          tileColor: const Color(0xFF2C2C2E),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 2,
+          ),
+          leading: const Icon(
+            Icons.fingerprint,
+            size: 20,
+            color: Color(0xFF8E8E93),
+          ),
+          title: Text(
+            uid ?? shortFp,
+            style: const TextStyle(fontSize: 14),
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: Text(
+            uid != null ? '$shortFp · $typeLabel' : typeLabel,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
+          ),
+          trailing: IconButton(
+            icon: const Icon(Icons.delete_outline, size: 18),
+            color: const Color(0xFFFF453A),
+            tooltip: 'Remove from keychain',
+            onPressed: () => _delete(e.fingerprint),
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
 // ── Device cert TTL tile ──────────────────────────────────────────────────────
 
 class _DeviceCertTtlTile extends StatelessWidget {
-  const _DeviceCertTtlTile({
-    required this.current,
-    required this.onChanged,
-  });
+  const _DeviceCertTtlTile({required this.current, required this.onChanged});
 
   final int current;
   final ValueChanged<int> onChanged;
@@ -240,12 +381,8 @@ class _DeviceCertTtlTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListTile(
       tileColor: const Color(0xFF2C2C2E),
-      contentPadding:
-          const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      title: const Text(
-        'Certificate validity',
-        style: TextStyle(fontSize: 15),
-      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      title: const Text('Certificate validity', style: TextStyle(fontSize: 15)),
       subtitle: Text(
         _label(current),
         style: const TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),

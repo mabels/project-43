@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:p43/src/rust/api/simple.dart';
 import 'package:p43/src/rust/frb_generated.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'src/screens/agent_screen.dart';
 import 'src/screens/devices_screen.dart';
@@ -12,11 +14,30 @@ import 'src/services/settings_service.dart';
 import 'src/services/telemetry_service.dart';
 import 'src/services/window_service.dart';
 
+/// Resolve the store root directory.
+///
+/// On macOS and Linux the CLI uses `~/.config/project-43/`, so the desktop
+/// app uses the same path so that both share keys, Matrix session, and bus
+/// data without duplication or bundle-ID-sensitive paths.
+///
+/// On iOS and Android `getApplicationSupportDirectory()` is the right choice
+/// because there is no shared CLI.
+Future<String> _resolveStoreDir() async {
+  if (Platform.isMacOS || Platform.isLinux) {
+    final home = Platform.environment['HOME'];
+    if (home != null && home.isNotEmpty) {
+      return p.join(home, '.config', 'project-43');
+    }
+  }
+  final appDir = await getApplicationSupportDirectory();
+  return appDir.path;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
-  final appDir = await getApplicationSupportDirectory();
-  await setStoreDir(dir: appDir.path);
+  final storeDir = await _resolveStoreDir();
+  await setStoreDir(dir: storeDir);
   // Load persisted settings before the UI starts.
   await SettingsService.instance.load();
   // Initialise telemetry using the persisted endpoint.
@@ -84,11 +105,13 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
       StreamController<BusCsrEvent>.broadcast();
   final StreamController<void> _sessionLockCtrl =
       StreamController<void>.broadcast();
+
   /// Emitted when the user taps the AppBar lock icon while locked.
   /// Consumed by [DevicesScreen] to navigate to the Authority sub-tab and open
   /// the unlock dialog without showing an OS notification.
   final StreamController<void> _unlockRequestCtrl =
       StreamController<void>.broadcast();
+
   /// Emitted whenever the session is locked (AppBar button or lifecycle event).
   /// Forwarded to [SessionUnlockTile] so its visual stays in sync.
   final StreamController<void> _externalLockCtrl =
@@ -211,18 +234,13 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
         centerTitle: false,
         title: Text(
           _tabTitles[_tabIndex],
-          style: const TextStyle(
-            fontSize: 17,
-            fontWeight: FontWeight.w600,
-          ),
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
         ),
         actions: [
           IconButton(
             tooltip: _sessionUnlocked ? 'Lock session' : 'Unlock session',
             icon: Icon(
-              _sessionUnlocked
-                  ? Icons.lock_open_outlined
-                  : Icons.lock_outlined,
+              _sessionUnlocked ? Icons.lock_open_outlined : Icons.lock_outlined,
             ),
             color: _sessionUnlocked
                 ? const Color(0xFFFF9F0A) // amber — something to lock

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:p43/src/rust/api/simple.dart' as rust;
+import '../../services/biometric_service.dart';
 import '../../services/settings_service.dart';
 
 // ── Authority status / init tile ──────────────────────────────────────────────
@@ -44,17 +45,19 @@ class _AuthorityStatusTileState extends State<AuthorityStatusTile> {
     });
     try {
       await rust.busInitAuthority();
-      if (mounted)
+      if (mounted) {
         setState(() {
           _hasAuthority = true;
           _busy = false;
         });
+      }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _error = e.toString();
           _busy = false;
         });
+      }
     }
   }
 
@@ -274,11 +277,12 @@ class _AuthorityResealSheetState extends State<_AuthorityResealSheet> {
   Future<void> _load() async {
     try {
       final s = await rust.busAuthorityKeySealStatus();
-      if (mounted)
+      if (mounted) {
         setState(() {
           _statuses = s;
           _loadError = null;
         });
+      }
     } catch (e) {
       if (mounted) setState(() => _loadError = e.toString());
     }
@@ -638,6 +642,7 @@ class _UnlockDialog extends StatefulWidget {
     required this.sealedKeys,
     required this.onConfirm,
     this.isDestructive = false,
+    this.onSaveCredential,
   });
 
   final String title;
@@ -654,6 +659,16 @@ class _UnlockDialog extends StatefulWidget {
   )
   onConfirm;
 
+  /// When non-null, a "Save with biometrics" checkbox is shown.
+  /// Called after a successful [onConfirm] with the selected key's details
+  /// and the credential the user entered, so the caller can persist it.
+  final Future<void> Function(
+    bool isCard,
+    String fingerprint,
+    String credential,
+  )?
+  onSaveCredential;
+
   @override
   State<_UnlockDialog> createState() => _UnlockDialogState();
 }
@@ -666,16 +681,32 @@ class _UnlockDialogState extends State<_UnlockDialog> {
   bool _busy = false;
   String? _error;
 
+  // ── Biometrics save toggle ─────────────────────────────────────────────────
+  bool _biometricsAvailable = false;
+  bool _saveBiometrics = false;
+  String _biometricLabel = 'biometrics';
+
   @override
   void initState() {
     super.initState();
     if (widget.sealedKeys.isNotEmpty) {
       // Pre-select the user's default key when it is available in this set.
       final dfp = SettingsService.instance.settings.defaultKeyFingerprint;
-      final hasDefault = dfp != null &&
-          widget.sealedKeys.any((k) => k.fingerprint == dfp);
-      _selectedFp =
-          hasDefault ? dfp : widget.sealedKeys.first.fingerprint;
+      final hasDefault =
+          dfp != null && widget.sealedKeys.any((k) => k.fingerprint == dfp);
+      _selectedFp = hasDefault ? dfp : widget.sealedKeys.first.fingerprint;
+    }
+    if (widget.onSaveCredential != null) _checkBiometrics();
+  }
+
+  Future<void> _checkBiometrics() async {
+    final available = await BiometricService.instance.isAvailable();
+    final label = await BiometricService.instance.availableMethodLabel();
+    if (mounted) {
+      setState(() {
+        _biometricsAvailable = available;
+        _biometricLabel = label;
+      });
     }
   }
 
@@ -774,8 +805,7 @@ class _UnlockDialogState extends State<_UnlockDialog> {
                               _obscureTimer?.cancel();
                               _obscureTimer = null;
                               setState(() {
-                                _selectedFp =
-                                    widget.sealedKeys[i].fingerprint;
+                                _selectedFp = widget.sealedKeys[i].fingerprint;
                                 _credCtrl.clear();
                                 _error = null;
                                 _obscure = true;
@@ -799,8 +829,7 @@ class _UnlockDialogState extends State<_UnlockDialog> {
               autofocus: true,
               enabled: !_busy,
               style: const TextStyle(fontSize: 14),
-              keyboardType:
-                  _isCard ? TextInputType.number : TextInputType.text,
+              keyboardType: _isCard ? TextInputType.number : TextInputType.text,
               decoration: InputDecoration(
                 hintText: '••••••',
                 hintStyle: const TextStyle(color: Color(0xFF8E8E93)),
@@ -829,6 +858,42 @@ class _UnlockDialogState extends State<_UnlockDialog> {
                       _submit();
                     },
             ),
+            // ── Save with biometrics ────────────────────────────────────
+            if (widget.onSaveCredential != null && _biometricsAvailable) ...[
+              const SizedBox(height: 10),
+              GestureDetector(
+                onTap: _busy
+                    ? null
+                    : () => setState(() => _saveBiometrics = !_saveBiometrics),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: Checkbox(
+                        value: _saveBiometrics,
+                        onChanged: _busy
+                            ? null
+                            : (v) =>
+                                  setState(() => _saveBiometrics = v ?? false),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        activeColor: const Color(0xFF0A84FF),
+                        side: const BorderSide(color: Color(0xFF8E8E93)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Save with $_biometricLabel',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFFE5E5EA),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             // ── Inline error ────────────────────────────────────────────
             if (_error != null) ...[
               const SizedBox(height: 10),
@@ -891,13 +956,21 @@ class _UnlockDialogState extends State<_UnlockDialog> {
         _isCard ? cred : null,
         _isCard ? null : cred,
       );
+      // Persist credential in secure storage if the user opted in.
+      if (_saveBiometrics &&
+          widget.onSaveCredential != null &&
+          _selectedFp != null &&
+          cred != null) {
+        await widget.onSaveCredential!(_isCard, _selectedFp!, cred);
+      }
       if (mounted) Navigator.pop(context);
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _busy = false;
           _error = e.toString();
         });
+      }
     }
   }
 }
@@ -1379,6 +1452,7 @@ class _AuthorityImportDialogState extends State<_AuthorityImportDialog> {
 
     // Confirm before overwriting — show which keys can unlock.
     final confirmed = await showDialog<bool>(
+      // ignore: use_build_context_synchronously
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF2C2C2E),
@@ -1926,9 +2000,9 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
   }
 
   @override
-  void didUpdateWidget(SessionUnlockTile old) {
-    super.didUpdateWidget(old);
-    if (widget.externalLockStream != old.externalLockStream) {
+  void didUpdateWidget(SessionUnlockTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.externalLockStream != oldWidget.externalLockStream) {
       _lockSub?.cancel();
       _subscribeLockStream();
     }
@@ -1980,8 +2054,9 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
     } catch (e) {
       if (mounted) {
         setState(() => _busy = false);
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Lock failed: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Lock failed: $e')));
       }
     }
   }
@@ -1992,8 +2067,9 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
       sealedKeys = await rust.busAuthorityKeySealStatus();
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Failed to load keys: $e')));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to load keys: $e')));
       }
       return;
     }
@@ -2009,8 +2085,46 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
       return;
     }
 
+    // ── Biometric fast-path ────────────────────────────────────────────────
+    // Check if any sealed key has a saved credential.  If so, try biometric
+    // auth first.  On success we unlock without showing the PIN dialog at all.
+    if (await BiometricService.instance.isAvailable()) {
+      final saved = await BiometricService.instance.savedFingerprints();
+      final match = sealedKeys.firstWhere(
+        (k) => saved.contains(k.fingerprint),
+        orElse: () => sealedKeys.first, // sentinel — checked below
+      );
+      if (saved.contains(match.fingerprint)) {
+        final credential = await BiometricService.instance.authenticate(
+          match.fingerprint,
+          reason: 'Unlock p43 session',
+        );
+        if (credential != null && mounted) {
+          try {
+            await rust.busUnlockSession(
+              useCard: credential.isCard,
+              fingerprint: credential.fingerprint,
+              pin: credential.isCard ? credential.credential : null,
+              passphrase: credential.isCard ? null : credential.credential,
+            );
+            SettingsService.instance.resetCacheTimer();
+            if (mounted) setState(() => _unlocked = true);
+            widget.onUnlocked?.call();
+            return; // done — no dialog needed
+          } catch (_) {
+            // Biometric unlock failed (e.g. wrong cached PIN after card re-PIN).
+            // Fall through to the manual PIN dialog.
+          }
+        }
+        // Auth cancelled or failed — fall through to manual dialog below.
+        if (!mounted) return;
+      }
+    }
+
+    // ── Manual PIN / passphrase dialog ─────────────────────────────────────
+    // mounted is verified at every await point above.
     await showDialog<void>(
-      context: context,
+      context: context, // ignore: use_build_context_synchronously
       builder: (ctx) => _UnlockDialog(
         title: 'Unlock Session',
         description:
@@ -2032,6 +2146,8 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
           if (mounted) setState(() => _unlocked = true);
           widget.onUnlocked?.call();
         },
+        onSaveCredential: (isCard, fp, credential) => BiometricService.instance
+            .save(fingerprint: fp, isCard: isCard, credential: credential),
       ),
     );
   }
@@ -2063,18 +2179,14 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           : _unlocked
-              ? TextButton(
-                  onPressed: _lock,
-                  child: const Text(
-                    'Lock',
-                    style: TextStyle(color: Color(0xFFFF453A)),
-                  ),
-                )
-              : const Icon(
-                  Icons.chevron_right,
-                  size: 18,
-                  color: Color(0xFF8E8E93),
-                ),
+          ? TextButton(
+              onPressed: _lock,
+              child: const Text(
+                'Lock',
+                style: TextStyle(color: Color(0xFFFF453A)),
+              ),
+            )
+          : const Icon(Icons.chevron_right, size: 18, color: Color(0xFF8E8E93)),
       onTap: _unlocked ? null : _showUnlockDialog,
     );
   }

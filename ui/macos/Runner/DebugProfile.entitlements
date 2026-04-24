@@ -2,17 +2,22 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- No app sandbox — p43 is a developer tool that needs unrestricted
+	     filesystem access for keys, PC/SC (YubiKey), and the shared CLI store.
+	     Touch ID is still gated by the Hardened Runtime entitlement below.    -->
 	<key>com.apple.security.app-sandbox</key>
-	<true/>
+	<false/>
+	<!-- JIT is required for the Flutter debug engine. -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
-	<key>com.apple.security.network.server</key>
+	<key>com.apple.security.personal-information.fingerprint</key>
 	<true/>
-	<key>com.apple.security.network.client</key>
-	<true/>
-	<key>com.apple.security.smartcard</key>
-	<true/>
-	<key>com.apple.security.files.user-selected.read-only</key>
-	<true/>
+	<!-- Data Protection Keychain — required by flutter_secure_storage_macos 3.x
+	     which uses kSecUseDataProtectionKeychain=true. Works without sandbox;
+	     $(AppIdentifierPrefix) expands to the team ID at code-sign time.    -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)$(CFBundleIdentifier)</string>
+	</array>
 </dict>
 </plist>

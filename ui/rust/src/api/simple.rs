@@ -1001,9 +1001,10 @@ pub async fn mx_respond_csr(
     // Issue cert.
     let cert = DeviceCert::issue(&csr_payload, &authority_key, ttl_secs)?;
 
-    // Load authority public bundle (CBOR) and re-encode for the wire.
-    let authority_pub = AuthorityPub::load(&bus::authority_pub_path(&bus_dir))
-        .context("read authority.pub.cbor — run `p43 bus init` first")?;
+    // Derive the authority public bundle from the key we just unlocked —
+    // this guarantees the pub bundle is always consistent with the signing key,
+    // even if authority.pub.cbor on disk is stale (e.g. after bus init --force).
+    let authority_pub = authority_key.authority_pub();
     let authority_pub_cbor = authority_pub
         .to_cbor_bytes()
         .context("CBOR encode AuthorityPub for response")?;
@@ -1016,6 +1017,10 @@ pub async fn mx_respond_csr(
         authority_pub_b64: base64::engine::general_purpose::STANDARD.encode(&authority_pub_cbor),
     });
     p43::matrix::global::send_message(&room_id, &msg.to_json()?).await?;
+
+    // Re-sync authority.pub.cbor on disk — if it was stale (e.g. from a previous
+    // bus init --force), this brings it back in line with authority.key.enc.
+    authority_pub.save(&bus::authority_pub_path(&bus_dir))?;
 
     // Also store the cert in peers/ so the authority can later encrypt to this device.
     let peer_path = bus::peer_cert_path(&bus_dir, &cert.payload.device_id);

@@ -18,7 +18,7 @@ p43 = { path = "../../lib", default-features = false, features = [
     "bus",
 ] }
 base64 = "0.22"
-dirs   = "5"
+dirs   = "6"
 anyhow = "1"
 hex    = "0.4"
 # tokio for spawning tasks from StreamSink bridge functions

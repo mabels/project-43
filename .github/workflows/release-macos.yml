@@ -50,7 +50,7 @@ jobs:
 
     steps:
       # ── source ────────────────────────────────────────────────────────────
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────
       - name: Install Rust toolchain

@@ -53,12 +53,14 @@ jobs:
       - uses: actions/checkout@v4
 
       # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────
-      # Both targets declared here so the action installs them for the pinned
-      # toolchain version before any cargo invocation.
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: aarch64-apple-darwin,x86_64-apple-darwin
+
+      # Explicitly add cross-compile targets to the active toolchain (1.95.0).
+      # The action's `target:` input installs against `stable` before
+      # rust-toolchain.toml is resolved, so we do this separately.
+      - name: Add cross-compilation targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       # ── Flutter stable ─────────────────────────────────────────────────────
       # subosito/flutter-action@v2 fails to resolve the stable version on arm64

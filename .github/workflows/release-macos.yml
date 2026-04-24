@@ -154,8 +154,18 @@ jobs:
       # cargokit builds the bridge crate (crypto-rust, no C deps) as part of
       # flutter build.  The resulting .app is arm64-only (native runner arch).
       # If you need a universal .app, that requires a separate matrix job.
+      #
+      # FLUTTER_XCODE_* env vars are forwarded verbatim to xcodebuild as build
+      # settings.  We disable signing here entirely — the Xcode project has
+      # CODE_SIGN_STYLE=Automatic which would try to auto-provision and fail on
+      # a CI runner with no Apple Developer session.  Our codesign step below
+      # handles all signing with the Developer ID cert from the keychain.
       - name: Build macOS release (flutter)
         working-directory: ui
+        env:
+          FLUTTER_XCODE_CODE_SIGN_IDENTITY: ""
+          FLUTTER_XCODE_CODE_SIGNING_REQUIRED: "NO"
+          FLUTTER_XCODE_CODE_SIGNING_ALLOWED: "NO"
         run: flutter build macos --release
 
       # ── bundle CLI inside the .app ─────────────────────────────────────────

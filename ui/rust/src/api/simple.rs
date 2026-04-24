@@ -1551,6 +1551,7 @@ async fn send_via_bridge(
     p43::matrix::global::send_message(room_id, &json).await
 }
 
+#[allow(dead_code)]
 fn resolve_secret(explicit: Option<String>, env_var: &str, prompt: &str) -> anyhow::Result<String> {
     if let Some(v) = explicit {
         return Ok(v);

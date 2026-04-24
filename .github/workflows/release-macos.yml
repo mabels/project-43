@@ -304,7 +304,7 @@ APP_PATH=$(find ui/build/macos/Build/Products/Release \
 
       # ── upload artefact ────────────────────────────────────────────────────
       - name: Upload DMG as workflow artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: p43-macos-${{ github.ref_name }}
           path: ${{ env.DMG_PATH }}

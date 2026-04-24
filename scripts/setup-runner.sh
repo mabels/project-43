@@ -56,5 +56,14 @@ echo "==> Configuring runner (no service install)..."
   --unattended
 
 echo ""
+echo "==> Writing runner environment (.env)..."
+# The runner does not source ~/.zshrc, so Homebrew and rustup are not in PATH
+# by default.  This .env file is loaded before every job.
+cat > "$RUNNER_DIR/.env" << EOF
+PATH=/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+HOMEBREW_NO_AUTO_UPDATE=1
+EOF
+
+echo ""
 echo "Done. Start the runner with:"
 echo "  cd $RUNNER_DIR && ./run.sh"

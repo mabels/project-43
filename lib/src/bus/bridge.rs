@@ -71,7 +71,7 @@ pub struct OutboundBusMessage {
 /// [`spawn_decrypt_middleware`].
 pub enum DecryptResult {
     /// Successfully decrypted: inner message + verified sender cert.
-    Ok(protocol::Message, CertPayload),
+    Ok(protocol::Message, Box<CertPayload>),
     /// Session is locked — the `on_locked` callback will be fired.
     Locked,
     /// Message should be silently dropped (e.g. own echo, not-yet-registered).
@@ -153,7 +153,7 @@ pub fn spawn_decrypt_middleware(
             // The borrow of `raw_msg` inside the match above ends here.
 
             let (msg, sender_cert) = match decrypt_result {
-                Some(DecryptResult::Ok(inner, cert)) => (inner, Some(cert)),
+                Some(DecryptResult::Ok(inner, cert)) => (inner, Some(*cert)),
                 Some(DecryptResult::Locked) => {
                     // Pass the original message to the caller so it can be
                     // buffered and replayed once the session is unlocked.

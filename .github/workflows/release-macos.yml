@@ -54,9 +54,7 @@ jobs:
 
       # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        # rust-toolchain.toml in the repo root overrides the channel;
-        # dtolnay/rust-toolchain@stable still installs the components we need.
+        uses: actions-rust-lang/setup-rust-toolchain@v1
 
       # ── Flutter stable ─────────────────────────────────────────────────────
       - name: Install Flutter

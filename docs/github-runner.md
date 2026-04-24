@@ -5,26 +5,29 @@ This document explains how to set up and start the runner on your Mac.
 
 ## First-time setup
 
-1. Go to the repo on GitHub →
-   **Settings → Actions → Runners → New self-hosted runner**
-2. Select **macOS / arm64**
-3. GitHub shows you a download URL and a one-time token — copy the exact
-   commands it gives you.  They look like this:
+1. Get the runner download URL from GitHub →
+   **Settings → Actions → Runners → New self-hosted runner → macOS / arm64**
+   (you only need the download URL from that page, not the short-lived token)
+
+2. Download and configure using your long-running PAT:
 
    ```bash
    mkdir ~/actions-runner && cd ~/actions-runner
    curl -o actions-runner-osx-arm64.tar.gz -L <URL_FROM_GITHUB>
    tar xzf actions-runner-osx-arm64.tar.gz
-   ./config.sh --url https://github.com/mabels/project-43 --token <TOKEN>
+   ./config.sh --url https://github.com/mabels/project-43 --pat <YOUR_PAT>
    ```
 
-4. When `config.sh` prompts you:
+   The PAT needs the **`repo`** scope.  Using `--pat` instead of `--token`
+   means the registration never expires — no need to generate a fresh token
+   each time you re-configure.
+
+3. When `config.sh` prompts you:
    - **Runner group** — press Enter (default)
    - **Runner name** — anything you like, e.g. `mac-mini`
    - **Labels** — press Enter to accept the defaults (`self-hosted,macOS,ARM64`)
    - **Work folder** — press Enter (`_work`)
 
-The token expires within ~1 hour, so complete the config step promptly.
 You only need to do this once; the runner is now registered with GitHub.
 
 ## Starting the runner (manual)

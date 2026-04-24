@@ -23,6 +23,15 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner to use"
+        required: false
+        default: "self-hosted"
+        type: choice
+        options:
+          - self-hosted   # your Mac — fast, free
+          - macos-latest  # GitHub-hosted — fallback if your Mac is offline
 
 # softprops/action-gh-release needs write access to create/update releases.
 permissions:
@@ -35,7 +44,7 @@ env:
 jobs:
   build-macos:
     name: Build, sign & notarize
-    runs-on: macos-latest      # arm64 Apple Silicon runner (Xcode 16.x)
+    runs-on: ${{ inputs.runner || 'self-hosted' }}
     environment: release       # gates the job on the "release" environment;
                                # exposes its secrets/vars and any required reviewers
 

@@ -1,0 +1,202 @@
+name: Release — Linux
+
+# Triggered on version tags (v1.2.3) or manually via the Actions UI.
+# Produces AppImages for amd64 and arm64, attaches them to the GitHub release.
+#
+# Uses the same "release" environment as the macOS workflow for secrets/vars.
+# No signing secrets are needed for Linux — AppImages are not code-signed.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner override (leave blank for defaults)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    name: AppImage (${{ matrix.arch }})
+    environment: release
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            flutter_arch: x64
+            appimagetool_arch: x86_64
+
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            flutter_arch: arm64
+            appimagetool_arch: aarch64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      # ── source ─────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── system dependencies ─────────────────────────────────────────────────
+      # Flutter Linux needs clang/cmake/ninja + GTK3 headers.
+      # libpcsclite-dev is needed to compile the pcsc feature in the CLI.
+      # patchelf is used to set $ORIGIN/lib RPATH on the CLI binary so it
+      # finds the bundled libpcsclite.so.1 at runtime.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev libblkid-dev liblzma-dev \
+            libpcsclite-dev \
+            patchelf \
+            file
+
+      # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ──────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # ── Flutter stable ──────────────────────────────────────────────────────
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # ── caches ─────────────────────────────────────────────────────────────
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-${{ matrix.arch }}-cargo-
+
+      - name: Cache Flutter pub
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: linux-pub-${{ hashFiles('ui/pubspec.lock') }}
+          restore-keys: linux-pub-
+
+      # ── build CLI ───────────────────────────────────────────────────────────
+      # crypto-rust (pure Rust) — no nettle/C deps.
+      # libpcsclite is a dynamic dep; we bundle it into the AppDir below.
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.rust_target }} -p p43-cli
+
+      # ── build Flutter app ───────────────────────────────────────────────────
+      - name: flutter pub get
+        working-directory: ui
+        run: flutter pub get
+
+      - name: Build Linux release (flutter)
+        working-directory: ui
+        run: flutter build linux --release
+
+      # ── assemble AppDir ─────────────────────────────────────────────────────
+      # Flutter's bundle already has the right layout:
+      #   bundle/
+      #     p43              ← main executable (RPATH = $ORIGIN/lib)
+      #     lib/             ← libapp.so, libflutter_linux_gtk.so, …
+      #     data/            ← flutter_assets/
+      #
+      # We copy the whole bundle to AppDir/, then add:
+      #   • p43-cli          ← Rust CLI (patched RPATH → $ORIGIN/lib)
+      #   • lib/libpcsclite.so.1  ← bundled so both binaries find it
+      #   • AppRun, .desktop, icon
+      - name: Assemble AppDir
+        run: |
+          BUNDLE="ui/build/linux/${{ matrix.flutter_arch }}/release/bundle"
+          APPDIR="$RUNNER_TEMP/AppDir"
+
+          # Copy Flutter bundle (preserves lib/ and data/ relative to the binary)
+          mkdir -p "$APPDIR"
+          cp -r "$BUNDLE"/. "$APPDIR/"
+
+          # Copy Rust CLI
+          cp "target/${{ matrix.rust_target }}/release/p43" "$APPDIR/p43-cli"
+          chmod 755 "$APPDIR/p43-cli"
+
+          # Bundle libpcsclite — find the real .so.1 file (resolve symlinks)
+          PCSC_SO=$(ldconfig -p | grep 'libpcsclite\.so\.1 ' | awk '{print $NF}' | head -1)
+          echo "Bundling pcsclite from: $PCSC_SO"
+          cp "$PCSC_SO" "$APPDIR/lib/libpcsclite.so.1"
+
+          # Patch RPATH on the CLI so it finds lib/ next to itself
+          patchelf --set-rpath '$ORIGIN/lib' "$APPDIR/p43-cli"
+
+          # Verify
+          ldd "$APPDIR/p43-cli" | grep -E "pcsclite|not found" || true
+
+          # AppRun — launches the Flutter GUI by default
+          cat > "$APPDIR/AppRun" << 'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="$HERE/lib:${LD_LIBRARY_PATH}"
+          exec "$HERE/p43" "$@"
+          EOF
+          chmod +x "$APPDIR/AppRun"
+
+          # Desktop file (required by appimagetool)
+          cat > "$APPDIR/p43.desktop" << 'EOF'
+          [Desktop Entry]
+          Name=p43
+          Comment=Distributed single-key password manager
+          Exec=p43
+          Icon=p43
+          Type=Application
+          Categories=Utility;Security;
+          EOF
+
+          # Icon — reuse the 256px macOS icon
+          cp ui/macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_256.png \
+             "$APPDIR/p43.png"
+
+          echo "AppDir contents:"
+          find "$APPDIR" -maxdepth 2
+
+      # ── create AppImage ─────────────────────────────────────────────────────
+      # APPIMAGE_EXTRACT_AND_RUN=1 is required on GitHub Actions runners
+      # because FUSE is not available in the container environment.
+      - name: Download appimagetool
+        run: |
+          wget -q \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${{ matrix.appimagetool_arch }}.AppImage" \
+            -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+
+      - name: Create AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          ARCH: ${{ matrix.appimagetool_arch }}
+        run: |
+          APPIMAGE_NAME="p43-${{ github.ref_name }}-${{ matrix.arch }}.AppImage"
+          /tmp/appimagetool "$RUNNER_TEMP/AppDir" "$APPIMAGE_NAME"
+          echo "APPIMAGE_PATH=$APPIMAGE_NAME" >> "$GITHUB_ENV"
+          echo "Built: $(ls -lh $APPIMAGE_NAME)"
+
+      # ── upload ──────────────────────────────────────────────────────────────
+      - name: Upload AppImage as workflow artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p43-linux-${{ matrix.arch }}-${{ github.ref_name }}
+          path: ${{ env.APPIMAGE_PATH }}
+          retention-days: 14
+
+      - name: Attach AppImage to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.APPIMAGE_PATH }}

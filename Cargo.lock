@@ -3296,7 +3296,7 @@ dependencies = [
  "matrix-sdk",
  "openpgp-card",
  "openpgp-card-rpgp",
- "opentelemetry 0.27.1",
+ "opentelemetry 0.31.0",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.31.0",

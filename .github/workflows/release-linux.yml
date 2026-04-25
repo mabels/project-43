@@ -73,8 +73,12 @@ jobs:
       # Linux runners.  Installing directly from git is simpler and more reliable.
       - name: Install Flutter
         run: |
-          git clone --depth 1 -b stable \
-            https://github.com/flutter/flutter.git "$HOME/flutter"
+          if [ -d "$HOME/flutter/.git" ]; then
+            git -C "$HOME/flutter" pull --ff-only
+          else
+            git clone --depth 1 -b stable \
+              https://github.com/flutter/flutter.git "$HOME/flutter"
+          fi
           echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
 
       - name: Flutter precache (linux)

@@ -131,6 +131,10 @@ jobs:
 
           echo -n "$CERTIFICATE_BASE64" | base64 --decode -o "$RUNNER_TEMP/certificate.p12"
 
+          # Remove stale keychain from a previous run so create-keychain
+          # never fails on self-hosted runners.
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"   # 6-hour lock timeout
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -140,20 +144,22 @@ jobs:
             -A -t cert -f pkcs12 \
             -k "$KEYCHAIN_PATH"
 
-          # Allow codesign to access the key without prompting.
           # codesign: partition is required on self-hosted runners; without it
           # codesign fails with errSecInternalComponent even when the keychain
-          # is unlocked and in the search list.
+          # is unlocked.
           security set-key-partition-list -S "apple-tool:,apple:,codesign:" \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # Add the signing keychain to the search list while keeping the
-          # login keychain in place.  Replacing the list (omitting login.keychain-db)
-          # breaks codesign on self-hosted runners where the login keychain
-          # holds other trusted roots.
-          security list-keychain -d user -s \
-            "$KEYCHAIN_PATH" \
-            "$HOME/Library/Keychains/login.keychain-db"
+          # Build the keychain search list.  On headless runner accounts
+          # (e.g. gh-worker) there is no login keychain, so include it only
+          # if it actually exists.
+          KEYCHAINS="$KEYCHAIN_PATH"
+          LOGIN_KC="$HOME/Library/Keychains/login.keychain-db"
+          [ -f "$LOGIN_KC" ] && KEYCHAINS="$KEYCHAINS $LOGIN_KC"
+          security list-keychain -d user -s $KEYCHAINS
+
+          # Verify the cert is reachable before proceeding.
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
       # ── Flutter dependencies ───────────────────────────────────────────────
       - name: flutter pub get
@@ -211,7 +217,13 @@ jobs:
       - name: Bundle CLI into .app and sign inside-out
         env:
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
+          # Re-unlock the keychain — headless runner sessions may lose access
+          # to the keychain between steps.
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" \
+            "$RUNNER_TEMP/app-signing.keychain-db"
+
           APP_PATH=$(find ui/build/macos/Build/Products/Release \
             -maxdepth 1 -name "*.app" | head -1)
           CLI_DEST="$APP_PATH/Contents/Resources/p43"

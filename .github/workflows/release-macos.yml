@@ -264,7 +264,7 @@ jobs:
       # ── package as DMG ─────────────────────────────────────────────────────
       - name: Create DMG
         run: |
-APP_PATH=$(find ui/build/macos/Build/Products/Release \
+          APP_PATH=$(find ui/build/macos/Build/Products/Release \
             -maxdepth 1 -name "*.app" | head -1)
           APP_NAME=$(basename "$APP_PATH" .app)
           DMG_NAME="${APP_NAME}-${{ github.ref_name }}.dmg"

@@ -1,4 +1,4 @@
-name: Release — Linux
+name: Release - Linux
 
 # Triggered on version tags (v1.2.3) or manually via the Actions UI.
 # Produces AppImages for amd64 and arm64, attaches them to the GitHub release.

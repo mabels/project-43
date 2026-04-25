@@ -1,4 +1,4 @@
-name: Release — macOS
+name: Release - macOS
 
 # Triggered on version tags (v1.2.3) or manually via the Actions UI.
 # Produces a signed, notarized DMG and attaches it to the GitHub release.

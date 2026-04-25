@@ -141,11 +141,19 @@ jobs:
             -k "$KEYCHAIN_PATH"
 
           # Allow codesign to access the key without prompting.
-          security set-key-partition-list -S "apple-tool:,apple:" \
+          # codesign: partition is required on self-hosted runners; without it
+          # codesign fails with errSecInternalComponent even when the keychain
+          # is unlocked and in the search list.
+          security set-key-partition-list -S "apple-tool:,apple:,codesign:" \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          # Make this keychain visible to Xcode / codesign.
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          # Add the signing keychain to the search list while keeping the
+          # login keychain in place.  Replacing the list (omitting login.keychain-db)
+          # breaks codesign on self-hosted runners where the login keychain
+          # holds other trusted roots.
+          security list-keychain -d user -s \
+            "$KEYCHAIN_PATH" \
+            "$HOME/Library/Keychains/login.keychain-db"
 
       # ── Flutter dependencies ───────────────────────────────────────────────
       - name: flutter pub get

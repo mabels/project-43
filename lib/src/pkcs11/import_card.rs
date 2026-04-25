@@ -1,29 +1,21 @@
-use anyhow::{Context, Result};
-use openpgp::cert::prelude::*;
-use openpgp::crypto::mpi;
-use openpgp::packet::{
-    key::{Key4, PrimaryRole, PublicParts, SubordinateRole},
-    signature::SignatureBuilder,
-    UserID,
-};
-use openpgp::types::{Curve, HashAlgorithm, KeyFlags, SignatureType};
-use openpgp::Packet;
-use openpgp_card_sequoia::types::KeyType;
-use sequoia_openpgp as openpgp;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+//! Import an OpenPGP card's public keys into the key store.
+//!
+//! The old sequoia-based implementation manually assembled raw MPI packets and
+//! self-signed them.  With `openpgp-card-rpgp` 0.7 we delegate that entirely
+//! to [`openpgp_card_rpgp::bind_into_certificate`], which reads all three slot
+//! public keys off the card, issues the self-signatures (signing-slot PIN
+//! required), and returns a complete [`pgp::composed::SignedPublicKey`].
 
 use crate::key_store::store::KeyStore;
-use crate::pkcs11::card::open_card;
+use crate::pkcs11::card::{open_card, pin_to_secret};
+use anyhow::{Context, Result};
+use openpgp_card::ocard::KeyType;
+use openpgp_card_rpgp::{bind_into_certificate, CardSlot};
 
-/// Read all three slot public keys off a connected OpenPGP card, synthesise a
-/// self-signed OpenPGP cert using the card itself to create the UID binding
-/// signature, then import the cert into `ks` and write a
+/// Read all three slot public keys off a connected OpenPGP card, bind them
+/// into a self-signed OpenPGP certificate (using the card's signing slot to
+/// issue the binding signatures), then import the cert into `ks` and write a
 /// `<fingerprint>.card.json` recording the card's AID.
-///
-/// The resulting cert has:
-/// - Primary key (SIG slot)  → CERTIFY + SIGN
-/// - Subkey    (AUTH slot)   → AUTHENTICATE  (if slot is populated)
-/// - Subkey    (DEC slot)    → ENCRYPT_COMMUNICATIONS + ENCRYPT_STORAGE (if slot is populated)
 ///
 /// `card_ident`: if `Some`, selects the card by AID ident string; if `None`,
 /// uses the first connected card.  Run `p43 key list-cards` to find idents.
@@ -31,8 +23,7 @@ use crate::pkcs11::card::open_card;
 /// `uid_override`: if `Some`, used as the cert's UID.  Falls back to the
 /// cardholder name stored on the card.  Returns an error if neither is set.
 ///
-/// `pin`: the card's User Signing PIN (the one that unlocks the SIG slot;
-/// typically the regular "User PIN" on YubiKeys, not the Admin PIN).
+/// `pin`: the card's User Signing PIN (unlocks the SIG slot).
 pub fn import_card_cert(
     ks: &KeyStore,
     card_ident: Option<&str>,
@@ -44,57 +35,18 @@ pub fn import_card_cert(
         .transaction()
         .context("Failed to open card transaction")?;
 
-    // ── 1. Read all metadata before consuming tx with to_signing_card ────────
+    // ── 1. Read card metadata (before any signing PIN verification) ───────────
 
     let ident = tx
         .application_identifier()
         .context("Failed to read card AID")?
         .ident();
 
-    let cardholder_name = tx.cardholder_name().unwrap_or_default();
-
-    // Read all three key-generation timestamps in one shot.
-    let gen_times = tx.key_generation_times().ok();
-
-    let sig_creation_time = gen_times
-        .as_ref()
-        .and_then(|t| t.signature())
-        .map(|ts| UNIX_EPOCH + Duration::from_secs(ts.get() as u64))
-        .unwrap_or_else(SystemTime::now);
-
-    let auth_creation_time_opt: Option<SystemTime> = gen_times
-        .as_ref()
-        .and_then(|t| t.authentication())
-        .map(|ts| UNIX_EPOCH + Duration::from_secs(ts.get() as u64));
-
-    let dec_creation_time_opt: Option<SystemTime> = gen_times
-        .as_ref()
-        .and_then(|t| t.decryption())
-        .map(|ts| UNIX_EPOCH + Duration::from_secs(ts.get() as u64));
-
-    // Signing slot — required.
-    let sig_mpis = tx
-        .public_key(KeyType::Signing)
-        .context("Failed to read signing-slot public key")?
-        .context("No signing key on card")?
-        .mpis()
-        .clone();
-
-    // Auth slot — optional.
-    let auth_mpis_opt: Option<mpi::PublicKey> = tx
-        .public_key(KeyType::Authentication)
+    let cardholder_name: String = tx
+        .cardholder_related_data()
         .ok()
-        .flatten()
-        .map(|pm| pm.mpis().clone());
-
-    // Decryption slot — optional.
-    let dec_mpis_opt: Option<mpi::PublicKey> = tx
-        .public_key(KeyType::Decryption)
-        .ok()
-        .flatten()
-        .map(|pm| pm.mpis().clone());
-
-    // ── 2. Resolve UID ────────────────────────────────────────────────────────
+        .and_then(|chd| chd.name().map(|b| String::from_utf8_lossy(b).into_owned()))
+        .unwrap_or_default();
 
     let uid_str: String = match uid_override {
         Some(s) => s.to_owned(),
@@ -107,211 +59,69 @@ pub fn import_card_cert(
         }
     };
 
-    // ── 3. Build primary key from signing-slot MPIs ──────────────────────────
+    // ── 2. Read public keys for all three slots (short-lived borrows) ─────────
+    //
+    // Each `CardSlot` borrow ends when the block ends, freeing `tx` for the
+    // next call.
 
-    let primary: openpgp::packet::Key<PublicParts, PrimaryRole> =
-        build_primary_key(&sig_mpis, sig_creation_time)?;
+    // touch_prompt is a no-op here: we're only reading public keys, not
+    // performing card signing.  The real touch prompt comes from bind_into_certificate.
+    let no_touch: &(dyn Fn() + Send + Sync) = &|| {};
 
-    // Bare cert (primary only) — needed so uid.bind() / sign_subkey_binding()
-    // can reference the primary fingerprint.
-    let bare = Cert::from_packets(std::iter::once(Packet::from(primary.clone())))
-        .context("Failed to create bare cert from primary key")?;
+    let sig_pk = CardSlot::init_from_card(&mut tx, KeyType::Signing, no_touch)
+        .context("Failed to read signing slot public key")?
+        .public_key()
+        .clone();
 
-    let uid = UserID::from(uid_str.as_bytes());
+    let dec_pk = CardSlot::init_from_card(&mut tx, KeyType::Decryption, no_touch)
+        .ok()
+        .map(|s| s.public_key().clone());
 
-    // ── 4. Build optional subkeys from auth / decryption slot MPIs ───────────
+    let aut_pk = CardSlot::init_from_card(&mut tx, KeyType::Authentication, no_touch)
+        .ok()
+        .map(|s| s.public_key().clone());
 
-    let auth_subkey_opt: Option<openpgp::packet::Key<PublicParts, SubordinateRole>> = auth_mpis_opt
-        .as_ref()
-        .map(|m| build_auth_subkey(m, auth_creation_time_opt.unwrap_or_else(SystemTime::now)))
-        .transpose()?;
+    let has_dec = dec_pk.is_some();
+    let has_aut = aut_pk.is_some();
 
-    let dec_subkey_opt: Option<openpgp::packet::Key<PublicParts, SubordinateRole>> = dec_mpis_opt
-        .as_ref()
-        .map(|m| build_enc_subkey(m, dec_creation_time_opt.unwrap_or_else(SystemTime::now)))
-        .transpose()?;
+    // ── 3. Bind into a self-signed certificate ────────────────────────────────
+    //
+    // `bind_into_certificate` verifies the signing PIN, does the card signing
+    // operations to issue UID binding and subkey binding signatures, and
+    // returns a complete `SignedPublicKey`.
 
-    // ── 5. Self-certify using the card's signing slot ─────────────────────────
+    let touch_prompt: &(dyn Fn() + Send + Sync) = &|| eprintln!("Touch YubiKey now…");
 
-    tx.verify_user_signing_pin(pin)
-        .context("PIN verification failed")?;
+    let cert = bind_into_certificate(
+        &mut tx,
+        sig_pk,
+        dec_pk,
+        aut_pk,
+        std::slice::from_ref(&uid_str),
+        Some(pin_to_secret(pin)),
+        &|| {}, // no pinpad
+        touch_prompt,
+    )
+    .map_err(|e| anyhow::anyhow!("bind_into_certificate failed: {e}"))?;
 
-    let mut sign_card = tx
-        .to_signing_card(None)
-        .context("Failed to open signing card mode")?;
+    // ── 4. Save to key store ──────────────────────────────────────────────────
 
-    let (uid_sig, auth_sig_opt, enc_sig_opt) = {
-        let mut signer = sign_card
-            .signer(&|| eprintln!("Touch YubiKey now…"))
-            .context("Failed to get signer from card")?;
+    use pgp::types::KeyDetails as _;
+    let fp = hex::encode(cert.fingerprint().as_bytes());
 
-        // UID binding — primary key gets CERTIFY + SIGN.
-        let uid_sig = uid
-            .bind(
-                &mut signer,
-                &bare,
-                SignatureBuilder::new(SignatureType::PositiveCertification)
-                    .set_key_flags(KeyFlags::empty().set_certification().set_signing())
-                    .context("set_key_flags (primary) failed")?
-                    .set_preferred_hash_algorithms(vec![
-                        HashAlgorithm::SHA512,
-                        HashAlgorithm::SHA256,
-                    ])
-                    .context("set_preferred_hash_algorithms failed")?,
-            )
-            .context("Failed to create UID binding signature")?;
-
-        // Auth subkey binding.
-        let auth_sig_opt = auth_subkey_opt
-            .as_ref()
-            .map(|sk| {
-                SignatureBuilder::new(SignatureType::SubkeyBinding)
-                    .set_key_flags(KeyFlags::empty().set_authentication())
-                    .context("set_key_flags (auth subkey) failed")?
-                    .sign_subkey_binding(&mut signer, bare.primary_key().key(), sk)
-                    .context("Failed to create auth SubkeyBinding signature")
-            })
-            .transpose()?;
-
-        // Encrypt subkey binding.
-        let enc_sig_opt = dec_subkey_opt
-            .as_ref()
-            .map(|sk| {
-                SignatureBuilder::new(SignatureType::SubkeyBinding)
-                    .set_key_flags(
-                        KeyFlags::empty()
-                            .set_transport_encryption()
-                            .set_storage_encryption(),
-                    )
-                    .context("set_key_flags (enc subkey) failed")?
-                    .sign_subkey_binding(&mut signer, bare.primary_key().key(), sk)
-                    .context("Failed to create encrypt SubkeyBinding signature")
-            })
-            .transpose()?;
-
-        (uid_sig, auth_sig_opt, enc_sig_opt)
-    };
-    let _ = sign_card; // explicitly end the card borrow before assembling the cert
-
-    // ── 6. Assemble and save ──────────────────────────────────────────────────
-
-    let has_auth = auth_subkey_opt.is_some();
-    let has_enc = dec_subkey_opt.is_some();
-
-    let mut extra: Vec<Packet> = vec![Packet::from(uid), Packet::from(uid_sig)];
-
-    if let (Some(sk), Some(sig)) = (auth_subkey_opt, auth_sig_opt) {
-        extra.push(Packet::from(sk));
-        extra.push(Packet::from(sig));
-    }
-    if let (Some(sk), Some(sig)) = (dec_subkey_opt, enc_sig_opt) {
-        extra.push(Packet::from(sk));
-        extra.push(Packet::from(sig));
-    }
-
-    let cert = bare
-        .insert_packets(extra)
-        .context("Failed to insert UID/subkeys into cert")?;
-
-    let fp = cert.fingerprint().to_hex();
-    ks.save(&cert, None)
+    ks.save_public(&cert)
         .context("Failed to save cert to key store")?;
     ks.register_card(&fp, &ident)
         .context("Failed to register card AID")?;
 
-    println!("Imported key {}", fp);
-    println!("  UID:   {}", uid_str);
-    println!("  Card:  {}", ident);
+    println!("Imported key {fp}");
+    println!("  UID:   {uid_str}");
+    println!("  Card:  {ident}");
     println!(
         "  Slots: SIG{}{}",
-        if has_auth { " + AUTH" } else { "" },
-        if has_enc { " + ENC" } else { "" },
+        if has_aut { " + AUTH" } else { "" },
+        if has_dec { " + DEC" } else { "" },
     );
 
     Ok(())
-}
-
-// ── Key-building helpers ───────────────────────────────────────────────────────
-
-fn build_primary_key(
-    mpis: &mpi::PublicKey,
-    ct: SystemTime,
-) -> Result<openpgp::packet::Key<PublicParts, PrimaryRole>> {
-    match mpis {
-        mpi::PublicKey::EdDSA {
-            curve: Curve::Ed25519,
-            q,
-        } => {
-            let raw = q.value();
-            anyhow::ensure!(
-                raw.len() >= 33 && raw[0] == 0x40,
-                "Unexpected Ed25519 q encoding on SIG slot (len={}, prefix={:#x})",
-                raw.len(),
-                raw.first().copied().unwrap_or(0)
-            );
-            Ok(Key4::import_public_ed25519(&raw[1..], Some(ct))
-                .context("Failed to construct Ed25519 primary key")?
-                .into())
-        }
-        mpi::PublicKey::RSA { e, n } => Ok(Key4::import_public_rsa(e.value(), n.value(), Some(ct))
-            .context("Failed to construct RSA primary key")?
-            .into()),
-        other => anyhow::bail!("Unsupported algorithm on SIG slot: {:?}", other),
-    }
-}
-
-fn build_auth_subkey(
-    mpis: &mpi::PublicKey,
-    ct: SystemTime,
-) -> Result<openpgp::packet::Key<PublicParts, SubordinateRole>> {
-    match mpis {
-        mpi::PublicKey::EdDSA {
-            curve: Curve::Ed25519,
-            q,
-        } => {
-            let raw = q.value();
-            anyhow::ensure!(
-                raw.len() >= 33 && raw[0] == 0x40,
-                "Unexpected Ed25519 q encoding on AUTH slot"
-            );
-            Ok(Key4::import_public_ed25519(&raw[1..], Some(ct))
-                .context("Failed to construct Ed25519 auth subkey")?
-                .into())
-        }
-        mpi::PublicKey::RSA { e, n } => Ok(Key4::import_public_rsa(e.value(), n.value(), Some(ct))
-            .context("Failed to construct RSA auth subkey")?
-            .into()),
-        other => anyhow::bail!("Unsupported algorithm on AUTH slot: {:?}", other),
-    }
-}
-
-fn build_enc_subkey(
-    mpis: &mpi::PublicKey,
-    ct: SystemTime,
-) -> Result<openpgp::packet::Key<PublicParts, SubordinateRole>> {
-    match mpis {
-        mpi::PublicKey::ECDH {
-            curve: Curve::Cv25519,
-            q,
-            hash,
-            sym,
-        } => {
-            let raw = q.value();
-            anyhow::ensure!(
-                raw.len() >= 33 && raw[0] == 0x40,
-                "Unexpected Cv25519 q encoding on DEC slot (len={}, prefix={:#x})",
-                raw.len(),
-                raw.first().copied().unwrap_or(0)
-            );
-            Ok(
-                Key4::import_public_cv25519(&raw[1..], *hash, *sym, Some(ct))
-                    .context("Failed to construct Cv25519 encrypt subkey")?
-                    .into(),
-            )
-        }
-        mpi::PublicKey::RSA { e, n } => Ok(Key4::import_public_rsa(e.value(), n.value(), Some(ct))
-            .context("Failed to construct RSA encrypt subkey")?
-            .into()),
-        other => anyhow::bail!("Unsupported algorithm on DEC slot: {:?}", other),
-    }
 }

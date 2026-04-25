@@ -26,5 +26,6 @@ matrix-sdk     = { version = "0.16.0", default-features = false, features = ["ru
 uuid           = { version = "1", features = ["v4"] }
 base64         = "0.22"
 hex            = "0.4"
+pgp            = "0.19"
 tracing        = { version = "0.1", optional = true }
 hostname       = "0.4"

@@ -3,11 +3,12 @@
 ///
 /// These tests exercise the same operations as a physical YubiKey would, but
 /// use an in-process software key so they run without any PC/SC hardware.
-use p43::key_store::{keygen, store};
+use p43::key_store::{import_ssh, keygen, store};
 use p43::pkcs11::{
     ops,
     virtual_card::{CardOps, VirtualCard},
 };
+use pgp::types::KeyDetails as _;
 use tempfile::TempDir;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -23,8 +24,8 @@ impl TestKey {
         let dir = tempfile::tempdir().unwrap();
         let ks = store::KeyStore::open(dir.path()).unwrap();
         let cert = keygen::generate(uid, "ed25519", passphrase).unwrap();
-        let fingerprint = cert.fingerprint().to_hex();
-        ks.save(&cert, None).unwrap();
+        let fingerprint = format!("{:X}", cert.fingerprint());
+        ks.save_secret(&cert).unwrap();
         TestKey {
             _dir: dir,
             ks,
@@ -176,8 +177,8 @@ fn virtual_card_rsa4096_sign_verify() {
     let ks = store::KeyStore::open(dir.path()).unwrap();
 
     let sec_bytes = include_bytes!("fixtures/rsa4096_test.sec.asc");
-    let cert = ks.import(sec_bytes).unwrap();
-    let fp = cert.fingerprint().to_hex();
+    // Fixture is a PGP private key block; import via the secret-key importer.
+    let fp = import_ssh::import_openpgp_private_key(&ks, sec_bytes).unwrap();
 
     let card = VirtualCard::new(ks.sec_file_path(&fp), "");
     let sig = card.card_sign(b"rsa test").unwrap();

@@ -1,25 +1,28 @@
+//! Key store: on-disk persistence for OpenPGP certs (rPGP version).
+//!
+//! File layout under the store directory:
+//!   `<FP>.pub.asc`    — armored public key (always present)
+//!   `<FP>.sec.asc`    — armored secret key (present for soft keys)
+//!   `<FP>.card.json`  — list of card AIDs associated with this key (optional)
+//!   `index.json`      — list of [`KeyEntry`] metadata
+
 use anyhow::{Context, Result};
-use openpgp::armor::{Kind as ArmorKind, Writer as ArmorWriter};
-use openpgp::crypto::Password;
-use openpgp::parse::Parse;
-use openpgp::policy::StandardPolicy;
-use openpgp::serialize::Serialize;
-use openpgp::Cert;
-use sequoia_openpgp as openpgp;
+use pgp::composed::{ArmorOptions, Deserializable, SignedPublicKey, SignedSecretKey};
+use pgp::types::KeyDetails;
 use serde::{Deserialize, Serialize as SerdeSerialize};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
-/// Role + algorithm summary for one key (primary or subkey) inside an OpenPGP
-/// cert.  Returned by [`KeyStore::list_subkeys`].
+/// Role + algorithm summary for one key component inside an OpenPGP cert.
 pub struct SubkeyMeta {
     /// Comma-separated role labels: any combination of `"certify"`, `"sign"`,
     /// `"auth"`, `"encrypt"`.  Never empty — falls back to `"unknown"`.
     pub role: String,
-    /// Algorithm name as reported by sequoia, e.g. `"RSA4096"`, `"EdDSA"`.
+    /// Algorithm name, e.g. `"RSA4096"`, `"Ed25519"`.
     pub algo: String,
-    /// OpenSSH `authorized_keys` line for this subkey, or `None` when the
-    /// algorithm has no SSH equivalent (e.g. ECDH encryption keys).
+    /// OpenSSH `authorized_keys` line for this key component, or `None` when the
+    /// algorithm has no SSH equivalent (e.g. ECDH encryption subkeys).
     pub openssh_key: Option<String>,
 }
 
@@ -29,15 +32,12 @@ pub struct KeyEntry {
     pub uid: String,
     pub algo: String,
     pub has_secret: bool,
-    /// Whether this key is active in the SSH agent.  Disabled keys are not
-    /// advertised by `ssh-add -l` and cannot be used for signing.
-    /// Defaults to `true` for backward compatibility with existing index files.
+    /// Whether this key is active in the SSH agent.  Defaults to `true` for
+    /// backward compatibility with existing index files.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Application Identifier strings of YubiKeys (or other OpenPGP cards)
-    /// that carry the secret key for this entry.  Empty for soft keys.
-    /// Populated at read-time from the companion `<fp>.card.json` file;
-    /// not stored in `index.json`.
+    /// Application Identifier strings of OpenPGP cards that carry this key.
+    /// Populated at read-time from the companion `.card.json` file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub card_idents: Vec<String>,
 }
@@ -66,36 +66,50 @@ impl KeyStore {
         })
     }
 
-    #[cfg_attr(
-        feature = "telemetry",
-        tracing::instrument(skip(self, cert, _passphrase), fields(fp))
-    )]
-    pub fn save(&self, cert: &Cert, _passphrase: Option<&str>) -> Result<()> {
-        let fp = cert.fingerprint().to_hex();
+    // ── write ─────────────────────────────────────────────────────────────────
 
+    /// Save a public cert (from a card import or exported key).
+    pub fn save_public(&self, cert: &SignedPublicKey) -> Result<()> {
+        let fp = fp_hex(cert);
         let pub_path = self.pub_path(&fp);
-        let mut pub_file = fs::File::create(&pub_path)
+        let armored = cert
+            .to_armored_bytes(ArmorOptions::default())
+            .context("Failed to armor public key")?;
+        fs::write(&pub_path, &armored)
             .with_context(|| format!("Cannot write public key to {:?}", pub_path))?;
-        let mut armor = ArmorWriter::new(&mut pub_file, ArmorKind::PublicKey)?;
-        cert.export(&mut armor)?;
-        armor.finalize()?;
         set_file_private(&pub_path)?;
-
-        if cert.is_tsk() {
-            let sec_path = self.sec_path(&fp);
-            let mut sec_file = fs::File::create(&sec_path)
-                .with_context(|| format!("Cannot write secret key to {:?}", sec_path))?;
-            let mut armor = ArmorWriter::new(&mut sec_file, ArmorKind::SecretKey)?;
-            cert.as_tsk().serialize(&mut armor)?;
-            armor.finalize()?;
-            set_file_private(&sec_path)?;
-        }
-
-        self.update_index(cert)?;
+        self.update_index_pub(cert)?;
         Ok(())
     }
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
+    /// Save a secret key (generated or imported soft key).
+    pub fn save_secret(&self, key: &SignedSecretKey) -> Result<()> {
+        // Always write the public side too.
+        let pub_cert = key.to_public_key();
+        self.save_public(&pub_cert)?;
+
+        let fp = fp_hex(&pub_cert);
+        let sec_path = self.sec_path(&fp);
+        let armored = key
+            .to_armored_bytes(ArmorOptions::default())
+            .context("Failed to armor secret key")?;
+        fs::write(&sec_path, &armored)
+            .with_context(|| format!("Cannot write secret key to {:?}", sec_path))?;
+        set_file_private(&sec_path)?;
+
+        // Mark as having a secret key in the index.
+        let mut entries = self.list().unwrap_or_default();
+        if let Some(e) = entries.iter_mut().find(|e| e.fingerprint == fp) {
+            e.has_secret = true;
+        }
+        fs::write(self.index_path(), serde_json::to_string_pretty(&entries)?)
+            .context("Failed to write key store index")?;
+
+        Ok(())
+    }
+
+    // ── read ──────────────────────────────────────────────────────────────────
+
     pub fn list(&self) -> Result<Vec<KeyEntry>> {
         let index_path = self.index_path();
         if !index_path.exists() {
@@ -104,7 +118,6 @@ impl KeyStore {
         let data = fs::read_to_string(&index_path)?;
         let mut entries: Vec<KeyEntry> =
             serde_json::from_str(&data).context("Failed to parse key store index")?;
-        // Populate card_idents from companion .card.json files (best-effort).
         for entry in &mut entries {
             let card_path = self.card_path(&entry.fingerprint);
             if card_path.exists() {
@@ -118,31 +131,38 @@ impl KeyStore {
         Ok(entries)
     }
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
-    pub fn find(&self, query: &str) -> Result<Cert> {
+    /// Load a public cert by fingerprint or UID substring.
+    pub fn find(&self, query: &str) -> Result<SignedPublicKey> {
         let entry = self.find_entry(query)?;
-        Cert::from_file(self.pub_path(&entry.fingerprint))
-            .with_context(|| format!("Cannot load public key for '{}'", query))
+        let path = self.pub_path(&entry.fingerprint);
+        let f = fs::File::open(&path)
+            .with_context(|| format!("Cannot open public key at {:?}", path))?;
+        let (key, _) = SignedPublicKey::from_armor_single(io::BufReader::new(f))
+            .with_context(|| format!("Failed to parse public key for '{}'", query))?;
+        Ok(key)
     }
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self, passphrase)))]
-    pub fn find_with_secret(&self, query: &str, passphrase: &str) -> Result<Cert> {
+    /// Load a secret key.  The passphrase (if any) is presented at signing
+    /// time via `SecretKey::unlock`; we do not decrypt in-place here.
+    pub fn find_with_secret(&self, query: &str, _passphrase: &str) -> Result<SignedSecretKey> {
         let entry = self.find_entry(query)?;
         anyhow::ensure!(entry.has_secret, "No secret key found for '{}'", query);
-        let cert = Cert::from_file(self.sec_path(&entry.fingerprint))
-            .with_context(|| format!("Cannot load secret key for '{}'", query))?;
-        decrypt_all_secrets(cert, passphrase)
-            .context("Failed to decrypt secret keys — wrong passphrase?")
+        let path = self.sec_path(&entry.fingerprint);
+        let f = fs::File::open(&path)
+            .with_context(|| format!("Cannot open secret key at {:?}", path))?;
+        let (key, _) = SignedSecretKey::from_armor_single(io::BufReader::new(f))
+            .with_context(|| format!("Failed to parse secret key for '{}'", query))?;
+        Ok(key)
     }
 
-    pub fn import(&self, data: &[u8]) -> Result<Cert> {
-        let cert = Cert::from_bytes(data)
-            .context("Failed to parse key — expected armored OpenPGP cert")?;
-        self.save(&cert, None)?;
+    /// Import a raw armored public key blob and save it to the store.
+    pub fn import(&self, data: &[u8]) -> Result<SignedPublicKey> {
+        let (cert, _) = SignedPublicKey::from_armor_single(io::Cursor::new(data))
+            .context("Failed to parse key — expected armored OpenPGP public key")?;
+        self.save_public(&cert)?;
         Ok(cert)
     }
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
     pub fn delete(&self, query: &str) -> Result<String> {
         let entry = self.find_entry(query)?;
         let fp = &entry.fingerprint;
@@ -157,6 +177,8 @@ impl KeyStore {
         Ok(fp.clone())
     }
 
+    // ── path helpers ──────────────────────────────────────────────────────────
+
     pub fn pub_file_path(&self, fingerprint: &str) -> PathBuf {
         self.pub_path(fingerprint)
     }
@@ -164,19 +186,25 @@ impl KeyStore {
         self.sec_path(fingerprint)
     }
 
-    /// Register a YubiKey (or other OpenPGP card) AID with a key entry.
-    ///
-    /// Creates or updates `<fingerprint>.card.json` alongside the public-key
-    /// file.  The same `fingerprint` can accumulate multiple `card_ident`
-    /// strings — useful when the user has two identical-content YubiKeys.
-    ///
-    /// `card_ident` should be the string returned by
-    /// `tx.application_identifier()?.ident()` from `openpgp-card-sequoia`.
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
+    fn pub_path(&self, fp: &str) -> PathBuf {
+        self.dir.join(format!("{fp}.pub.asc"))
+    }
+    fn sec_path(&self, fp: &str) -> PathBuf {
+        self.dir.join(format!("{fp}.sec.asc"))
+    }
+    fn card_path(&self, fp: &str) -> PathBuf {
+        self.dir.join(format!("{fp}.card.json"))
+    }
+    fn index_path(&self) -> PathBuf {
+        self.dir.join("index.json")
+    }
+
+    // ── card registration ─────────────────────────────────────────────────────
+
+    /// Associate a card AID with a key entry.
     pub fn register_card(&self, fingerprint: &str, card_ident: &str) -> Result<()> {
-        // Ensure the key is known before creating any file.
-        let fp = &self.find_entry(fingerprint)?.fingerprint;
-        let card_path = self.card_path(fp);
+        let fp = self.find_entry(fingerprint)?.fingerprint;
+        let card_path = self.card_path(&fp);
         let mut info = if card_path.exists() {
             let raw = fs::read_to_string(&card_path)
                 .with_context(|| format!("Cannot read {:?}", card_path))?;
@@ -195,18 +223,103 @@ impl KeyStore {
         Ok(())
     }
 
-    fn pub_path(&self, fp: &str) -> PathBuf {
-        self.dir.join(format!("{}.pub.asc", fp))
+    // ── agent enable/disable ──────────────────────────────────────────────────
+
+    pub fn set_key_enabled(&self, query: &str, enabled: bool) -> Result<()> {
+        let fp = self.find_entry(query)?.fingerprint;
+        let mut entries = self.list()?;
+        let found = entries.iter_mut().find(|e| e.fingerprint == fp);
+        anyhow::ensure!(found.is_some(), "Key '{}' not found in index", query);
+        found.unwrap().enabled = enabled;
+        fs::write(self.index_path(), serde_json::to_string_pretty(&entries)?)
+            .context("Failed to write key store index")?;
+        Ok(())
     }
-    fn sec_path(&self, fp: &str) -> PathBuf {
-        self.dir.join(format!("{}.sec.asc", fp))
+
+    // ── subkey info ───────────────────────────────────────────────────────────
+
+    /// Return role+algorithm info for each key component in the cert.
+    pub fn list_subkeys(&self, query: &str) -> Vec<SubkeyMeta> {
+        let cert = match self.find(query) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let mut out = Vec::new();
+
+        // Primary key — flags live in the first user-id self-signature.
+        {
+            let kf = cert
+                .details
+                .users
+                .first()
+                .and_then(|u| u.signatures.first())
+                .map(|sig| sig.key_flags())
+                .unwrap_or_default();
+            let mut roles: Vec<&str> = Vec::new();
+            if kf.certify() {
+                roles.push("certify");
+            }
+            if kf.sign() {
+                roles.push("sign");
+            }
+            let role = if roles.is_empty() {
+                "unknown".to_string()
+            } else {
+                roles.join("+")
+            };
+            let uid_comment = cert
+                .details
+                .users
+                .first()
+                .map(|u| String::from_utf8_lossy(u.id.id()).into_owned())
+                .unwrap_or_default();
+            let openssh_key = crate::ssh_agent::pub_params_to_openssh_string(
+                cert.primary_key.public_params(),
+                &uid_comment,
+            );
+            out.push(SubkeyMeta {
+                role,
+                algo: format!("{:?}", cert.primary_key.algorithm()),
+                openssh_key,
+            });
+        }
+
+        // Subkeys — flags live in the subkey binding signature.
+        for sk in &cert.public_subkeys {
+            let kf = sk
+                .signatures
+                .first()
+                .map(|sig| sig.key_flags())
+                .unwrap_or_default();
+            let mut roles: Vec<&str> = Vec::new();
+            if kf.sign() {
+                roles.push("sign");
+            }
+            if kf.authentication() {
+                roles.push("auth");
+            }
+            if kf.encrypt_comms() {
+                roles.push("encrypt");
+            }
+            let role = if roles.is_empty() {
+                "unknown".to_string()
+            } else {
+                roles.join("+")
+            };
+            let openssh_key =
+                crate::ssh_agent::pub_params_to_openssh_string(sk.public_params(), "");
+            out.push(SubkeyMeta {
+                role,
+                algo: format!("{:?}", sk.algorithm()),
+                openssh_key,
+            });
+        }
+
+        out
     }
-    fn card_path(&self, fp: &str) -> PathBuf {
-        self.dir.join(format!("{}.card.json", fp))
-    }
-    fn index_path(&self) -> PathBuf {
-        self.dir.join("index.json")
-    }
+
+    // ── private helpers ───────────────────────────────────────────────────────
 
     fn find_entry(&self, query: &str) -> Result<KeyEntry> {
         let q = query.to_lowercase();
@@ -224,137 +337,62 @@ impl KeyStore {
         }
     }
 
-    /// Enable or disable a key in the agent.
-    ///
-    /// Disabled keys are not advertised by `ssh-add -l` and cannot be used for
-    /// signing until re-enabled.  The key files are not modified.
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip(self)))]
-    pub fn set_key_enabled(&self, query: &str, enabled: bool) -> Result<()> {
-        let fp = self.find_entry(query)?.fingerprint;
-        let mut entries = self.list()?;
-        let found = entries.iter_mut().find(|e| e.fingerprint == fp);
-        anyhow::ensure!(found.is_some(), "Key '{}' not found in index", query);
-        found.unwrap().enabled = enabled;
-        fs::write(self.index_path(), serde_json::to_string_pretty(&entries)?)
-            .context("Failed to write key store index")?;
-        Ok(())
-    }
-
-    /// Return role+algorithm info for every key component (primary + subkeys)
-    /// in the cert identified by `query`.  Returns an empty `Vec` (not an
-    /// error) when the cert cannot be read, so callers can degrade gracefully.
-    pub fn list_subkeys(&self, query: &str) -> Vec<SubkeyMeta> {
-        let cert = match self.find(query) {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-        let policy = StandardPolicy::new();
-        // Derive comment once from first UID.
-        let comment = cert
-            .userids()
-            .next()
-            .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
-            .unwrap_or_default();
-
-        cert.keys()
-            .with_policy(&policy, None)
-            .map(|ka| {
-                let mut roles: Vec<&str> = Vec::new();
-                if ka.for_certification() {
-                    roles.push("certify");
-                }
-                if ka.for_signing() {
-                    roles.push("sign");
-                }
-                if ka.for_authentication() {
-                    roles.push("auth");
-                }
-                if ka.for_storage_encryption() || ka.for_transport_encryption() {
-                    roles.push("encrypt");
-                }
-                let role = if roles.is_empty() {
-                    "unknown".to_string()
-                } else {
-                    roles.join("+")
-                };
-                let openssh_key =
-                    crate::ssh_agent::mpi_to_openssh_string(ka.key().mpis(), &comment);
-                SubkeyMeta {
-                    role,
-                    algo: ka.key().pk_algo().to_string(),
-                    openssh_key,
-                }
-            })
-            .collect()
-    }
-
-    fn update_index(&self, cert: &Cert) -> Result<()> {
-        let fp = cert.fingerprint().to_hex();
+    fn update_index_pub(&self, cert: &SignedPublicKey) -> Result<()> {
+        let fp = fp_hex(cert);
         let uid = cert
-            .userids()
-            .next()
-            .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
+            .details
+            .users
+            .first()
+            .map(|u| String::from_utf8_lossy(u.id.id()).into_owned())
             .unwrap_or_default();
-        let algo = cert.primary_key().key().pk_algo().to_string();
+        let algo = format!("{:?}", cert.primary_key.algorithm());
+
         let mut entries = self.list().unwrap_or_default();
-        // Preserve `enabled` if the key already exists.
         let was_enabled = entries
             .iter()
             .find(|e| e.fingerprint == fp)
             .map(|e| e.enabled)
             .unwrap_or(true);
+        let had_secret = entries
+            .iter()
+            .find(|e| e.fingerprint == fp)
+            .map(|e| e.has_secret)
+            .unwrap_or(false);
         entries.retain(|e| e.fingerprint != fp);
         entries.push(KeyEntry {
             fingerprint: fp,
             uid,
             algo,
-            has_secret: cert.is_tsk(),
+            has_secret: had_secret,
             enabled: was_enabled,
             card_idents: Vec::new(),
         });
-        fs::write(self.index_path(), serde_json::to_string_pretty(&entries)?)?;
+        fs::write(self.index_path(), serde_json::to_string_pretty(&entries)?)
+            .context("Failed to write key store index")?;
         Ok(())
     }
 }
 
-fn decrypt_all_secrets(cert: Cert, passphrase: &str) -> Result<Cert> {
-    let pw: Password = passphrase.into();
-    let mut packets: Vec<openpgp::Packet> = Vec::new();
-    let primary = cert
-        .primary_key()
-        .key()
-        .clone()
-        .parts_into_secret()
-        .context("Primary key has no secret material")?;
-    packets.push(if primary.secret().is_encrypted() {
-        primary
-            .decrypt_secret(&pw)
-            .context("Failed to decrypt primary key — wrong passphrase?")?
-            .into()
-    } else {
-        primary.into()
-    });
-    for ka in cert.keys().subkeys().secret() {
-        let key = ka
-            .key()
-            .clone()
-            .parts_into_secret()
-            .context("Subkey has no secret material")?;
-        packets.push(if key.secret().is_encrypted() {
-            key.decrypt_secret(&pw)
-                .context("Failed to decrypt subkey — wrong passphrase?")?
-                .into()
-        } else {
-            key.into()
-        });
-    }
-    cert.insert_packets(packets)
-        .context("Failed to rebuild cert with decrypted secrets")
+// ── export helpers ────────────────────────────────────────────────────────────
+
+pub fn export_pub(cert: &SignedPublicKey) -> Result<String> {
+    cert.to_armored_string(ArmorOptions::default())
+        .context("Failed to armor public key")
 }
 
-// ── File-permission helpers ───────────────────────────────────────────────────
+pub fn export_priv(key: &SignedSecretKey) -> Result<String> {
+    key.to_armored_string(ArmorOptions::default())
+        .context("Failed to armor secret key")
+}
 
-/// Set a key file to owner-read/write only (0o600).  No-op on non-Unix.
+// ── internal utilities ────────────────────────────────────────────────────────
+
+fn fp_hex(cert: &SignedPublicKey) -> String {
+    hex::encode(cert.fingerprint().as_bytes()).to_uppercase()
+}
+
+// ── file-permission helpers ───────────────────────────────────────────────────
+
 fn set_file_private(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -369,7 +407,6 @@ fn set_file_private(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Set the key store directory to owner-only access (0o700).  No-op on non-Unix.
 fn set_dir_private(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -382,21 +419,4 @@ fn set_dir_private(path: &Path) -> Result<()> {
         let _ = path;
     }
     Ok(())
-}
-
-pub fn export_pub(cert: &Cert) -> Result<String> {
-    let mut out = Vec::new();
-    let mut armor = ArmorWriter::new(&mut out, ArmorKind::PublicKey)?;
-    cert.export(&mut armor)?;
-    armor.finalize()?;
-    Ok(String::from_utf8(out)?)
-}
-
-pub fn export_priv(cert: &Cert) -> Result<String> {
-    anyhow::ensure!(cert.is_tsk(), "No secret key material available");
-    let mut out = Vec::new();
-    let mut armor = ArmorWriter::new(&mut out, ArmorKind::SecretKey)?;
-    cert.as_tsk().serialize(&mut armor)?;
-    armor.finalize()?;
-    Ok(String::from_utf8(out)?)
 }

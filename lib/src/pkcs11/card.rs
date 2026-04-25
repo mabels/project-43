@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
+use card_backend::CardBackend;
 use card_backend_pcsc::PcscBackend;
-use openpgp_card_sequoia::types::KeyType;
-use openpgp_card_sequoia::{state::Open, Card};
+use openpgp_card::ocard::KeyType;
+use openpgp_card::state::{Open, Transaction};
+use openpgp_card::Card;
+use secrecy::SecretString;
 
 /// Summary of a connected OpenPGP card, returned by [`list_connected_cards`].
 pub struct ConnectedCard {
@@ -31,9 +34,12 @@ pub fn list_card() -> Result<()> {
         println!("=== OpenPGP Card ===");
         println!("  Ident:   {}", aid.ident());
 
-        if let Ok(name) = tx.cardholder_name() {
-            if !name.is_empty() {
-                println!("  Name:    {}", name);
+        if let Ok(chd) = tx.cardholder_related_data() {
+            if let Some(name_bytes) = chd.name() {
+                let name = String::from_utf8_lossy(name_bytes);
+                if !name.is_empty() {
+                    println!("  Name:    {name}");
+                }
             }
         }
 
@@ -79,7 +85,7 @@ pub fn list_card() -> Result<()> {
                     KeyType::Authentication => "Auth",
                     _ => "Other",
                 };
-                println!("    {}: {}", label, algo);
+                println!("    {label}: {algo:?}");
             }
         }
 
@@ -111,7 +117,13 @@ pub fn list_connected_cards() -> Result<Vec<ConnectedCard>> {
             .application_identifier()
             .context("Failed to read AID")?
             .ident();
-        let cardholder_name = tx.cardholder_name().unwrap_or_default();
+
+        let cardholder_name = tx
+            .cardholder_related_data()
+            .ok()
+            .and_then(|chd| chd.name().map(|b| String::from_utf8_lossy(b).into_owned()))
+            .unwrap_or_default();
+
         let (sig_fingerprint, auth_fingerprint) = tx
             .fingerprints()
             .map(|fps| {
@@ -140,7 +152,7 @@ pub fn list_connected_cards() -> Result<Vec<ConnectedCard>> {
 /// opened or does not expose PW status bytes.
 pub fn card_pin_retries(ident: Option<&str>) -> Result<u8> {
     let mut card = open_card(ident)?;
-    let tx = card
+    let mut tx = card
         .transaction()
         .context("Failed to open card transaction")?;
     let pw = tx
@@ -162,27 +174,26 @@ pub fn open_first_card() -> Result<Card<Open>> {
 /// Open a specific card by its AID ident string, or the first card if `ident`
 /// is `None`.
 pub fn open_card(ident: Option<&str>) -> Result<Card<Open>> {
-    let wanted = match ident {
-        None => return open_first_card(),
-        Some(s) => s,
-    };
-
-    let backends =
-        PcscBackend::cards(None).context("Failed to list PC/SC cards — is pcscd running?")?;
-    for backend in backends {
-        let backend = backend.context("Failed to open card backend")?;
-        let mut card = Card::<Open>::new(backend).context("Failed to open card")?;
-        {
-            let tx = card.transaction().context("Failed to open transaction")?;
-            let aid_ident = tx
-                .application_identifier()
-                .context("Failed to read AID")?
-                .ident();
-            if aid_ident != wanted {
-                continue;
-            }
+    match ident {
+        None => open_first_card(),
+        Some(wanted) => {
+            let backends = PcscBackend::cards(None)
+                .context("Failed to list PC/SC cards — is pcscd running?")?
+                .map(|r| r.map(|b| Box::new(b) as Box<dyn CardBackend + Send + Sync>));
+            Card::<Open>::open_by_ident(backends, wanted)
+                .context(format!("No connected card with ident '{wanted}'"))
         }
-        return Ok(card);
     }
-    anyhow::bail!("No connected card with ident '{}'", wanted)
+}
+
+/// Wrap a raw PIN string as a `SecretString` for the card API.
+pub(crate) fn pin_to_secret(pin: &str) -> SecretString {
+    SecretString::new(pin.to_owned().into())
+}
+
+/// Open a transaction on an already-opened `Card<Open>`.
+#[allow(dead_code)]
+pub(crate) fn begin_tx(card: &mut Card<Open>) -> Result<Card<Transaction<'_>>> {
+    card.transaction()
+        .context("Failed to open card transaction")
 }

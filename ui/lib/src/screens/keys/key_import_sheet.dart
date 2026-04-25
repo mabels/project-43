@@ -66,7 +66,7 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
     final home = Platform.environment['HOME'] ?? '';
     final initial = _type == KeyImportType.ssh ? '$home/.ssh' : home;
 
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.any,
       initialDirectory: initial.isNotEmpty ? initial : null,
       dialogTitle: _type == KeyImportType.ssh

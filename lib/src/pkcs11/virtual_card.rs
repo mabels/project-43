@@ -6,9 +6,9 @@ use crate::pkcs11::soft_ops;
 
 /// Trait that abstracts the private-key operations of an OpenPGP card.
 ///
-/// Both the real [`PcscCard`] (wrapping `openpgp-card-sequoia`) and the
-/// in-process [`VirtualCard`] implement this, so tests can exercise the full
-/// operations pipeline without physical hardware.
+/// Both the real `PcscCard` (wrapping `openpgp-card-rpgp`) and the in-process
+/// [`VirtualCard`] implement this, so tests can exercise the full operations
+/// pipeline without physical hardware.
 pub trait CardOps {
     /// Sign `data` and return an armored detached signature.
     fn card_sign(&self, data: &[u8]) -> Result<String>;

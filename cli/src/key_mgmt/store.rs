@@ -1,5 +1,6 @@
 use anyhow::Result;
 use p43::key_store::store::{self, KeyStore};
+use pgp::types::KeyDetails as _;
 use std::path::Path;
 
 pub fn run_list(ks: &KeyStore) -> Result<()> {
@@ -40,9 +41,12 @@ pub fn run_export_priv(ks: &KeyStore, key: &str) -> Result<()> {
 
 pub fn run_import(ks: &KeyStore, file: &Path) -> Result<()> {
     let cert = ks.import(&std::fs::read(file)?)?;
-    println!("Imported: {}", cert.fingerprint());
-    for uid in cert.userids() {
-        println!("  UID: {}", uid.userid());
+    println!(
+        "Imported: {}",
+        hex::encode(cert.fingerprint().as_bytes()).to_uppercase()
+    );
+    for signed_user in &cert.details.users {
+        println!("  UID: {}", String::from_utf8_lossy(signed_user.id.id()));
     }
     Ok(())
 }

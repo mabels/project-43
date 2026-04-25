@@ -2,6 +2,7 @@
 ///   p43::key_store::keygen  →  KeyStore  →  p43::pkcs11::soft_ops
 use p43::key_store::{keygen, store};
 use p43::pkcs11::{ops, soft_ops};
+use pgp::types::KeyDetails as _;
 use tempfile::TempDir;
 
 struct TestKey {
@@ -15,8 +16,8 @@ impl TestKey {
         let dir = tempfile::tempdir().unwrap();
         let ks = store::KeyStore::open(dir.path()).unwrap();
         let cert = keygen::generate(uid, "ed25519", passphrase).unwrap();
-        let fingerprint = cert.fingerprint().to_hex();
-        ks.save(&cert, None).unwrap();
+        let fingerprint = format!("{:X}", cert.fingerprint());
+        ks.save_secret(&cert).unwrap();
         TestKey {
             _dir: dir,
             ks,
@@ -124,37 +125,41 @@ fn store_save_list_find_delete() {
     let dir = tempfile::tempdir().unwrap();
     let ks = store::KeyStore::open(dir.path()).unwrap();
     let cert = keygen::generate("Alice <a@test>", "ed25519", None).unwrap();
-    ks.save(&cert, None).unwrap();
+    ks.save_secret(&cert).unwrap();
 
     let entries = ks.list().unwrap();
     assert_eq!(entries.len(), 1);
     assert!(entries[0].uid.contains("a@test"));
 
     let found = ks.find("alice").unwrap();
-    assert_eq!(found.fingerprint(), cert.fingerprint());
+    assert_eq!(
+        format!("{:X}", found.fingerprint()),
+        format!("{:X}", cert.to_public_key().fingerprint())
+    );
 
     ks.delete("alice").unwrap();
     assert_eq!(ks.list().unwrap().len(), 0);
 }
 
+/// `find_with_secret` loads the key back from disk; verify it can actually sign
+/// by running a full soft_ops sign+verify round-trip with the on-disk paths.
 #[test]
-fn store_find_with_secret_and_decrypt() {
+fn store_find_with_secret_and_sign() {
     let dir = tempfile::tempdir().unwrap();
     let ks = store::KeyStore::open(dir.path()).unwrap();
     let cert = keygen::generate("Bob <b@test>", "ed25519", Some("bpw")).unwrap();
-    ks.save(&cert, None).unwrap();
+    ks.save_secret(&cert).unwrap();
 
-    let decrypted = ks.find_with_secret("bob", "bpw").unwrap();
-    let policy = sequoia_openpgp::policy::StandardPolicy::new();
-    let kp = decrypted
-        .keys()
-        .with_policy(&policy, None)
-        .for_signing()
-        .secret()
-        .next()
-        .unwrap()
-        .key()
-        .clone()
-        .into_keypair();
-    assert!(kp.is_ok());
+    // find_with_secret must succeed (the key lives on disk in armored form).
+    let loaded = ks.find_with_secret("bob", "bpw").unwrap();
+    // The loaded key round-trips to the same fingerprint.
+    assert_eq!(
+        format!("{:X}", loaded.to_public_key().fingerprint()),
+        format!("{:X}", cert.to_public_key().fingerprint()),
+    );
+
+    // A real sign+verify exercises the passphrase unlock path end-to-end.
+    let fp = format!("{:X}", cert.to_public_key().fingerprint());
+    let sig = soft_ops::sign(b"bob-test", &ks.sec_file_path(&fp), "bpw").unwrap();
+    ops::verify(b"bob-test", sig.as_bytes(), &ks.pub_file_path(&fp)).unwrap();
 }

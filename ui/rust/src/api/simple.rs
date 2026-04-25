@@ -168,8 +168,8 @@ fn credential_cache() -> &'static Mutex<p43::credential_cache::CredentialCache> 
 //
 // Cleared by `bus_lock_session` and `mx_clear_caches`.
 
-static AUTHORITY_SESSION: OnceLock<Mutex<Option<(p43::bus::AuthorityKey, Vec<u8>)>>> =
-    OnceLock::new();
+type AuthoritySession = Mutex<Option<(p43::bus::AuthorityKey, Vec<u8>)>>;
+static AUTHORITY_SESSION: OnceLock<AuthoritySession> = OnceLock::new();
 
 fn authority_session() -> &'static Mutex<Option<(p43::bus::AuthorityKey, Vec<u8>)>> {
     AUTHORITY_SESSION.get_or_init(|| Mutex::new(None))
@@ -395,7 +395,7 @@ pub fn generate_key(
 ) -> anyhow::Result<Vec<KeyInfo>> {
     let ks = open_store()?;
     let cert = keygen::generate(&uid, &algo, passphrase.as_deref())?;
-    ks.save(&cert, None)?;
+    ks.save_secret(&cert)?;
     let store_dir = default_store_dir();
     Ok(ks
         .list()?
@@ -777,6 +777,7 @@ pub enum AppMessage {
 ///
 /// The `agent_since` pointer (persisted in `matrix-config.json`) is respected
 /// and updated on every sync batch so reconnects never replay seen messages.
+#[allow(clippy::question_mark)]
 #[frb]
 pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
     tokio_rt().spawn(async move {
@@ -974,6 +975,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
 /// (soft key), following the same priority as other operations:
 ///   card=true  → PIN  (YK_PIN env or prompt)
 ///   card=false → passphrase (YK_PASSPHRASE env or prompt)
+#[allow(clippy::too_many_arguments)]
 #[frb]
 pub async fn mx_respond_csr(
     room_id: String,

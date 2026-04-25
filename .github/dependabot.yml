@@ -24,6 +24,11 @@ updates:
     ignore:
       # Vendored — updated manually when upstream fixes the recursion-limit bug.
       - dependency-name: matrix-sdk
+      # sequoia-openpgp 2.x cannot coexist with openpgp-card-sequoia 0.2.x,
+      # which still depends on sequoia-openpgp 1.x and re-exports its types.
+      # Re-enable major bumps once openpgp-card-sequoia ships a 2.x release.
+      - dependency-name: sequoia-openpgp
+        update-types: ["version-update:semver-major"]
 
   # ── Flutter / Dart ──────────────────────────────────────────────────────────
   - package-ecosystem: pub

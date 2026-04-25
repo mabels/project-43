@@ -62,7 +62,7 @@ class BiometricService {
     mOptions: MacOsOptions(
       accessibility: KeychainAccessibility.unlocked_this_device,
     ),
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    aOptions: AndroidOptions(),
   );
 
   // ── Key helpers ─────────────────────────────────────────────────────────────
@@ -181,7 +181,7 @@ class BiometricService {
     try {
       final ok = await _auth.authenticate(
         localizedReason: reason,
-        options: const AuthenticationOptions(biometricOnly: false),
+        biometricOnly: false,
       );
       if (!ok) return null;
       final cred = await _storage.read(key: _credKey(fingerprint));

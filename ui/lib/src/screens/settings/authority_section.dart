@@ -1134,7 +1134,7 @@ class _AuthorityExportDialog extends StatelessWidget {
   }
 
   Future<void> _saveFile(BuildContext context) async {
-    final savePath = await FilePicker.platform.saveFile(
+    final savePath = await FilePicker.saveFile(
       dialogTitle: 'Save authority key bundle',
       fileName: 'p43-authority.bundle',
     );
@@ -1379,7 +1379,7 @@ class _AuthorityImportDialogState extends State<_AuthorityImportDialog> {
   // ── File picker ─────────────────────────────────────────────────────────
 
   Future<void> _pickFile() async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.any,
       dialogTitle: 'Open authority key bundle',
       withData: true,

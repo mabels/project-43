@@ -16,14 +16,17 @@
 //! | `authority.pub.cbor`    | CBOR [`AuthorityPub`] — Ed25519 + X25519 pubkeys|
 //! | `authority.key.enc`     | OpenPGP-encrypted CBOR [`AuthoritySecret`]      |
 //! | `authority.cert.cbor`   | Self-issued [`DeviceCert`] for the authority    |
+//!
+//! **Format note:** `authority.key.enc` is now an armored PGP message
+//! (ASCII-armored, `-----BEGIN PGP MESSAGE-----`).  Files created with the
+//! old sequoia-based `p43` are in raw binary format and must be re-sealed.
 
 use anyhow::{Context, Result};
-use openpgp::parse::Parse;
-use openpgp::policy::StandardPolicy;
-use openpgp::serialize::stream::{Encryptor2, LiteralWriter, Message};
-use sequoia_openpgp as openpgp;
+use pgp::composed::{ArmorOptions, Deserializable, MessageBuilder, SignedPublicKey};
+use pgp::crypto::sym::SymmetricKeyAlgorithm;
+use rand::thread_rng;
 use serde::{Deserialize, Serialize};
-use std::io::Write as _;
+use std::io::{self, BufReader};
 use std::path::Path;
 use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
@@ -129,15 +132,7 @@ struct AuthoritySecret {
 /// Generate a fresh authority keypair and encrypt both private scalars to one
 /// or more OpenPGP recipient certs.
 ///
-/// This is a **public-key operation** — no passphrase or PIN required.
-/// Pass multiple `recipient_paths` to support multiple unlock keys
-/// (e.g. work YubiKey + backup YubiKey).
-///
 /// Returns `(AuthorityKey, AuthorityPub, encrypted_blob)`.
-///
-/// The `AuthorityKey` is returned in memory so callers can immediately use it
-/// (e.g. to self-issue a cert) before dropping it.  It is never written to
-/// disk in plaintext.
 pub fn generate_and_encrypt(
     recipient_paths: &[&Path],
 ) -> Result<(AuthorityKey, AuthorityPub, Vec<u8>)> {
@@ -159,10 +154,7 @@ pub fn generate_and_encrypt(
     Ok((key, pub_key, encrypted))
 }
 
-/// Re-seal an existing `authority.key.enc` blob to a new set of recipients.
-///
-/// Unlocks with the provided `decrypted_secret` bytes (call one of the
-/// `unlock_*` functions first to obtain them, then re-seal to the new set).
+/// Re-seal an existing authority key to a new set of recipients.
 pub fn reseal(unlocked: &AuthorityKey, recipient_paths: &[&Path]) -> Result<Vec<u8>> {
     let secret = AuthoritySecret {
         version: 1,
@@ -193,42 +185,39 @@ pub fn unlock_card(encrypted: &[u8], pin: &str, ident: Option<&str>) -> Result<A
 
 // ── Import validation helpers ─────────────────────────────────────────────────
 
-/// Parse PKESK headers from an OpenPGP-encrypted blob and return every
-/// recipient key handle (as [`openpgp::KeyHandle`]) without decrypting anything.
-fn extract_pkesk_recipients(key_enc: &[u8]) -> Result<Vec<openpgp::KeyHandle>> {
-    use openpgp::packet::Packet;
-    use openpgp::parse::{PacketParser, PacketParserResult};
-
-    let mut recipients = Vec::new();
-    let mut ppr =
-        PacketParser::from_bytes(key_enc).context("parse OpenPGP packets from key_enc")?;
-    while let PacketParserResult::Some(pp) = ppr {
-        if let Packet::PKESK(pkesk) = &pp.packet {
-            // recipient() returns &KeyID; wrap in KeyHandle for aliases() checks.
-            recipients.push(openpgp::KeyHandle::from(pkesk.recipient().clone()));
-        }
-        let (_, next_ppr) = pp.recurse().context("advance packet parser")?;
-        ppr = next_ppr;
-    }
-    Ok(recipients)
-}
-
 /// Check which keys in `store` can decrypt `key_enc`.
 ///
-/// Returns the UIDs of all matching keys.  Errors if the blob has no PKESK
-/// packets or none of the store keys match.
+/// Parses the PKESK headers from the encrypted blob and checks each key entry
+/// in the store.  Returns the UIDs of all matching keys.
 pub fn check_importable(
     key_enc: &[u8],
     store: &crate::key_store::store::KeyStore,
 ) -> Result<Vec<String>> {
-    let recipients = extract_pkesk_recipients(key_enc)?;
+    use pgp::composed::{Esk, Message};
+
+    let msg = parse_pgp_message(key_enc).context("parse OpenPGP message from key_enc")?;
+
+    // Collect PKESK packets.
+    let pkesk_list: Vec<_> = match &msg {
+        Message::Encrypted { esk, .. } => esk
+            .iter()
+            .filter_map(|e| {
+                if let Esk::PublicKeyEncryptedSessionKey(p) = e {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => vec![],
+    };
+
     anyhow::ensure!(
-        !recipients.is_empty(),
+        !pkesk_list.is_empty(),
         "no PKESK packets found — this does not look like an encrypted authority bundle"
     );
 
     let entries = store.list()?;
-    let policy = StandardPolicy::new();
     let mut matching = Vec::new();
 
     for entry in &entries {
@@ -236,18 +225,17 @@ pub fn check_importable(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let matches = cert
-            .keys()
-            .with_policy(&policy, None)
-            .supported()
-            .alive()
-            .revoked(false)
-            .for_transport_encryption()
-            .any(|key| {
-                let handle = key.key_handle();
-                recipients.iter().any(|r| r.aliases(&handle))
-            });
-        if matches {
+        // Check if any encryption subkey in this cert matches a PKESK recipient.
+        let is_match = cert
+            .public_subkeys
+            .iter()
+            .filter(|sk| {
+                sk.signatures
+                    .iter()
+                    .any(|sig| sig.key_flags().encrypt_comms())
+            })
+            .any(|sk| pkesk_list.iter().any(|pkesk| pkesk.match_identity(sk)));
+        if is_match {
             matching.push(entry.uid.clone());
         }
     }
@@ -279,15 +267,31 @@ pub fn key_seal_status(
     enc_path: &std::path::Path,
     store: &crate::key_store::store::KeyStore,
 ) -> Result<Vec<KeySealStatus>> {
+    use pgp::composed::{Esk, Message};
+
     if !enc_path.exists() {
         return Ok(vec![]);
     }
 
     let key_enc = std::fs::read(enc_path).context("read authority.key.enc")?;
-    let recipients = extract_pkesk_recipients(&key_enc)?;
+
+    let msg = parse_pgp_message(&key_enc).context("parse authority.key.enc")?;
+
+    let pkesk_list: Vec<_> = match &msg {
+        Message::Encrypted { esk, .. } => esk
+            .iter()
+            .filter_map(|e| {
+                if let Esk::PublicKeyEncryptedSessionKey(p) = e {
+                    Some(p)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => vec![],
+    };
 
     let entries = store.list()?;
-    let policy = StandardPolicy::new();
     let mut result = Vec::new();
 
     for entry in &entries {
@@ -296,16 +300,14 @@ pub fn key_seal_status(
             Err(_) => continue,
         };
         let is_sealed = cert
-            .keys()
-            .with_policy(&policy, None)
-            .supported()
-            .alive()
-            .revoked(false)
-            .for_transport_encryption()
-            .any(|key| {
-                let handle = key.key_handle();
-                recipients.iter().any(|r| r.aliases(&handle))
-            });
+            .public_subkeys
+            .iter()
+            .filter(|sk| {
+                sk.signatures
+                    .iter()
+                    .any(|sig| sig.key_flags().encrypt_comms())
+            })
+            .any(|sk| pkesk_list.iter().any(|pkesk| pkesk.match_identity(sk)));
         result.push(KeySealStatus {
             fingerprint: entry.fingerprint.clone(),
             uid: entry.uid.clone(),
@@ -319,16 +321,29 @@ pub fn key_seal_status(
 
 // ── Internals ─────────────────────────────────────────────────────────────────
 
+/// Parse an OpenPGP `Message` from `bytes`, accepting both ASCII-armored
+/// (new rPGP format) and raw binary (old sequoia format) encodings.
+fn parse_pgp_message(bytes: &[u8]) -> Result<pgp::composed::Message<'_>> {
+    use pgp::composed::Message;
+
+    // Try ASCII armor first (new format written by rPGP).
+    if let Ok((msg, _)) = Message::from_armor(BufReader::new(io::Cursor::new(bytes))) {
+        return Ok(msg);
+    }
+
+    // Fall back to raw binary (OpenPGP packet stream written by sequoia).
+    Message::from_bytes(bytes).context(
+        "authority.key.enc is neither valid ASCII-armored PGP nor a raw binary PGP message; \
+         the file may be corrupted — run `p43 authority reseal` to recreate it",
+    )
+}
+
 fn parse_secret(plain: Vec<u8>) -> Result<AuthorityKey> {
     // Support both the old format (raw 32-byte Ed25519 scalar) and the new
     // CBOR format so existing `authority.key.enc` files keep working.
     if plain.len() == 32 {
-        // Legacy: Ed25519 scalar only — X25519 not available, derive from scalar.
-        // This is a best-effort upgrade path; re-run `bus init --force` to get
-        // the full keypair.
         let arr: [u8; 32] = plain.try_into().unwrap();
         let signing = ed25519_dalek::SigningKey::from_bytes(&arr);
-        // Derive X25519 from Ed25519 scalar (non-standard but deterministic).
         let ecdh = StaticSecret::from(signing.to_bytes());
         return Ok(AuthorityKey { signing, ecdh });
     }
@@ -355,50 +370,41 @@ fn parse_secret(plain: Vec<u8>) -> Result<AuthorityKey> {
 }
 
 /// OpenPGP-encrypt `plaintext` to the encryption subkeys of all certs at
-/// `cert_paths`.  Any single recipient can decrypt.
+/// `cert_paths`.  Produces an ASCII-armored PGP message.
 fn seal_to_certs(plaintext: &[u8], cert_paths: &[&Path]) -> Result<Vec<u8>> {
     anyhow::ensure!(
         !cert_paths.is_empty(),
         "at least one recipient cert required"
     );
 
-    let policy = StandardPolicy::new();
+    let mut builder = MessageBuilder::from_bytes("", plaintext.to_vec())
+        .seipd_v1(thread_rng(), SymmetricKeyAlgorithm::AES256);
 
-    // Load all certs first so they outlive the key-iterator borrows.
-    let certs: Vec<(openpgp::Cert, &Path)> = cert_paths
-        .iter()
-        .map(|path| {
-            openpgp::Cert::from_file(path)
-                .with_context(|| format!("load recipient cert from {}", path.display()))
-                .map(|cert| (cert, *path))
-        })
-        .collect::<Result<_>>()?;
+    for path in cert_paths {
+        let f = std::fs::File::open(path)
+            .with_context(|| format!("load recipient cert from {}", path.display()))?;
+        let (cert, _) = SignedPublicKey::from_armor_single(BufReader::new(f))
+            .with_context(|| format!("parse cert from {}", path.display()))?;
 
-    let mut all_recipients = Vec::new();
-    for (cert, path) in &certs {
-        let keys: Vec<_> = cert
-            .keys()
-            .with_policy(&policy, None)
-            .supported()
-            .alive()
-            .revoked(false)
-            .for_transport_encryption()
-            .collect();
-        anyhow::ensure!(
-            !keys.is_empty(),
-            "no encryption subkey found in cert at {}",
-            path.display()
-        );
-        all_recipients.extend(keys);
+        let enc_subkey = cert
+            .public_subkeys
+            .iter()
+            .find(|sk| {
+                sk.signatures
+                    .iter()
+                    .any(|sig| sig.key_flags().encrypt_comms())
+            })
+            .with_context(|| format!("no encryption subkey found in cert at {}", path.display()))?;
+
+        builder
+            .encrypt_to_key(thread_rng(), enc_subkey)
+            .map_err(|e| anyhow::anyhow!("Encryption failed for {}: {e}", path.display()))?;
     }
 
-    let mut output = Vec::new();
-    let message = Message::new(&mut output);
-    let message = Encryptor2::for_recipients(message, all_recipients)
-        .build()
-        .context("build OpenPGP encryptor")?;
-    let mut literal = LiteralWriter::new(message).build()?;
-    literal.write_all(plaintext)?;
-    literal.finalize()?;
-    Ok(output)
+    // Produce ASCII-armored output.  Both soft_ops::decrypt and
+    // ops::decrypt_with_card use Message::from_armor to parse the blob.
+    let armored = builder
+        .to_armored_string(thread_rng(), ArmorOptions::default())
+        .map_err(|e| anyhow::anyhow!("Failed to build encrypted message: {e}"))?;
+    Ok(armored.into_bytes())
 }

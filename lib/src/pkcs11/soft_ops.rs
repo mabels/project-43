@@ -1,275 +1,188 @@
+//! Software-key PGP operations using rPGP.
+//!
+//! These back [`VirtualCard`] in tests and are the non-card path for sign /
+//! encrypt / decrypt when hardware is absent.
+
 use anyhow::{Context, Result};
-use openpgp::armor::{Kind as ArmorKind, Writer as ArmorWriter};
-use openpgp::crypto::{Password, SessionKey};
-use openpgp::parse::stream::{
-    DecryptionHelper, DecryptorBuilder, MessageLayer, MessageStructure, VerificationHelper,
+use pgp::composed::{
+    ArmorOptions, Deserializable, DetachedSignature, Message, MessageBuilder, SignedPublicKey,
+    SignedSecretKey, VerificationResult,
 };
-use openpgp::parse::Parse;
-use openpgp::policy::StandardPolicy;
-use openpgp::serialize::stream::*;
-use openpgp::types::SymmetricAlgorithm;
-use openpgp::{
-    packet::{PKESK, SKESK},
-    Cert, Fingerprint, KeyHandle,
-};
-use sequoia_openpgp as openpgp;
-use std::io::{self, Write};
+use pgp::crypto::hash::HashAlgorithm;
+use pgp::crypto::sym::SymmetricKeyAlgorithm;
+use pgp::types::{Password, VerifyingKey};
+use rand::thread_rng;
+use std::io::{self, BufReader, Cursor, Read};
 use std::path::Path;
 
 use crate::pkcs11::ops::load_cert;
 
-fn decrypt_all_secrets(cert: Cert, passphrase: &str) -> Result<Cert> {
-    let pw: Password = passphrase.into();
-    let mut packets: Vec<openpgp::Packet> = Vec::new();
-    let primary = cert
-        .primary_key()
-        .key()
-        .clone()
-        .parts_into_secret()
-        .context("Primary key has no secret material")?;
-    packets.push(
-        primary
-            .decrypt_secret(&pw)
-            .context("Failed to decrypt primary key")?
-            .into(),
-    );
-    for ka in cert.keys().subkeys().secret() {
-        let key = ka
-            .key()
-            .clone()
-            .parts_into_secret()
-            .context("Subkey has no secret material")?;
-        packets.push(
-            key.decrypt_secret(&pw)
-                .context("Failed to decrypt subkey")?
-                .into(),
-        );
-    }
-    cert.insert_packets(packets)
-        .context("Failed to rebuild cert with decrypted secrets")
+// ── key loading ───────────────────────────────────────────────────────────────
+
+/// Load an armored secret key from disk.
+pub fn load_secret_cert(key_file: &Path, _passphrase: &str) -> Result<SignedSecretKey> {
+    let f = std::fs::File::open(key_file)
+        .with_context(|| format!("Failed to open secret key file {:?}", key_file))?;
+    let (key, _) = SignedSecretKey::from_armor_single(io::BufReader::new(f))
+        .with_context(|| format!("Failed to parse secret key from {:?}", key_file))?;
+    Ok(key)
 }
 
-pub fn load_secret_cert(key_file: &Path, passphrase: &str) -> Result<Cert> {
-    let cert = load_cert(key_file)?;
+/// Build a [`Password`] from a passphrase string.
+fn make_password(passphrase: &str) -> Password {
     if passphrase.is_empty() {
-        Ok(cert)
+        Password::empty()
     } else {
-        decrypt_all_secrets(cert, passphrase)
+        Password::from(passphrase)
     }
 }
 
-// ── SoftDecryptHelper ─────────────────────────────────────────────────────────
-
-struct SoftDecryptHelper {
-    cert: Cert,
+/// Sign `data` with the best available key from `key`: first signing-capable
+/// subkey, falling back to the primary.  Uses concrete types so the
+/// monomorphised `sign_binary_data` bound (`Sized`) is satisfied.
+fn detach_sign(
+    key: &SignedSecretKey,
+    pw: &Password,
+    data: &[u8],
+) -> pgp::errors::Result<DetachedSignature> {
+    if let Some(sk) = key
+        .secret_subkeys
+        .iter()
+        .find(|sk| sk.signatures.iter().any(|sig| sig.key_flags().sign()))
+    {
+        // SignedSecretSubKey derefs to SecretSubkey which impl SigningKey.
+        let sk_ref: &pgp::packet::SecretSubkey = sk;
+        DetachedSignature::sign_binary_data(
+            thread_rng(),
+            sk_ref,
+            pw,
+            pgp::crypto::hash::HashAlgorithm::Sha256,
+            data,
+        )
+    } else {
+        DetachedSignature::sign_binary_data(
+            thread_rng(),
+            &key.primary_key,
+            pw,
+            pgp::crypto::hash::HashAlgorithm::Sha256,
+            data,
+        )
+    }
 }
 
-impl VerificationHelper for SoftDecryptHelper {
-    fn get_certs(&mut self, _ids: &[KeyHandle]) -> openpgp::Result<Vec<Cert>> {
-        Ok(vec![])
+/// Verify embedded signatures in a (read-to-end) Message against a signer cert.
+fn verify_signed_message(msg: &Message<'_>, signer: &SignedPublicKey) -> Result<()> {
+    if matches!(msg, Message::Literal { .. }) {
+        return Ok(());
     }
-    fn check(&mut self, _structure: MessageStructure) -> openpgp::Result<()> {
+    let primary: &dyn VerifyingKey = &signer.primary_key;
+    let subkeys: Vec<&dyn VerifyingKey> = signer
+        .public_subkeys
+        .iter()
+        .map(|sk| sk as &dyn VerifyingKey)
+        .collect();
+    let mut all_keys: Vec<&dyn VerifyingKey> = vec![primary];
+    all_keys.extend(subkeys);
+    let results = msg.verify_nested(&all_keys)?;
+    if results
+        .iter()
+        .any(|r| matches!(r, VerificationResult::Valid(_)))
+    {
         Ok(())
+    } else {
+        anyhow::bail!("No valid signature found in message")
     }
 }
 
-impl DecryptionHelper for SoftDecryptHelper {
-    fn decrypt<F>(
-        &mut self,
-        pkesks: &[PKESK],
-        _skesks: &[SKESK],
-        sym_algo: Option<SymmetricAlgorithm>,
-        mut decrypt_fn: F,
-    ) -> openpgp::Result<Option<Fingerprint>>
-    where
-        F: FnMut(SymmetricAlgorithm, &SessionKey) -> bool,
-    {
-        let policy = &StandardPolicy::new();
-        for pkesk in pkesks {
-            for ka in self
-                .cert
-                .keys()
-                .with_policy(policy, None)
-                .for_transport_encryption()
-                .secret()
-            {
-                let mut keypair = ka.key().clone().into_keypair()?;
-                if let Some((algo, sk)) = pkesk.decrypt(&mut keypair, sym_algo) {
-                    if decrypt_fn(algo, &sk) {
-                        return Ok(Some(ka.fingerprint()));
-                    }
-                }
-            }
-        }
-        Err(anyhow::anyhow!("No key could decrypt the session key"))
-    }
-}
+// ── public API ────────────────────────────────────────────────────────────────
 
-// ── VerifyDecryptHelper ───────────────────────────────────────────────────────
-
-struct VerifyDecryptHelper {
-    decrypt_cert: Cert,
-    verify_cert: Cert,
-}
-
-impl VerificationHelper for VerifyDecryptHelper {
-    fn get_certs(&mut self, _ids: &[KeyHandle]) -> openpgp::Result<Vec<Cert>> {
-        Ok(vec![self.verify_cert.clone()])
-    }
-    fn check(&mut self, structure: MessageStructure) -> openpgp::Result<()> {
-        for layer in structure {
-            if let MessageLayer::SignatureGroup { results } = layer {
-                for result in results {
-                    if result.is_ok() {
-                        return Ok(());
-                    }
-                }
-                return Err(anyhow::anyhow!("No valid signature found"));
-            }
-        }
-        Err(anyhow::anyhow!("No signature layer in message"))
-    }
-}
-
-impl DecryptionHelper for VerifyDecryptHelper {
-    fn decrypt<F>(
-        &mut self,
-        pkesks: &[PKESK],
-        _skesks: &[SKESK],
-        sym_algo: Option<SymmetricAlgorithm>,
-        mut decrypt_fn: F,
-    ) -> openpgp::Result<Option<Fingerprint>>
-    where
-        F: FnMut(SymmetricAlgorithm, &SessionKey) -> bool,
-    {
-        let policy = &StandardPolicy::new();
-        for pkesk in pkesks {
-            for ka in self
-                .decrypt_cert
-                .keys()
-                .with_policy(policy, None)
-                .for_transport_encryption()
-                .secret()
-            {
-                let mut keypair = ka.key().clone().into_keypair()?;
-                if let Some((algo, sk)) = pkesk.decrypt(&mut keypair, sym_algo) {
-                    if decrypt_fn(algo, &sk) {
-                        return Ok(Some(ka.fingerprint()));
-                    }
-                }
-            }
-        }
-        Err(anyhow::anyhow!("No key could decrypt the session key"))
-    }
-}
-
-// ── Public API ────────────────────────────────────────────────────────────────
-
+/// Create an armored detached signature over `data` using a software key.
 pub fn sign(data: &[u8], key_file: &Path, passphrase: &str) -> Result<String> {
-    let policy = &StandardPolicy::new();
-    let cert = load_secret_cert(key_file, passphrase)?;
-    let keypair = cert
-        .keys()
-        .with_policy(policy, None)
-        .for_signing()
-        .secret()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No signing subkey found in cert"))?
-        .key()
-        .clone()
-        .into_keypair()?;
-    let mut output = Vec::new();
-    {
-        let mut armor = ArmorWriter::new(&mut output, ArmorKind::Signature)?;
-        let message = Message::new(&mut armor);
-        let mut signer = Signer::new(message, keypair)
-            .detached()
-            .build()
-            .context("Failed to build signer")?;
-        signer.write_all(data)?;
-        signer.finalize()?;
-        armor.finalize()?;
-    }
-    Ok(String::from_utf8(output)?)
+    let key = load_secret_cert(key_file, passphrase)?;
+    let pw = make_password(passphrase);
+    detach_sign(&key, &pw, data)
+        .map_err(|e| anyhow::anyhow!("Sign failed: {e}"))?
+        .to_armored_string(ArmorOptions::default())
+        .context("Failed to armor signature")
 }
 
+/// Decrypt an armored OpenPGP message using a software key.
 pub fn decrypt(data: &[u8], key_file: &Path, passphrase: &str) -> Result<Vec<u8>> {
-    let policy = &StandardPolicy::new();
-    let helper = SoftDecryptHelper {
-        cert: load_secret_cert(key_file, passphrase)?,
-    };
-    let mut output = Vec::new();
-    let mut decryptor = DecryptorBuilder::from_reader(io::BufReader::new(data))?
-        .with_policy(policy, None, helper)
-        .context("Decryption failed")?;
-    io::copy(&mut decryptor, &mut output)?;
-    Ok(output)
+    let key = load_secret_cert(key_file, passphrase)?;
+    let pw = make_password(passphrase);
+    let (msg, _) = Message::from_armor(BufReader::new(Cursor::new(data)))
+        .context("Failed to parse armored message")?;
+    let mut decrypted = msg
+        .decrypt(&pw, &key)
+        .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
+    let mut out = Vec::new();
+    decrypted.read_to_end(&mut out)?;
+    Ok(out)
 }
 
+/// Sign then encrypt `data` to `recipient_path` using a software key.
+/// Signing key is embedded in the MessageBuilder so one pass produces both.
 pub fn sign_encrypt(
     data: &[u8],
     key_file: &Path,
     recipient_path: &Path,
     passphrase: &str,
 ) -> Result<String> {
-    let policy = &StandardPolicy::new();
-    let cert = load_secret_cert(key_file, passphrase)?;
-    let recipient_cert = load_cert(recipient_path)?;
-    let recipient_keys: Vec<_> = recipient_cert
-        .keys()
-        .with_policy(policy, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .for_transport_encryption()
-        .collect();
-    anyhow::ensure!(
-        !recipient_keys.is_empty(),
-        "No valid encryption key found in recipient cert"
-    );
-    let keypair = cert
-        .keys()
-        .with_policy(policy, None)
-        .for_signing()
-        .secret()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No signing subkey found in cert"))?
-        .key()
-        .clone()
-        .into_keypair()?;
-    let mut output = Vec::new();
+    let key = load_secret_cert(key_file, passphrase)?;
+    let pw = make_password(passphrase);
+    let recipient: SignedPublicKey = load_cert(recipient_path)?;
+
+    let enc_subkey = recipient
+        .public_subkeys
+        .iter()
+        .find(|sk| {
+            sk.signatures
+                .iter()
+                .any(|sig| sig.key_flags().encrypt_comms())
+        })
+        .context("No encryption subkey found in recipient cert")?;
+
+    // Find best signing key (subkey preferred, primary fallback) and build
+    // the sign+encrypt message in one builder pass.
+    let mut builder = MessageBuilder::from_bytes("", data.to_vec())
+        .seipd_v1(thread_rng(), SymmetricKeyAlgorithm::AES256);
+    builder
+        .encrypt_to_key(thread_rng(), enc_subkey)
+        .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
+    if let Some(sk) = key
+        .secret_subkeys
+        .iter()
+        .find(|sk| sk.signatures.iter().any(|sig| sig.key_flags().sign()))
     {
-        let mut armor = ArmorWriter::new(&mut output, ArmorKind::Message)?;
-        let message = Message::new(&mut armor);
-        let message = Encryptor2::for_recipients(message, recipient_keys)
-            .build()
-            .context("Failed to build encryptor")?;
-        let signed = Signer::new(message, keypair)
-            .build()
-            .context("Failed to build signer")?;
-        let mut literal = LiteralWriter::new(signed).build()?;
-        literal.write_all(data)?;
-        literal.finalize()?;
-        armor.finalize()?;
+        let sk_ref: &pgp::packet::SecretSubkey = sk;
+        builder.sign(sk_ref, pw, HashAlgorithm::Sha256);
+    } else {
+        builder.sign(&key.primary_key, pw, HashAlgorithm::Sha256);
     }
-    Ok(String::from_utf8(output)?)
+    builder
+        .to_armored_string(thread_rng(), ArmorOptions::default())
+        .map_err(|e| anyhow::anyhow!("Failed to build message: {e}"))
 }
 
+/// Decrypt a signed+encrypted message and verify the embedded signature.
 pub fn decrypt_verify(
     data: &[u8],
     key_file: &Path,
     signer_path: &Path,
     passphrase: &str,
 ) -> Result<Vec<u8>> {
-    let policy = &StandardPolicy::new();
-    let helper = VerifyDecryptHelper {
-        decrypt_cert: load_secret_cert(key_file, passphrase)?,
-        verify_cert: load_cert(signer_path)?,
-    };
-    let mut output = Vec::new();
-    let mut decryptor = DecryptorBuilder::from_reader(io::BufReader::new(data))?
-        .with_policy(policy, None, helper)
-        .context("Decryption/verification failed")?;
-    io::copy(&mut decryptor, &mut output)?;
-    Ok(output)
+    let key = load_secret_cert(key_file, passphrase)?;
+    let pw = make_password(passphrase);
+    let signer_cert: SignedPublicKey = load_cert(signer_path)?;
+
+    let (msg, _) = Message::from_armor(BufReader::new(Cursor::new(data)))
+        .context("Failed to parse armored message")?;
+    let mut decrypted = msg
+        .decrypt(&pw, &key)
+        .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
+
+    let mut out = Vec::new();
+    decrypted.read_to_end(&mut out)?;
+    verify_signed_message(&decrypted, &signer_cert)?;
+    Ok(out)
 }

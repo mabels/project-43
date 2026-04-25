@@ -66,21 +66,47 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
     final home = Platform.environment['HOME'] ?? '';
     final initial = _type == KeyImportType.ssh ? '$home/.ssh' : home;
 
-    final result = await FilePicker.pickFiles(
-      type: FileType.any,
-      initialDirectory: initial.isNotEmpty ? initial : null,
-      dialogTitle: _type == KeyImportType.ssh
-          ? 'Select SSH private key'
-          : 'Select OpenPGP private key (.asc)',
-      withData: true,
-    );
+    // Verify the initial directory exists; fall back to HOME or null so that
+    // NSOpenPanel / the GTK dialog doesn't silently reject a missing path.
+    String? initialDir;
+    if (initial.isNotEmpty) {
+      final d = Directory(initial);
+      if (await d.exists()) {
+        initialDir = initial;
+      } else if (home.isNotEmpty && await Directory(home).exists()) {
+        initialDir = home;
+      }
+    }
+
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.pickFiles(
+        type: FileType.any,
+        initialDirectory: initialDir,
+        dialogTitle: _type == KeyImportType.ssh
+            ? 'Select SSH private key'
+            : 'Select OpenPGP private key (.asc)',
+        // withData causes NSOpenPanel to hang on macOS when pointing at
+        // restricted directories; read from path instead (see fallback below).
+        withData: false,
+      );
+    } catch (e) {
+      setState(() => _importError = 'File picker error: $e');
+      return;
+    }
 
     if (result == null || result.files.isEmpty) return;
     final file = result.files.first;
 
-    final bytes =
-        file.bytes ??
-        (file.path != null ? await File(file.path!).readAsBytes() : null);
+    Uint8List? bytes;
+    try {
+      bytes =
+          file.bytes ??
+          (file.path != null ? await File(file.path!).readAsBytes() : null);
+    } catch (e) {
+      setState(() => _importError = 'Could not read file: $e');
+      return;
+    }
 
     if (bytes == null) {
       setState(() => _importError = 'Could not read file contents.');
@@ -92,7 +118,7 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
       _fileBytes = bytes;
       _importError = null;
       if (_type == KeyImportType.ssh && _uidCtrl.text.isEmpty) {
-        _tryFillUidFromSshComment(bytes);
+        _tryFillUidFromSshComment(bytes!);
       }
     });
   }

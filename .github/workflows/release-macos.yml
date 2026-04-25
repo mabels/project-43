@@ -144,6 +144,21 @@ jobs:
             -A -t cert -f pkcs12 \
             -k "$KEYCHAIN_PATH"
 
+          # Import Apple intermediate certificates so codesign can build the
+          # full trust chain.  On a fresh user account (e.g. gh-worker that has
+          # never run Xcode) these are absent, which causes the
+          # "unable to build chain to self-signed root" warning and ultimately
+          # errSecInternalComponent.  GitHub-hosted runners have them pre-installed;
+          # on self-hosted runners we download them explicitly.
+          curl -fsSL https://www.apple.com/certificateauthority/AppleWWDRCAG2.cer \
+            -o "$RUNNER_TEMP/AppleWWDRCAG2.cer"
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+            -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/AppleWWDRCAG2.cer" \
+            -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" \
+            -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+
           # codesign: partition is required on self-hosted runners; without it
           # codesign fails with errSecInternalComponent even when the keychain
           # is unlocked.

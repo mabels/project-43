@@ -347,6 +347,21 @@ pub fn get_public_key_armored(fingerprint: String) -> anyhow::Result<String> {
     p43::key_store::store::export_pub(&cert)
 }
 
+/// Returns the armored OpenPGP private key for `fingerprint`.
+///
+/// `passphrase` must match the key's stored passphrase (or be empty for
+/// unencrypted keys).  Verification is performed before returning the armor so
+/// that the caller knows the passphrase is correct before writing to disk.
+#[frb]
+pub fn get_private_key_armored(
+    fingerprint: String,
+    passphrase: String,
+) -> anyhow::Result<String> {
+    // find_with_secret verifies the passphrase and returns Err on mismatch.
+    let key = open_store()?.find_with_secret(&fingerprint, &passphrase)?;
+    p43::key_store::store::export_priv(&key)
+}
+
 /// Returns the OpenSSH `authorized_keys` line for the given fingerprint.
 ///
 /// Uses the authentication subkey (falling back to the signing subkey).

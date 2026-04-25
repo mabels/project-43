@@ -92,6 +92,19 @@ Future<String> getPublicKeyArmored({required String fingerprint}) => RustLib
     .api
     .crateApiSimpleGetPublicKeyArmored(fingerprint: fingerprint);
 
+/// Returns the armored OpenPGP private key for `fingerprint`.
+///
+/// `passphrase` must match the key's stored passphrase (or be empty for
+/// unencrypted keys).  Verification is performed before returning the armor so
+/// that the caller knows the passphrase is correct before writing to disk.
+Future<String> getPrivateKeyArmored({
+  required String fingerprint,
+  required String passphrase,
+}) => RustLib.instance.api.crateApiSimpleGetPrivateKeyArmored(
+  fingerprint: fingerprint,
+  passphrase: passphrase,
+);
+
 /// Returns the OpenSSH `authorized_keys` line for the given fingerprint.
 ///
 /// Uses the authentication subkey (falling back to the signing subkey).

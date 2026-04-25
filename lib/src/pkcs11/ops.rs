@@ -10,12 +10,12 @@ use anyhow::{Context, Result};
 use openpgp_card::ocard::KeyType;
 use openpgp_card_rpgp::CardSlot;
 use pgp::composed::{
-    ArmorOptions, Deserializable, DetachedSignature, Message, MessageBuilder, SignedPublicKey,
-    VerificationResult,
+    ArmorOptions, Deserializable, DetachedSignature, Esk, Message, MessageBuilder,
+    SignedPublicKey, VerificationResult,
 };
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
-use pgp::types::{Password, SigningKey, VerifyingKey};
+use pgp::types::{DecryptionKey, EskType, Password, SigningKey, VerifyingKey};
 use rand::thread_rng;
 use std::io::{self, BufReader, Cursor, Read};
 use std::path::Path;
@@ -150,8 +150,47 @@ pub fn decrypt_with_card(data: &[u8], pin: &str, ident: Option<&str>) -> Result<
     let touch = || eprintln!("Touch YubiKey now...");
     let slot = CardSlot::init_from_card(&mut tx, KeyType::Decryption, &touch)
         .context("Failed to init decryption slot")?;
-    let mut decrypted = slot
-        .decrypt_message(msg)
+
+    // `CardSlot::decrypt_message` has a known bug (comment: "FIXME: match id?"):
+    // it propagates an error on the first PKESK that doesn't match the card's key
+    // type, rather than skipping it and trying the next one.  When a message is
+    // sealed to multiple recipients (e.g. RSA card + Curve25519 soft key), the
+    // first mismatched PKESK causes an "Unsupported key type" error even though
+    // the correct PKESK comes later.
+    //
+    // Work-around: find the PKESK that matches this card slot by key ID /
+    // fingerprint, decrypt just the session key directly, then finish with
+    // `decrypt_with_session_key` which is not affected by the bug.
+    let session_key = match &msg {
+        Message::Encrypted { esk, .. } => {
+            let mut found = None;
+            for e in esk {
+                if let Esk::PublicKeyEncryptedSessionKey(pkesk) = e {
+                    if !pkesk.match_identity(&slot) {
+                        continue;
+                    }
+                    let values = match pkesk.values() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    match slot.decrypt(&Password::empty(), values, EskType::V3_4) {
+                        Ok(Ok(sk)) => {
+                            found = Some(sk);
+                            break;
+                        }
+                        // Inner Err means "not our PKESK", outer Err is a hard
+                        // failure — skip in both cases and try the next packet.
+                        _ => continue,
+                    }
+                }
+            }
+            found.context("No PKESK in this message matched the card's decryption key")?
+        }
+        _ => anyhow::bail!("Message is not an encrypted message"),
+    };
+
+    let mut decrypted = msg
+        .decrypt_with_session_key(session_key)
         .map_err(|e| anyhow::anyhow!("Card decrypt failed: {e}"))?;
     let mut out = Vec::new();
     decrypted.read_to_end(&mut out)?;

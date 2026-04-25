@@ -7,6 +7,9 @@
 	     Touch ID is still gated by the Hardened Runtime entitlement below.    -->
 	<key>com.apple.security.app-sandbox</key>
 	<false/>
+	<!-- Required by file_picker v11 macOS plugin even when sandbox is off. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
 	<!-- JIT is required for the Flutter debug engine. -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>

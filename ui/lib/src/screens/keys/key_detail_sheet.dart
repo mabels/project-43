@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:p43/src/rust/api/simple.dart';
+import 'key_export_sheet.dart';
 import 'key_widgets.dart';
 
 // ── Key detail sheet ──────────────────────────────────────────────────────────
@@ -296,6 +297,20 @@ class _KeyDetailSheetState extends State<KeyDetailSheet> {
                   ),
                 ),
                 const SizedBox(width: 4),
+                IconButton(
+                  icon: const Icon(Icons.upload_outlined),
+                  tooltip: 'Export key',
+                  onPressed: () => showModalBottomSheet<void>(
+                    context: context,
+                    isScrollControlled: true,
+                    backgroundColor: const Color(0xFF1C1C1E),
+                    shape: const RoundedRectangleBorder(
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(16)),
+                    ),
+                    builder: (_) => KeyExportSheet(info: widget.info),
+                  ),
+                ),
                 _togglingEnabled
                     ? const Padding(
                         padding: EdgeInsets.symmetric(horizontal: 12),

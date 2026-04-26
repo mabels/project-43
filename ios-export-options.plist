@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- development = install directly on registered devices via Xcode / Configurator -->
+  <key>method</key>
+  <string>development</string>
+
+  <key>teamID</key>
+  <string>YHM7YAL8HR</string>
+
+  <!-- Let Xcode pick the right provisioning profile automatically.       -->
+  <!-- Change to "manual" and add a <key>provisioningProfiles</key> dict  -->
+  <!-- if automatic selection fails.                                       -->
+  <key>signingStyle</key>
+  <string>automatic</string>
+
+  <key>stripSwiftSymbols</key>
+  <true/>
+
+  <key>uploadBitcode</key>
+  <false/>
+</dict>
+</plist>

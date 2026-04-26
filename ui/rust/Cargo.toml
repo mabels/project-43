@@ -14,9 +14,14 @@ p43 = { path = "../../lib", default-features = false, features = [
     "matrix",
     "e2e-encryption",
     "ssh",
-    "pcsc",
     "bus",
 ] }
+
+# pcsc (smart card / YubiKey) is not available on iOS — gate it out.
+# Cargo merges features from [dependencies] and [target.*.dependencies]
+# for the same crate, so this just adds "pcsc" on every platform except iOS.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+p43 = { path = "../../lib", features = ["pcsc"] }
 base64 = "0.22"
 dirs   = "6"
 anyhow = "1"

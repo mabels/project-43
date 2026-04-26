@@ -1,0 +1,206 @@
+name: Release - iOS
+
+# Triggered on version tags (v1.2.3) or manually via the Actions UI.
+# Produces a development .ipa (signed with a Development certificate +
+# provisioning profile) and uploads it as a workflow artefact.
+#
+# Uses the same "release" environment as the macOS workflow.
+#
+# Required secrets / variables in the "release" environment:
+#   APPLE_CERTIFICATE          base64-encoded .p12 containing BOTH
+#                              "Developer ID Application" (macOS) AND
+#                              "Apple Development" (iOS) certificates.
+#                              In Keychain Access → My Certificates, select
+#                              both certs, right-click → Export 2 Items → .p12
+#                              base64 -i combined.p12 | pbcopy
+#   APPLE_CERTIFICATE_PASSWORD passphrase set when exporting the .p12
+#   KEYCHAIN_PASSWORD          same secret as used by the macOS workflow
+#   IOS_PROVISIONING_PROFILE   base64-encoded .mobileprovision file
+#                              base64 -i MyApp.mobileprovision | pbcopy
+#   APPLE_TEAM_ID              YHM7YAL8HR  (already a variable)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner to use"
+        required: false
+        default: "self-hosted"
+        type: choice
+        options:
+          - self-hosted
+          - macos-latest
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-ios:
+    name: Build & sign (iOS development)
+    runs-on: ${{ inputs.runner || 'self-hosted' }}
+    environment: release
+
+    steps:
+      # ── source ────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v6
+
+      # ── Rust toolchain ─────────────────────────────────────────────────────
+      - name: Bootstrap rustup (no sudo)
+        run: |
+          if ! command -v rustup &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Add iOS targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      # ── Flutter ────────────────────────────────────────────────────────────
+      - name: Install Flutter
+        run: |
+          if [ -d "$HOME/flutter/.git" ]; then
+            git -C "$HOME/flutter" pull --ff-only
+          else
+            git clone --depth 1 -b stable \
+              https://github.com/flutter/flutter.git "$HOME/flutter"
+          fi
+          echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Flutter precache (ios)
+        run: flutter precache --ios
+
+      # ── caches ─────────────────────────────────────────────────────────────
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ios-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ios-cargo-
+
+      - name: Cache Flutter pub
+        uses: actions/cache@v5
+        with:
+          path: ~/.pub-cache
+          key: ios-pub-${{ hashFiles('ui/pubspec.lock') }}
+          restore-keys: ios-pub-
+
+      # ── Flutter dependencies ───────────────────────────────────────────────
+      - name: flutter pub get
+        working-directory: ui
+        run: flutter pub get
+
+      # ── signing certificate & provisioning profile ─────────────────────────
+      # Export from Keychain Access → My Certificates → right-click
+      # "Apple Development: <name>" → Export → save as .p12 with passphrase.
+      # Download provisioning profile from developer.apple.com →
+      # Certificates, Identifiers & Profiles → Profiles → your dev profile.
+      # base64 -i MyApp.mobileprovision | pbcopy → paste as secret.
+      - name: Import Development certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/ios-signing.keychain-db"
+
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode \
+            -o "$RUNNER_TEMP/ios_certificate.p12"
+
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$RUNNER_TEMP/ios_certificate.p12" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Apple intermediate certs — needed on fresh user accounts.
+          curl -fsSL https://www.apple.com/certificateauthority/AppleWWDRCAG2.cer \
+            -o "$RUNNER_TEMP/AppleWWDRCAG2.cer"
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+            -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/AppleWWDRCAG2.cer" \
+            -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" \
+            -k "$KEYCHAIN_PATH" -T /usr/bin/codesign
+
+          security set-key-partition-list -S "apple-tool:,apple:,codesign:" \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          KEYCHAINS="$KEYCHAIN_PATH"
+          LOGIN_KC="$HOME/Library/Keychains/login.keychain-db"
+          [ -f "$LOGIN_KC" ] && KEYCHAINS="$KEYCHAINS $LOGIN_KC"
+          security list-keychain -d user -s $KEYCHAINS
+
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Install provisioning profile
+        env:
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: |
+          PP_PATH="$RUNNER_TEMP/ios.mobileprovision"
+          echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o "$PP_PATH"
+
+          # Install into the standard profiles directory so Xcode finds it.
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          # Use the profile UUID as filename (Xcode convention).
+          UUID=$(security cms -D -i "$PP_PATH" 2>/dev/null \
+            | plutil -extract UUID raw - 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Print UUID" \
+               /dev/stdin <<< "$(security cms -D -i "$PP_PATH")")
+          cp "$PP_PATH" \
+            "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          echo "Installed profile: $UUID"
+
+      # ── build ──────────────────────────────────────────────────────────────
+      # flutter build ipa requires a provisioning profile and signing identity.
+      # CODE_SIGN_IDENTITY must match the common name in the certificate exactly
+      # (or use the short form "Apple Development" to let Xcode pick).
+      - name: Build iOS IPA
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        working-directory: ui
+        run: |
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" \
+            "$RUNNER_TEMP/ios-signing.keychain-db"
+
+          flutter build ipa \
+            --release \
+            --export-options-plist ../ios-export-options.plist
+
+          echo "IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -1)" \
+            >> "$GITHUB_ENV"
+
+      # ── upload ─────────────────────────────────────────────────────────────
+      - name: Upload IPA as workflow artefact
+        uses: actions/upload-artifact@v7
+        with:
+          name: p43-ios-${{ github.ref_name }}
+          path: ${{ env.IPA_PATH }}
+          retention-days: 14
+
+      - name: Attach IPA to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ env.IPA_PATH }}
+
+      # ── cleanup ────────────────────────────────────────────────────────────
+      - name: Delete temporary keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/ios-signing.keychain-db" || true

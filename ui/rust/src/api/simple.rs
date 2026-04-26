@@ -482,6 +482,7 @@ pub fn list_connected_cards() -> anyhow::Result<Vec<ConnectedCardInfo>> {
             })
             .collect());
     }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     Ok(vec![])
 }
 
@@ -1296,6 +1297,7 @@ fn unlock_authority(
             });
             return p43::bus::authority::unlock_card(encrypted, card_pin, ident.as_deref());
         }
+        #[cfg(any(target_os = "ios", target_os = "android"))]
         anyhow::bail!("card unlock is not supported on this platform")
     } else {
         let fp = unlock_fingerprint

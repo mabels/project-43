@@ -170,7 +170,7 @@ pub fn reseal(unlocked: &AuthorityKey, recipient_paths: &[&Path]) -> Result<Vec<
 
 /// Decrypt an authority key blob using a **soft** OpenPGP key.
 pub fn unlock_soft(encrypted: &[u8], key_file: &Path, passphrase: &str) -> Result<AuthorityKey> {
-    let plain = crate::pkcs11::soft_ops::decrypt(encrypted, key_file, passphrase)
+    let plain = crate::pgp_ops::decrypt(encrypted, key_file, passphrase)
         .context("decrypt authority key blob with soft key")?;
     parse_secret(plain)
 }

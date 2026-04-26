@@ -4,6 +4,7 @@
 
 pub mod credential_cache;
 pub mod key_store;
+pub mod pgp_ops;
 pub mod protocol;
 pub mod util;
 

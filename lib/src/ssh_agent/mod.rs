@@ -189,7 +189,7 @@ fn best_auth_secret_subkey_idx(cert: &SignedSecretKey, slot: SshKeySlot) -> Opti
 pub fn load_ssh_key(key_file: &Path, passphrase: &str, slot: SshKeySlot) -> Result<PrivateKey> {
     // load_secret_cert already returns the key ready to use; passphrase is
     // presented to the key's unlock() callback at signing time.
-    let cert = crate::pkcs11::soft_ops::load_secret_cert(key_file, passphrase)?;
+    let cert = crate::pgp_ops::load_secret_cert(key_file, passphrase)?;
     cert_to_ssh_key(&cert, slot)
 }
 

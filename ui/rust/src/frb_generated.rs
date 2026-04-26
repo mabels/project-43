@@ -2011,7 +2011,7 @@ fn wire__crate__api__simple__mx_respond_sign_card_impl(
             let api_pin = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                transform_result_sse::<(), flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
                         let output_ok = crate::api::simple::mx_respond_sign_card(
                             api_room_id,
@@ -2053,7 +2053,7 @@ fn wire__crate__api__simple__mx_respond_sign_card_cached_impl(
             let api_request_id = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                transform_result_sse::<(), flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
                         let output_ok = crate::api::simple::mx_respond_sign_card_cached(
                             api_room_id,

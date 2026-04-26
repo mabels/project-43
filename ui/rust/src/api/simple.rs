@@ -466,17 +466,23 @@ pub struct ConnectedCardInfo {
 ///
 /// On macOS the system PC/SC daemon handles the transport; no additional
 /// setup is needed.  Returns an empty list when no cards are present.
+///
+/// Not available on Android / iOS (no PC/SC subsystem) — returns an empty list.
 #[frb]
 pub fn list_connected_cards() -> anyhow::Result<Vec<ConnectedCardInfo>> {
-    Ok(p43::pkcs11::card::list_connected_cards()?
-        .into_iter()
-        .map(|c| ConnectedCardInfo {
-            ident: c.ident,
-            cardholder_name: c.cardholder_name,
-            sig_fingerprint: c.sig_fingerprint,
-            auth_fingerprint: c.auth_fingerprint,
-        })
-        .collect())
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        return Ok(p43::pkcs11::card::list_connected_cards()?
+            .into_iter()
+            .map(|c| ConnectedCardInfo {
+                ident: c.ident,
+                cardholder_name: c.cardholder_name,
+                sig_fingerprint: c.sig_fingerprint,
+                auth_fingerprint: c.auth_fingerprint,
+            })
+            .collect());
+    }
+    Ok(vec![])
 }
 
 /// Import a key from a connected OpenPGP card into the local key store.
@@ -489,21 +495,27 @@ pub fn list_connected_cards() -> anyhow::Result<Vec<ConnectedCardInfo>> {
 /// - `uid`: user ID string for the cert (e.g. `"Alice <alice@example.com>"`).
 ///   Pass the empty string to fall back to the cardholder name on the card.
 /// - `pin`: card User Signing PIN (unlocks the SIG slot).
+///
+/// Not available on Android / iOS (no PC/SC subsystem).
 #[frb]
 pub fn import_card(card_ident: String, uid: String, pin: String) -> anyhow::Result<Vec<KeyInfo>> {
-    let ks = open_store()?;
-    let uid_opt = if uid.is_empty() {
-        None
-    } else {
-        Some(uid.as_str())
-    };
-    p43::pkcs11::import_card::import_card_cert(&ks, Some(&card_ident), uid_opt, &pin)?;
-    let store_dir = default_store_dir();
-    Ok(ks
-        .list()?
-        .into_iter()
-        .map(|e| to_key_info(e, &store_dir))
-        .collect())
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let ks = open_store()?;
+        let uid_opt = if uid.is_empty() {
+            None
+        } else {
+            Some(uid.as_str())
+        };
+        p43::pkcs11::import_card::import_card_cert(&ks, Some(&card_ident), uid_opt, &pin)?;
+        let store_dir = default_store_dir();
+        return Ok(ks
+            .list()?
+            .into_iter()
+            .map(|e| to_key_info(e, &store_dir))
+            .collect());
+    }
+    anyhow::bail!("PC/SC card operations are not supported on this platform")
 }
 
 /// Import an OpenSSH private key file into the local key store as an OpenPGP
@@ -1273,13 +1285,17 @@ fn unlock_authority(
     let store_dir = default_store_dir();
 
     if use_card {
-        let card_pin = pin.ok_or_else(|| anyhow::anyhow!("pin required for card unlock"))?;
-        let ident: Option<String> = unlock_fingerprint.and_then(|fp| {
-            let ks = KeyStore::open(&store_dir).ok()?;
-            let entry = ks.list().ok()?.into_iter().find(|e| e.fingerprint == fp)?;
-            entry.card_idents.into_iter().next()
-        });
-        p43::bus::authority::unlock_card(encrypted, card_pin, ident.as_deref())
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        {
+            let card_pin = pin.ok_or_else(|| anyhow::anyhow!("pin required for card unlock"))?;
+            let ident: Option<String> = unlock_fingerprint.and_then(|fp| {
+                let ks = KeyStore::open(&store_dir).ok()?;
+                let entry = ks.list().ok()?.into_iter().find(|e| e.fingerprint == fp)?;
+                entry.card_idents.into_iter().next()
+            });
+            return p43::bus::authority::unlock_card(encrypted, card_pin, ident.as_deref());
+        }
+        anyhow::bail!("card unlock is not supported on this platform")
     } else {
         let fp = unlock_fingerprint
             .ok_or_else(|| anyhow::anyhow!("unlock_fingerprint required for soft-key unlock"))?;
@@ -1880,6 +1896,8 @@ pub async fn mx_respond_sign(
 ///
 /// On success the PIN is cached in memory keyed by card AID ident so that
 /// `mx_respond_sign_card_cached` can skip the PIN dialog for subsequent requests.
+///
+/// Not available on Android / iOS (no PC/SC subsystem).
 #[frb]
 #[cfg_attr(
     feature = "telemetry",
@@ -1890,36 +1908,40 @@ pub async fn mx_respond_sign_card(
     request_id: String,
     pin: String,
 ) -> anyhow::Result<()> {
-    let pending = pending_signs()
-        .lock()
-        .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
-        .remove(&request_id)
-        .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let pending = pending_signs()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
+            .remove(&request_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
 
-    let store_dir = default_store_dir();
+        let store_dir = default_store_dir();
 
-    let sig = p43::ssh_agent::sign_with_card_key(
-        &store_dir,
-        &pending.fingerprint,
-        &pin,
-        &pending.data,
-        pending.flags,
-    )?;
+        let sig = p43::ssh_agent::sign_with_card_key(
+            &store_dir,
+            &pending.fingerprint,
+            &pin,
+            &pending.data,
+            pending.flags,
+        )?;
 
-    // Cache the PIN keyed by each card AID associated with this fingerprint.
-    if let Some(meta) = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint) {
-        if let Ok(mut cache) = credential_cache().lock() {
-            for ident in &meta.card_idents {
-                cache.insert(ident.clone(), pin.clone());
+        // Cache the PIN keyed by each card AID associated with this fingerprint.
+        if let Some(meta) = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint) {
+            if let Ok(mut cache) = credential_cache().lock() {
+                for ident in &meta.card_idents {
+                    cache.insert(ident.clone(), pin.clone());
+                }
             }
         }
-    }
 
-    let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
-        request_id,
-        signature: sig,
-    });
-    send_via_bridge(&room_id, response, pending.sender_cert).await
+        let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+            request_id,
+            signature: sig,
+        });
+        return send_via_bridge(&room_id, response, pending.sender_cert).await;
+    }
+    anyhow::bail!("PC/SC card operations are not supported on this platform")
 }
 
 /// Returns `true` if a cached PIN exists for the given card AID ident,
@@ -1939,6 +1961,8 @@ pub fn has_cached_card_pin(card_ident: String) -> bool {
 ///
 /// Returns an error if no PIN is cached for any card associated with this key.
 /// This is the auto-approve path after the first successful `mx_respond_sign_card`.
+///
+/// Not available on Android / iOS (no PC/SC subsystem).
 #[frb]
 #[cfg_attr(
     feature = "telemetry",
@@ -1948,42 +1972,46 @@ pub async fn mx_respond_sign_card_cached(
     room_id: String,
     request_id: String,
 ) -> anyhow::Result<()> {
-    let pending = pending_signs()
-        .lock()
-        .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
-        .remove(&request_id)
-        .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
-
-    let store_dir = default_store_dir();
-
-    // Resolve card idents for this fingerprint, then look up a cached PIN.
-    let meta = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint)
-        .ok_or_else(|| anyhow::anyhow!("No key metadata found for fingerprint"))?;
-
-    let pin = {
-        let mut cache = credential_cache()
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let pending = pending_signs()
             .lock()
-            .map_err(|e| anyhow::anyhow!("credential cache lock poisoned: {e}"))?;
-        meta.card_idents
-            .iter()
-            // get: retrieves credential and resets its expiry timer.
-            .find_map(|id| cache.get(id))
-            .ok_or_else(|| anyhow::anyhow!("No cached PIN for this card — enter PIN first"))?
-    };
+            .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
+            .remove(&request_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
 
-    let sig = p43::ssh_agent::sign_with_card_key(
-        &store_dir,
-        &pending.fingerprint,
-        &pin,
-        &pending.data,
-        pending.flags,
-    )?;
+        let store_dir = default_store_dir();
 
-    let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
-        request_id,
-        signature: sig,
-    });
-    send_via_bridge(&room_id, response, pending.sender_cert).await
+        // Resolve card idents for this fingerprint, then look up a cached PIN.
+        let meta = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint)
+            .ok_or_else(|| anyhow::anyhow!("No key metadata found for fingerprint"))?;
+
+        let pin = {
+            let mut cache = credential_cache()
+                .lock()
+                .map_err(|e| anyhow::anyhow!("credential cache lock poisoned: {e}"))?;
+            meta.card_idents
+                .iter()
+                // get: retrieves credential and resets its expiry timer.
+                .find_map(|id| cache.get(id))
+                .ok_or_else(|| anyhow::anyhow!("No cached PIN for this card — enter PIN first"))?
+        };
+
+        let sig = p43::ssh_agent::sign_with_card_key(
+            &store_dir,
+            &pending.fingerprint,
+            &pin,
+            &pending.data,
+            pending.flags,
+        )?;
+
+        let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+            request_id,
+            signature: sig,
+        });
+        return send_via_bridge(&room_id, response, pending.sender_cert).await;
+    }
+    anyhow::bail!("PC/SC card operations are not supported on this platform")
 }
 
 /// Return the number of User PIN attempts remaining for a connected YubiKey /
@@ -1992,9 +2020,15 @@ pub async fn mx_respond_sign_card_cached(
 /// `card_ident` is one of the strings from `KeyInfo.cardIdents`
 /// (e.g. `"0006:17684870"`).  Returns an error if no card with that ident is
 /// currently connected or accessible.
+///
+/// Not available on Android / iOS (no PC/SC subsystem).
 #[frb]
 pub fn get_card_pin_retries(card_ident: String) -> anyhow::Result<u8> {
-    p43::pkcs11::card::card_pin_retries(Some(&card_ident))
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        return p43::pkcs11::card::card_pin_retries(Some(&card_ident));
+    }
+    anyhow::bail!("PC/SC card operations are not supported on this platform")
 }
 
 /// Approve an `ssh.sign_request` without a passphrase dialog.

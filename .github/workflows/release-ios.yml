@@ -157,11 +157,16 @@ jobs:
 
           # Install into the standard profiles directory so Xcode finds it.
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          # Use the profile UUID as filename (Xcode convention).
-          UUID=$(security cms -D -i "$PP_PATH" 2>/dev/null \
-            | plutil -extract UUID raw - 2>/dev/null \
-            || /usr/libexec/PlistBuddy -c "Print UUID" \
-               /dev/stdin <<< "$(security cms -D -i "$PP_PATH")")
+          # Extract UUID via grep — the UUID is plain ASCII inside the CMS
+          # envelope so binary grepping is more reliable than security cms -D,
+          # which can fail on self-hosted runners without a full session.
+          UUID=$(grep -aEo \
+            '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' \
+            "$PP_PATH" | head -1)
+          if [ -z "$UUID" ]; then
+            echo "ERROR: could not extract UUID from provisioning profile"
+            exit 1
+          fi
           cp "$PP_PATH" \
             "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
           echo "Installed profile: $UUID"

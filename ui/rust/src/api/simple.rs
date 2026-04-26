@@ -515,6 +515,7 @@ pub fn import_card(card_ident: String, uid: String, pin: String) -> anyhow::Resu
             .map(|e| to_key_info(e, &store_dir))
             .collect());
     }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     anyhow::bail!("PC/SC card operations are not supported on this platform")
 }
 
@@ -1941,6 +1942,7 @@ pub async fn mx_respond_sign_card(
         });
         return send_via_bridge(&room_id, response, pending.sender_cert).await;
     }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     anyhow::bail!("PC/SC card operations are not supported on this platform")
 }
 
@@ -2011,6 +2013,7 @@ pub async fn mx_respond_sign_card_cached(
         });
         return send_via_bridge(&room_id, response, pending.sender_cert).await;
     }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     anyhow::bail!("PC/SC card operations are not supported on this platform")
 }
 
@@ -2028,6 +2031,7 @@ pub fn get_card_pin_retries(card_ident: String) -> anyhow::Result<u8> {
     {
         return p43::pkcs11::card::card_pin_retries(Some(&card_ident));
     }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     anyhow::bail!("PC/SC card operations are not supported on this platform")
 }
 

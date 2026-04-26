@@ -40,7 +40,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-  SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
 
 jobs:
@@ -55,8 +54,22 @@ jobs:
       - uses: actions/checkout@v6
 
       # ── sccache ────────────────────────────────────────────────────────────
+      # On self-hosted runners sccache is pre-installed via brew.
+      # On GitHub-hosted runners (macos-latest) we download the binary.
+      # Either way we just start the server and set RUSTC_WRAPPER — no action
+      # post step means no sudo purge stalling the self-hosted runner.
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        run: |
+          if ! command -v sccache &>/dev/null; then
+            ARCH=$(uname -m)
+            curl -fsSL \
+              "https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${ARCH}-apple-darwin.tar.gz" \
+              | tar xz --strip-components=1 -C /tmp \
+                "sccache-v0.8.1-${ARCH}-apple-darwin/sccache"
+            sudo mv /tmp/sccache /usr/local/bin/sccache
+          fi
+          sccache --start-server 2>/dev/null || true
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────
       # Bootstrap rustup without sudo if it is not already present.

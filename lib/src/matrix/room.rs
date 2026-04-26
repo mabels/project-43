@@ -502,6 +502,9 @@ pub async fn purge_room_history(
     let mut redacted = 0usize;
     let mut from: Option<String> = None;
 
+    let mut page_num = 0usize;
+    let mut total_seen = 0usize;
+
     loop {
         let mut opts = MessagesOptions::backward();
         opts.limit = UInt::try_from(100u64).unwrap_or(UInt::MAX);
@@ -512,9 +515,24 @@ pub async fn purge_room_history(
             .await
             .context("Failed to fetch message history page during purge")?;
 
+        page_num += 1;
+        let chunk_len = page.chunk.len();
+        total_seen += chunk_len;
+        eprintln!(
+            "[p43::matrix] purge page {page_num}: {chunk_len} event(s), end={:?}",
+            page.end.as_deref().map(|t| &t[..t.len().min(16)])
+        );
+
+        if chunk_len == 0 {
+            break;
+        }
+
         for ev in &page.chunk {
             // Parse raw JSON from any event kind — we only need event_id,
             // type, and origin_server_ts; we never inspect the message body.
+            // UnableToDecrypt carries the outer m.room.encrypted envelope,
+            // which is exactly what we need to extract the timestamp and
+            // event_id for redaction (content stays opaque).
             let raw: serde_json::Value = match &ev.kind {
                 TimelineEventKind::PlainText { event } => {
                     serde_json::from_str(event.json().get()).unwrap_or_default()
@@ -522,7 +540,9 @@ pub async fn purge_room_history(
                 TimelineEventKind::Decrypted(dec) => {
                     serde_json::from_str(dec.event.json().get()).unwrap_or_default()
                 }
-                _ => serde_json::Value::Null,
+                TimelineEventKind::UnableToDecrypt { event, .. } => {
+                    serde_json::from_str(event.json().get()).unwrap_or_default()
+                }
             };
 
             // Skip events we could not parse (e.g. unknown timeline kinds).
@@ -536,8 +556,10 @@ pub async fn purge_room_history(
                 continue;
             }
 
-            // Only redact user messages; never touch room state events.
-            if raw["type"].as_str() != Some("m.room.message") {
+            // Only redact user message events (plaintext or E2EE); never
+            // touch room state events or other non-message timeline entries.
+            let ev_type = raw["type"].as_str().unwrap_or("");
+            if ev_type != "m.room.message" && ev_type != "m.room.encrypted" {
                 continue;
             }
 
@@ -569,6 +591,8 @@ pub async fn purge_room_history(
             Some(t) => from = Some(t),
         }
     }
+
+    eprintln!("[p43::matrix] purge complete: {page_num} page(s), {total_seen} event(s) examined");
 
     Ok(redacted)
 }

@@ -159,18 +159,31 @@ jobs:
           PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE }}
         run: |
           PP_PATH="$RUNNER_TEMP/ios.mobileprovision"
-          echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o "$PP_PATH"
+          echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_PATH"
+
+          echo "Profile size: $(wc -c < "$PP_PATH") bytes"
 
           # Install into the standard profiles directory so Xcode finds it.
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          # Extract UUID via grep — the UUID is plain ASCII inside the CMS
-          # envelope so binary grepping is more reliable than security cms -D,
-          # which can fail on self-hosted runners without a full session.
-          UUID=$(grep -aEo \
-            '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' \
-            "$PP_PATH" | head -1)
+
+          # Extract UUID.  The UUID is a plain ASCII string inside the CMS
+          # envelope.  We try three methods in order of reliability:
+          #   1. strings(1) — most reliable on macOS binary files
+          #   2. security cms -D | plutil — clean but needs a session
+          #   3. grep -a — fallback
+          UUID=$(strings "$PP_PATH" \
+            | grep -Eo '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' \
+            | head -1)
+
           if [ -z "$UUID" ]; then
-            echo "ERROR: could not extract UUID from provisioning profile"
+            UUID=$(security cms -D -i "$PP_PATH" 2>/dev/null \
+              | plutil -extract UUID raw - 2>/dev/null || true)
+          fi
+
+          if [ -z "$UUID" ]; then
+            echo "ERROR: could not extract UUID — profile may be corrupt or secret not set"
+            echo "First 200 printable chars in profile:"
+            strings "$PP_PATH" | head -20
             exit 1
           fi
           cp "$PP_PATH" \

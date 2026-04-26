@@ -121,11 +121,19 @@ jobs:
           java-version: "17"
 
       # ── Android SDK + NDK ─────────────────────────────────────────────────────
-      # ubuntu-latest has the Android SDK pre-installed at $ANDROID_SDK_ROOT.
-      # We only need to install the NDK (not present by default).
+      # ubuntu-latest has the Android SDK pre-installed at $ANDROID_SDK_ROOT
+      # but sdkmanager is NOT on $PATH — it lives under cmdline-tools.
+      # We locate it explicitly and use it to install the NDK.
       - name: Install Android NDK ${{ env.ANDROID_NDK_VERSION }}
         run: |
-          sdkmanager --install "ndk;$ANDROID_NDK_VERSION"
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            # Fallback: some runner images put it under a versioned directory.
+            SDKMANAGER=$(find "$ANDROID_SDK_ROOT/cmdline-tools" \
+              -name sdkmanager -type f | head -1)
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          "$SDKMANAGER" --install "ndk;$ANDROID_NDK_VERSION"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" \
             >> "$GITHUB_ENV"
 

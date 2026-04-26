@@ -1,0 +1,259 @@
+name: Release - Android
+
+# Triggered on version tags (v1.2.3) or manually via the Actions UI.
+# Produces a signed release AAB (Google Play upload) and a universal APK
+# (sideload / internal testing) and attaches them to the GitHub release.
+#
+# Uses the same "release" environment as the other platform workflows.
+#
+# ── One-time prerequisites ─────────────────────────────────────────────────────
+#
+# 1. Generate the Android project files locally (never committed by flutter):
+#
+#      cd ui && flutter create --platforms=android .
+#
+#    Commit the resulting ui/android/ directory.
+#
+# 2. Configure release signing in ui/android/app/build.gradle.  Add a
+#    signingConfigs block that reads the key.properties file this workflow
+#    writes at build time (key.properties itself is NOT committed):
+#
+#      def keystoreProperties = new Properties()
+#      def keystorePropertiesFile = rootProject.file('key.properties')
+#      if (keystorePropertiesFile.exists()) {
+#          keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+#      }
+#      android {
+#          signingConfigs {
+#              release {
+#                  keyAlias      keystoreProperties['keyAlias']
+#                  keyPassword   keystoreProperties['keyPassword']
+#                  storeFile     file(keystoreProperties['storeFile'])
+#                  storePassword keystoreProperties['storePassword']
+#              }
+#          }
+#          buildTypes {
+#              release { signingConfig signingConfigs.release }
+#          }
+#      }
+#
+# 3. Create a release keystore once and store it safely offline:
+#
+#      keytool -genkey -v -keystore release.keystore \
+#        -alias p43 -keyalg RSA -keysize 4096 -validity 10000
+#      base64 -i release.keystore | pbcopy   # → paste as ANDROID_KEYSTORE secret
+#
+# Required secrets / variables in the "release" environment:
+#   ANDROID_KEYSTORE        base64-encoded .jks / .keystore file (step 3 above)
+#   ANDROID_STORE_PASSWORD  storePassword set when creating the keystore
+#   ANDROID_KEY_ALIAS       key alias (e.g. p43)
+#   ANDROID_KEY_PASSWORD    keyPassword (often the same as storePassword)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner to use"
+        required: false
+        default: "ubuntu-latest"
+        type: choice
+        options:
+          - ubuntu-latest
+          - self-hosted
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  # NDK r27 (LTS) — cargokit / cargo-ndk require NDK 25+.
+  # Bump this when a newer LTS becomes available.
+  ANDROID_NDK_VERSION: "27.2.12479018"
+
+jobs:
+  build-android:
+    name: Build & sign (Android)
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    environment: release
+
+    steps:
+      # ── source ────────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v6
+
+      # ── sccache ───────────────────────────────────────────────────────────────
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────────
+      - name: Bootstrap rustup (no sudo)
+        run: |
+          if ! command -v rustup &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Add Android targets
+        run: |
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
+
+      # ── cargo-ndk ─────────────────────────────────────────────────────────────
+      # cargokit delegates Android cross-compilation to cargo-ndk.
+      # Installing from crates.io; pin the version for reproducibility.
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version "^3" --locked
+
+      # ── Java (required by Android Gradle Plugin 8.x) ──────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ── Android SDK + NDK ─────────────────────────────────────────────────────
+      # ubuntu-latest has the Android SDK pre-installed at $ANDROID_SDK_ROOT.
+      # We only need to install the NDK (not present by default).
+      - name: Install Android NDK ${{ env.ANDROID_NDK_VERSION }}
+        run: |
+          sdkmanager --install "ndk;$ANDROID_NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" \
+            >> "$GITHUB_ENV"
+
+      # ── Flutter stable ─────────────────────────────────────────────────────────
+      # Matches the pattern used by macOS, iOS, and Linux workflows.
+      - name: Install Flutter
+        run: |
+          if [ -d "$HOME/flutter/.git" ]; then
+            git -C "$HOME/flutter" pull --ff-only
+          else
+            git clone --depth 1 -b stable \
+              https://github.com/flutter/flutter.git "$HOME/flutter"
+          fi
+          echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Flutter precache (android)
+        run: flutter precache --android
+
+      # ── caches ────────────────────────────────────────────────────────────────
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: android-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: android-cargo-
+
+      - name: Cache Flutter pub
+        uses: actions/cache@v5
+        with:
+          path: ~/.pub-cache
+          key: android-pub-${{ hashFiles('ui/pubspec.lock') }}
+          restore-keys: android-pub-
+
+      # ── signing keystore ──────────────────────────────────────────────────────
+      # Decode the keystore and write key.properties where Gradle expects it.
+      # key.properties must NOT be committed to the repo.
+      - name: Decode keystore
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          KEYSTORE_PATH="$RUNNER_TEMP/release.keystore"
+          echo -n "$ANDROID_KEYSTORE" | base64 --decode > "$KEYSTORE_PATH"
+          echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+      - name: Write key.properties
+        env:
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cat > ui/android/key.properties << EOF
+          storePassword=$ANDROID_STORE_PASSWORD
+          keyPassword=$ANDROID_KEY_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          storeFile=$KEYSTORE_PATH
+          EOF
+
+      # ── Flutter dependencies ───────────────────────────────────────────────────
+      - name: flutter pub get
+        working-directory: ui
+        run: flutter pub get
+
+      # ── build AAB (Google Play) ────────────────────────────────────────────────
+      # cargokit invokes cargo-ndk to cross-compile rust_lib_p43 for each ABI
+      # included in the AAB (arm64-v8a, armeabi-v7a, x86_64).
+      # The resulting AAB already contains all three .so files.
+      - name: Build release AAB
+        working-directory: ui
+        run: |
+          flutter build appbundle \
+            --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+
+          AAB_PATH="build/app/outputs/bundle/release/app-release.aab"
+          AAB_NAME="p43-${{ github.ref_name }}.aab"
+          cp "$AAB_PATH" "$RUNNER_TEMP/$AAB_NAME"
+          echo "AAB_PATH=$RUNNER_TEMP/$AAB_NAME" >> "$GITHUB_ENV"
+
+      # ── build universal APK (sideload / internal testing) ─────────────────────
+      # A fat APK is convenient for direct installation without Play Store.
+      # Use --split-per-abi if you need per-arch APKs instead.
+      - name: Build release APK
+        working-directory: ui
+        run: |
+          flutter build apk \
+            --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+
+          APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+          APK_NAME="p43-${{ github.ref_name }}.apk"
+          cp "$APK_PATH" "$RUNNER_TEMP/$APK_NAME"
+          echo "APK_PATH=$RUNNER_TEMP/$APK_NAME" >> "$GITHUB_ENV"
+
+      # ── verify signing ────────────────────────────────────────────────────────
+      - name: Verify APK signature
+        run: |
+          "$ANDROID_SDK_ROOT/build-tools/$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)/apksigner" \
+            verify --verbose "$APK_PATH"
+
+      # ── upload artefacts ──────────────────────────────────────────────────────
+      - name: Upload AAB as workflow artefact
+        uses: actions/upload-artifact@v7
+        with:
+          name: p43-android-aab-${{ github.ref_name }}
+          path: ${{ env.AAB_PATH }}
+          retention-days: 14
+
+      - name: Upload APK as workflow artefact
+        uses: actions/upload-artifact@v7
+        with:
+          name: p43-android-apk-${{ github.ref_name }}
+          path: ${{ env.APK_PATH }}
+          retention-days: 14
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            ${{ env.AAB_PATH }}
+            ${{ env.APK_PATH }}
+
+      # ── cleanup ───────────────────────────────────────────────────────────────
+      - name: Remove keystore from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore" ui/android/key.properties || true

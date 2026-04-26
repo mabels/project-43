@@ -1,3 +1,9 @@
 target/
 **/.cargo/
 .DS_Store
+
+# Android signing — keep keystores offline, never commit them
+*.keystore
+*.jks
+# key.properties is written at CI build time from secrets
+key.properties

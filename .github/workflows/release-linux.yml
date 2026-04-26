@@ -19,6 +19,11 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
 jobs:
   appimage:
     name: AppImage (${{ matrix.arch }})
@@ -45,6 +50,10 @@ jobs:
     steps:
       # ── source ─────────────────────────────────────────────────────────────
       - uses: actions/checkout@v6
+
+      # ── sccache ────────────────────────────────────────────────────────────
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       # ── system dependencies ─────────────────────────────────────────────────
       # Flutter Linux needs clang/cmake/ninja + GTK3 headers.

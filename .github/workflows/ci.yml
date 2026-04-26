@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   ci:
@@ -24,6 +26,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
             libpcsclite-dev
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: install Rust toolchain
         # actions-rust-lang/setup-rust-toolchain reads rust-toolchain.toml

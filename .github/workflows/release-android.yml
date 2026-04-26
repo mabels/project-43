@@ -70,9 +70,10 @@ env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
-  # NDK r27 (LTS) — cargokit / cargo-ndk require NDK 25+.
+  # NDK r27c (LTS) — cargokit / cargo-ndk require NDK 25+.
   # Bump this when a newer LTS becomes available.
-  ANDROID_NDK_VERSION: "27.2.12479018"
+  # Format expected by nttld/setup-ndk: r<major><letter>
+  ANDROID_NDK_VERSION: "r27c"
 
 jobs:
   build-android:
@@ -120,21 +121,20 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ── Android SDK + NDK ─────────────────────────────────────────────────────
-      # ubuntu-latest has the Android SDK pre-installed at $ANDROID_SDK_ROOT
-      # but sdkmanager is NOT on $PATH — it lives under cmdline-tools.
-      # We locate it explicitly and use it to install the NDK.
+      # ── Android NDK ───────────────────────────────────────────────────────────
+      # nttld/setup-ndk downloads and extracts the NDK without touching
+      # sdkmanager (which is not on PATH on ubuntu-latest runners).
+      # The action exports ndk-path as a step output and sets ANDROID_NDK_HOME.
       - name: Install Android NDK ${{ env.ANDROID_NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
+          add-to-path: true
+
+      - name: Export ANDROID_NDK_HOME
         run: |
-          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKMANAGER" ]; then
-            # Fallback: some runner images put it under a versioned directory.
-            SDKMANAGER=$(find "$ANDROID_SDK_ROOT/cmdline-tools" \
-              -name sdkmanager -type f | head -1)
-          fi
-          echo "Using sdkmanager: $SDKMANAGER"
-          "$SDKMANAGER" --install "ndk;$ANDROID_NDK_VERSION"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION" \
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" \
             >> "$GITHUB_ENV"
 
       # ── Flutter stable ─────────────────────────────────────────────────────────

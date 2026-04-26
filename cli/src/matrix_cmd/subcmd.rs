@@ -32,6 +32,9 @@ pub enum MatrixCmd {
 
     /// Verify this device via SAS emoji comparison with another session.
     Verify,
+
+    /// Redact room messages older than a given age.
+    Purge(PurgeArgs),
 }
 
 // ── Login ─────────────────────────────────────────────────────────────────────
@@ -126,6 +129,20 @@ pub struct SendArgs {
     /// Message text to send.
     #[arg(long)]
     pub message: String,
+}
+
+// ── Purge ─────────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+pub struct PurgeArgs {
+    /// Room to purge — ID, alias, or bare name.
+    /// Defaults to the agent room saved by `p43 matrix join`.
+    #[arg(long)]
+    pub room: Option<String>,
+
+    /// Redact messages older than this many hours (default: 8).
+    #[arg(long, default_value = "8")]
+    pub older_than_hours: u64,
 }
 
 // ── Listen ────────────────────────────────────────────────────────────────────

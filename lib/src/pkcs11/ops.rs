@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use openpgp_card::ocard::KeyType;
 use openpgp_card_rpgp::CardSlot;
 use pgp::composed::{
-    ArmorOptions, Deserializable, DetachedSignature, Esk, Message, MessageBuilder,
-    SignedPublicKey, VerificationResult,
+    ArmorOptions, Deserializable, DetachedSignature, Esk, Message, MessageBuilder, SignedPublicKey,
+    VerificationResult,
 };
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::crypto::sym::SymmetricKeyAlgorithm;

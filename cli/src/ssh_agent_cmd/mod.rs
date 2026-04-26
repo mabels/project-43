@@ -3,8 +3,9 @@ pub mod subcmd;
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use p43::bus::ExternalBusMessage;
 use p43::bus::{self, load_or_generate_device_key, AuthorityPub, DeviceCsr, DeviceKey};
-use p43::matrix::resolve_agent_room;
+use p43::matrix::{device_id_from_config, resolve_agent_room, MatrixConfig, RoomPointerStore};
 use p43::protocol::{BusCsrRequest, Message};
 use p43::ssh_agent::{card_auth_sign_ssh, load_card_auth_key_info, load_ssh_key, SshKeySlot};
 use signature::Signer;
@@ -445,20 +446,64 @@ fn run_matrix(
         let (outbound_tx, outbound_rx) = p43::bus::new_outbound_queue();
 
         // 4a. Background task: listen_room → external bus.
-        let ext_tx_clone = external_tx.clone();
+        //     Reconnects automatically when the sync loop exits (zombie TCP,
+        //     server restart, network drop).  Tracks the last next_batch token
+        //     via on_pointer so reconnects never replay already-seen messages.
+        let ext_tx_for_task = external_tx.clone();
         let listen_room_id = room_id.clone();
+
+        // Per-reader pointer: app-state/<device_id>/cli.json → { room_id: since }
+        // Each reader (cli, ui) has its own file so they never share cursors.
+        let mx_cfg = MatrixConfig::from_store_dir(&store_dir);
+        let store_root = store_dir.parent().unwrap_or(&store_dir).to_path_buf();
+        let device_id =
+            device_id_from_config(&mx_cfg.config_path).unwrap_or_else(|_| "unknown".into());
+        let ptr_store = Arc::new(RoomPointerStore::new(&store_root, &device_id, "cli"));
+        let initial_since: Option<String> = ptr_store.get(&room_id);
+        match &initial_since {
+            Some(token) => eprintln!(
+                "[p43::ssh_agent] Resuming from pointer: {token}\n  ({})",
+                ptr_store.path().display()
+            ),
+            None => eprintln!(
+                "[p43::ssh_agent] No stored pointer — replaying full room history\n  ({})",
+                ptr_store.path().display()
+            ),
+        }
+
         tokio::spawn(async move {
-            let _ = p43::matrix::global::listen_room(
-                &listen_room_id,
-                None,
-                |_| {},
-                move |_sender, body| {
-                    if let Ok(msg) = p43::protocol::Message::from_json(&body) {
-                        let _ = ext_tx_clone.send(msg);
-                    }
-                },
-            )
-            .await;
+            let since: Arc<std::sync::Mutex<Option<String>>> =
+                Arc::new(std::sync::Mutex::new(initial_since));
+            loop {
+                let ext_tx = ext_tx_for_task.clone();
+                let since_val = since.lock().ok().and_then(|g| g.clone());
+                let since_ptr = Arc::clone(&since);
+                let ptr_store_inner = Arc::clone(&ptr_store);
+                let room_id_inner = listen_room_id.clone();
+                let _ = p43::matrix::global::listen_room(
+                    &listen_room_id,
+                    since_val.as_deref(),
+                    move |token| {
+                        if let Ok(mut g) = since_ptr.lock() {
+                            *g = Some(token.clone());
+                        }
+                        if let Err(e) = ptr_store_inner.set(&room_id_inner, &token) {
+                            eprintln!("[p43::ssh_agent] warning: could not persist pointer: {e}");
+                        }
+                    },
+                    move |_sender, body, _ts_ms, event_id| {
+                        if let Ok(msg) = p43::protocol::Message::from_json(&body) {
+                            let _ = ext_tx.send(ExternalBusMessage {
+                                message: msg,
+                                event_id,
+                            });
+                        }
+                    },
+                )
+                .await;
+                eprintln!("[p43::ssh_agent] Matrix sync loop exited — reconnecting in 5 s…");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
         });
 
         // 4b. Decrypt middleware: external bus → internal bus.
@@ -484,15 +529,47 @@ fn run_matrix(
                         Err(e) => p43::bus::DecryptResult::Err(e.to_string()),
                     }
                 },
-                |_locked_msg| { /* CLI: no UI to notify about locked session */ },
+                |_locked_ext_msg| { /* CLI: no UI to notify about locked session */ },
                 external_rx,
                 internal_tx.clone(),
             );
         }
 
+        // Async redact worker — collects (room_id, event_id) pairs and flushes
+        // them to the homeserver once per minute so redactions never block the
+        // transaction response path.
+        let (redact_tx, _redact_handle) = p43::matrix::global::spawn_redact_worker();
+
+        // Request event-id registry: request_id → Matrix event_id of the sent
+        // request message.  Populated by the encrypt worker via `on_sent`; consumed
+        // by the dispatcher when the matching response arrives so that BOTH the
+        // request and response events can be queued for redaction together.
+        // If no response arrives (timeout) neither event is redacted.
+        let req_event_map: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        // Small task: drain the on_sent channel into req_event_map.
+        let (req_ev_tx, mut req_ev_rx) = tokio::sync::mpsc::channel::<(String, String)>(256);
+        {
+            let map = Arc::clone(&req_event_map);
+            tokio::spawn(async move {
+                while let Some((req_id, ev_id)) = req_ev_rx.recv().await {
+                    if let Ok(mut guard) = map.lock() {
+                        guard.insert(req_id, ev_id);
+                    }
+                }
+            });
+        }
+
         // 4c. Internal bus dispatcher: route responses to the pending map.
+        //     On each successful routing, look up the request event_id; if both
+        //     the request and response event_ids are known, queue both for
+        //     deferred redaction (≤60 s delay).
         {
             let dispatch_pending = Arc::clone(&pending);
+            let dispatch_room_id = room_id.clone();
+            let dispatch_req_map = Arc::clone(&req_event_map);
+            let dispatch_redact_tx = redact_tx.clone();
             let mut internal_rx = internal_tx.subscribe();
             tokio::spawn(async move {
                 loop {
@@ -517,6 +594,21 @@ fn run_matrix(
                         if let Ok(mut guard) = dispatch_pending.try_lock() {
                             if let Some(tx) = guard.remove(&id) {
                                 let _ = tx.send(inbound.message);
+                            }
+                        }
+                        // Queue both req + res for deferred redaction only when
+                        // the request event_id was tracked (encrypted SSH messages).
+                        // Plaintext registration messages (CSR/cert) have no entry
+                        // in req_event_map and are left untouched.
+                        let res_eid = inbound.event_id.clone();
+                        if !res_eid.is_empty() {
+                            if let Ok(mut map) = dispatch_req_map.lock() {
+                                if let Some(req_eid) = map.remove(&id) {
+                                    let _ = dispatch_redact_tx
+                                        .try_send((dispatch_room_id.clone(), req_eid));
+                                    let _ = dispatch_redact_tx
+                                        .try_send((dispatch_room_id.clone(), res_eid));
+                                }
                             }
                         }
                     }
@@ -553,6 +645,9 @@ fn run_matrix(
         // 4d. Encrypt worker: outbound queue → seal → Matrix send.
         //     Spawned after registration so that cert_bytes and device_key are
         //     available; the worker runs for the lifetime of the agent.
+        //     `Some(req_ev_tx)` routes (request_id, event_id) pairs to the
+        //     registry task so the dispatcher can redact both sides of each
+        //     transaction once the response arrives.
         {
             let dk = Arc::clone(&device_key);
             let cb = Arc::clone(&cert_bytes);
@@ -562,6 +657,7 @@ fn run_matrix(
                 },
                 room_id.clone(),
                 outbound_rx,
+                Some(req_ev_tx),
             );
         }
 

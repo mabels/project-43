@@ -117,6 +117,9 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   final StreamController<void> _externalLockCtrl =
       StreamController<void>.broadcast();
   StreamSubscription<AppMessage>? _allSub;
+  // Set to true when paused/hidden; cleared after the reconnect fires.
+  // Guards against macOS firing `resumed` on every window-focus event.
+  bool _wasBackground = false;
 
   @override
   void initState() {
@@ -213,11 +216,20 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
+      _wasBackground = true;
       SettingsService.instance.invalidateCache();
       _externalLockCtrl.add(null);
       if (mounted) setState(() => _sessionUnlocked = false);
     } else if (state == AppLifecycleState.resumed) {
       _refreshLockState();
+      if (_wasBackground) {
+        _wasBackground = false;
+        // Stop the Matrix listener so it reconnects immediately with the
+        // latest persisted pointer.  Messages that arrived while the app
+        // was backgrounded are caught up in the fresh sync.
+        // Teardown fires onDone → _scheduleReconnect → new listen call.
+        unawaited(mxForceReconnect());
+      }
     }
   }
 

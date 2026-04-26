@@ -6,8 +6,8 @@
 
 use anyhow::{Context, Result};
 use matrix_sdk::{config::SyncSettings, ruma::RoomId, Client};
-use std::{path::Path, sync::OnceLock};
-use tokio::sync::Mutex;
+use std::{path::Path, sync::OnceLock, time::Duration};
+use tokio::sync::{mpsc, Mutex};
 
 // ── Global client store ───────────────────────────────────────────────────────
 
@@ -177,10 +177,88 @@ pub async fn join_room(room_spec: &str) -> Result<BridgeRoomInfo> {
 
 /// Send a plain-text message to a room.
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all, fields(room_id, text_len = text.len())))]
-pub async fn send_message(room_id: &str, text: &str) -> Result<()> {
+/// Send a plain-text message to a room and return its Matrix event ID.
+pub async fn send_message(room_id: &str, text: &str) -> Result<String> {
     let client = take_client().await.context("Not logged in to Matrix")?;
     let rid = RoomId::parse(room_id).with_context(|| format!("Invalid room ID: {room_id}"))?;
     super::room::send_message(&client, &rid, text).await
+}
+
+/// Redact a single Matrix event by its ID.
+///
+/// Consumers (e.g. the SSH agent) call this after processing a completed
+/// transaction to clean up the handled message from the room history.
+#[cfg_attr(
+    feature = "telemetry",
+    tracing::instrument(skip_all, fields(room_id, event_id))
+)]
+pub async fn redact_room_event(room_id: &str, event_id: &str) -> Result<()> {
+    let client = take_client().await.context("Not logged in to Matrix")?;
+    let rid = RoomId::parse(room_id).with_context(|| format!("Invalid room ID: {room_id}"))?;
+    super::room::redact_event(&client, &rid, event_id).await
+}
+
+// ── Async redact worker ───────────────────────────────────────────────────────
+
+/// Spawn a background task that batches Matrix event redactions and executes
+/// them at most once per minute.
+///
+/// Push `(room_id, event_id)` pairs onto the returned [`mpsc::Sender`] as
+/// transactions complete; the worker collects them and flushes to the
+/// homeserver on a 60-second timer.  This keeps redactions entirely off the
+/// transaction hot-path.
+///
+/// The worker exits (and does a final flush) when the last sender is dropped.
+pub fn spawn_redact_worker() -> (mpsc::Sender<(String, String)>, tokio::task::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::channel::<(String, String)>(256);
+    let handle = tokio::spawn(async move {
+        let mut pending: Vec<(String, String)> = Vec::new();
+        // First tick fires after 60 s, not immediately.
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            Duration::from_secs(60),
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let batch = std::mem::take(&mut pending);
+                    if !batch.is_empty() {
+                        eprintln!(
+                            "[p43::matrix] redact worker: flushing {} event(s)",
+                            batch.len()
+                        );
+                        for (room_id, event_id) in batch {
+                            if let Err(e) = redact_room_event(&room_id, &event_id).await {
+                                eprintln!("[p43::matrix] redact {event_id}: {e}");
+                            }
+                        }
+                    }
+                }
+                item = rx.recv() => {
+                    match item {
+                        Some(pair) => pending.push(pair),
+                        None => break, // all senders dropped — exit loop
+                    }
+                }
+            }
+        }
+
+        // Final flush on shutdown.
+        if !pending.is_empty() {
+            eprintln!(
+                "[p43::matrix] redact worker: final flush of {} event(s)",
+                pending.len()
+            );
+            for (room_id, event_id) in pending {
+                if let Err(e) = redact_room_event(&room_id, &event_id).await {
+                    eprintln!("[p43::matrix] redact {event_id}: {e}");
+                }
+            }
+        }
+    });
+    (tx, handle)
 }
 
 /// List devices registered on this account.
@@ -223,7 +301,8 @@ pub async fn listen_room<F, P>(
     on_message: F,
 ) -> Result<super::room::ListenPointer>
 where
-    F: Fn(String, String) + Send + Sync + 'static,
+    // F: called with (sender, body, origin_server_ts_ms, event_id).
+    F: Fn(String, String, u64, String) + Send + Sync + 'static,
     P: Fn(String) + Send + Sync + 'static,
 {
     let client = take_client().await.context("Not logged in to Matrix")?;
@@ -232,8 +311,8 @@ where
         &client,
         &rid,
         since,
-        move |sender, body| {
-            on_message(sender.to_string(), body);
+        move |sender, body, ts_ms, event_id| {
+            on_message(sender.to_string(), body, ts_ms, event_id);
         },
         on_pointer,
     )

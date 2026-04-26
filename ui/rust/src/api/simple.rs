@@ -194,11 +194,11 @@ fn outbound_tx_cell() -> &'static Mutex<Option<mpsc::Sender<p43::bus::OutboundBu
 // can re-inject `BusSecure` messages that arrived while the session was locked.
 
 static EXTERNAL_TX: OnceLock<
-    Mutex<Option<tokio::sync::broadcast::Sender<p43::protocol::Message>>>,
+    Mutex<Option<tokio::sync::broadcast::Sender<p43::bus::ExternalBusMessage>>>,
 > = OnceLock::new();
 
 fn external_tx_cell(
-) -> &'static Mutex<Option<tokio::sync::broadcast::Sender<p43::protocol::Message>>> {
+) -> &'static Mutex<Option<tokio::sync::broadcast::Sender<p43::bus::ExternalBusMessage>>> {
     EXTERNAL_TX.get_or_init(|| Mutex::new(None))
 }
 
@@ -209,10 +209,10 @@ fn external_tx_cell(
 // `bus_unlock_session` drains this queue and replays each message onto the
 // external bus so the full decrypt → internal-bus → AppMessage pipeline runs.
 
-static LOCKED_MSG_QUEUE: OnceLock<Mutex<std::collections::VecDeque<p43::protocol::Message>>> =
+static LOCKED_MSG_QUEUE: OnceLock<Mutex<std::collections::VecDeque<p43::bus::ExternalBusMessage>>> =
     OnceLock::new();
 
-fn locked_msg_queue() -> &'static Mutex<std::collections::VecDeque<p43::protocol::Message>> {
+fn locked_msg_queue() -> &'static Mutex<std::collections::VecDeque<p43::bus::ExternalBusMessage>> {
     LOCKED_MSG_QUEUE.get_or_init(|| Mutex::new(std::collections::VecDeque::new()))
 }
 
@@ -244,6 +244,14 @@ fn pending_list_keys() -> &'static Mutex<HashMap<String, Option<p43::bus::CertPa
 static SIGNING_KEY_CACHE: OnceLock<Mutex<HashMap<String, Box<[u8; 64]>>>> = OnceLock::new();
 static KEY_CACHE_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// ── Message age filter ────────────────────────────────────────────────────────
+//
+// Maximum age of messages that the UI will process, in hours.
+// Messages older than this are silently dropped before they reach the bus.
+// Default: 8 h.  Controlled by the Settings screen.
+
+static MESSAGE_MAX_AGE_HOURS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(8);
+
 fn signing_key_cache() -> &'static Mutex<HashMap<String, Box<[u8; 64]>>> {
     SIGNING_KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -253,6 +261,34 @@ fn signing_key_cache() -> &'static Mutex<HashMap<String, Box<[u8; 64]>>> {
 #[frb]
 pub fn set_store_dir(dir: String) {
     let _ = STORE_DIR.set(PathBuf::from(dir).join("keys"));
+}
+
+// ── Listener stop signal ──────────────────────────────────────────────────────
+//
+// Each `mx_listen_all` invocation creates a fresh `Arc<Notify>` and stores it
+// here.  `mx_force_reconnect` fires the notify, which causes `tokio::select!`
+// inside `mx_listen_all` to break the listener loop.  The normal teardown
+// path then runs, the FRB stream closes, and Dart's `onDone` fires
+// `_scheduleReconnect` — which re-enters `mx_listen_all` with the latest
+// persisted pointer so no messages are missed.
+
+static LISTENER_STOP: OnceLock<Mutex<std::sync::Arc<tokio::sync::Notify>>> = OnceLock::new();
+
+fn listener_stop_cell() -> &'static Mutex<std::sync::Arc<tokio::sync::Notify>> {
+    LISTENER_STOP.get_or_init(|| Mutex::new(std::sync::Arc::new(tokio::sync::Notify::new())))
+}
+
+/// Signal the running Matrix listener to stop immediately.
+///
+/// Dart calls this from `didChangeAppLifecycleState(resumed)` so that messages
+/// that arrived while the app was backgrounded are caught up on reconnect.
+/// The listener tears down, the FRB stream fires `onDone`, and
+/// `_scheduleReconnect` re-opens the connection with the last saved pointer.
+#[frb]
+pub fn mx_force_reconnect() {
+    if let Ok(guard) = listener_stop_cell().lock() {
+        guard.notify_one();
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -353,10 +389,7 @@ pub fn get_public_key_armored(fingerprint: String) -> anyhow::Result<String> {
 /// unencrypted keys).  Verification is performed before returning the armor so
 /// that the caller knows the passphrase is correct before writing to disk.
 #[frb]
-pub fn get_private_key_armored(
-    fingerprint: String,
-    passphrase: String,
-) -> anyhow::Result<String> {
+pub fn get_private_key_armored(fingerprint: String, passphrase: String) -> anyhow::Result<String> {
     // find_with_secret verifies the passphrase and returns Err on mismatch.
     let key = open_store()?.find_with_secret(&fingerprint, &passphrase)?;
     p43::key_store::store::export_priv(&key)
@@ -662,7 +695,9 @@ pub async fn mx_join_room(room: String) -> anyhow::Result<MxRoomInfo> {
 
 #[frb]
 pub async fn mx_send(room_id: String, text: String) -> anyhow::Result<()> {
-    p43::matrix::global::send_message(&room_id, &text).await
+    p43::matrix::global::send_message(&room_id, &text)
+        .await
+        .map(|_| ())
 }
 
 /// Stream all messages in `room_id` (history + live).
@@ -674,7 +709,7 @@ pub fn mx_listen(room_id: String, sink: StreamSink<MxMessage>) {
             &room_id,
             None,
             |_| {},
-            move |sender, body| {
+            move |sender, body, _ts_ms, _event_id| {
                 let _ = sink.add(MxMessage { sender, body });
             },
         )
@@ -797,24 +832,50 @@ pub enum AppMessage {
 pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
     tokio_rt().spawn(async move {
         // ── Since token ───────────────────────────────────────────────────────
-        let since: Option<String> = (|| -> Option<String> {
+        //
+        // Each reader (cli, ui) has its own pointer file so they never consume
+        // each other's cursor.  Layout:
+        //   <store_root>/app-state/<device_id>/ui.json → { "<room_id>": "<token>" }
+        let ptr_store: Option<std::sync::Arc<p43::matrix::RoomPointerStore>> = (|| {
             let store_dir = STORE_DIR.get()?;
+            let store_root = store_dir.parent()?;
             let cfg = p43::matrix::MatrixConfig::from_store_dir(store_dir);
-            let saved = p43::matrix::client::load_config(&cfg.config_path).ok()??;
-            saved.agent_since
+            let device_id = p43::matrix::device_id_from_config(&cfg.config_path).ok()?;
+            Some(std::sync::Arc::new(p43::matrix::RoomPointerStore::new(
+                store_root,
+                &device_id,
+                "ui",
+            )))
         })();
 
-        let pointer_store_dir = STORE_DIR.get().cloned();
-        let on_pointer = move |token: String| {
-            let Some(ref store_dir) = pointer_store_dir else {
-                return;
-            };
-            let cfg = p43::matrix::MatrixConfig::from_store_dir(store_dir);
-            let Ok(Some(mut saved)) = p43::matrix::client::load_config(&cfg.config_path) else {
-                return;
-            };
-            saved.agent_since = Some(token);
-            let _ = p43::matrix::client::save_config(&saved, &cfg.config_path);
+        let since: Option<String> = ptr_store
+            .as_ref()
+            .and_then(|s| s.get(&room_id));
+
+        match &since {
+            Some(token) => eprintln!("[p43::bridge] Resuming from pointer: {token}"),
+            None => eprintln!("[p43::bridge] No stored pointer — replaying full room history"),
+        }
+
+        // Throttle pointer writes to at most once every 60 s to save
+        // flash I/O and battery on iOS/Android.
+        let pointer_last_write: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let on_pointer = {
+            let last_write = std::sync::Arc::clone(&pointer_last_write);
+            let room_id_for_ptr = room_id.clone();
+            move |token: String| {
+                let Some(ref store) = ptr_store else { return };
+                let Ok(mut guard) = last_write.lock() else { return };
+                let due = match *guard {
+                    None => true,
+                    Some(t) => t.elapsed() >= std::time::Duration::from_secs(60),
+                };
+                if !due { return; }
+                if store.set(&room_id_for_ptr, &token).is_ok() {
+                    *guard = Some(std::time::Instant::now());
+                }
+            }
         };
 
         // ── Bridge channels ───────────────────────────────────────────────────
@@ -847,7 +908,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
         })()
         .unwrap_or_default();
 
-        {
+        let decrypt_handle = {
             let sink_locked = sink.clone();
             p43::bus::spawn_decrypt_middleware(
                 move |env| {
@@ -867,21 +928,21 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                         Err(e) => p43::bus::DecryptResult::Err(e.to_string()),
                     }
                 },
-                move |locked_msg| {
-                    // Buffer the raw BusSecure message so it can be replayed
-                    // through the external bus once the session is unlocked.
+                move |locked_ext_msg| {
+                    // Buffer the raw BusSecure message (with its event_id) so
+                    // it can be replayed through the external bus once unlocked.
                     if let Ok(mut queue) = locked_msg_queue().lock() {
-                        queue.push_back(locked_msg);
+                        queue.push_back(locked_ext_msg);
                     }
                     let _ = sink_locked.add(AppMessage::SessionLockRequired);
                 },
                 external_rx,
                 internal_tx.clone(),
-            );
-        }
+            )
+        };
 
         // ── Encrypt worker: outbound queue → seal → Matrix send ───────────────
-        p43::bus::spawn_encrypt_worker(
+        let encrypt_handle = p43::bus::spawn_encrypt_worker(
             |msg, recipient| {
                 let Ok(guard) = authority_session().lock() else {
                     return None;
@@ -893,10 +954,11 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
             },
             room_id.clone(),
             outbound_rx,
+            None, // UI does not redact individual messages
         );
 
         // ── Internal bus dispatcher → AppMessage stream ───────────────────────
-        {
+        let dispatcher_handle = {
             let sink_dispatch = sink.clone();
             let mut internal_rx = internal_tx.subscribe();
             tokio::spawn(async move {
@@ -965,21 +1027,71 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                         let _ = sink_dispatch.add(m);
                     }
                 }
-            });
-        }
+            })
+        };
 
         // ── Raw Matrix listener → external bus ────────────────────────────────
-        let _ = p43::matrix::global::listen_room(
-            &room_id,
-            since.as_deref(),
-            on_pointer,
-            move |_sender, body| {
-                if let Ok(msg) = p43::protocol::Message::from_json(&body) {
-                    let _ = external_tx.send(msg);
-                }
-            },
-        )
-        .await;
+        //
+        // A fresh stop-signal is installed on every invocation so that
+        // `mx_force_reconnect` (called from Dart's `resumed` lifecycle handler)
+        // can break this specific listener without affecting a future one.
+        let stop = std::sync::Arc::new(tokio::sync::Notify::new());
+        if let Ok(mut guard) = listener_stop_cell().lock() {
+            *guard = std::sync::Arc::clone(&stop);
+        }
+        let stop_rx = std::sync::Arc::clone(&stop);
+
+        // Age filter: ignore messages older than messageMaxAgeHours.
+        let max_age_hours = MESSAGE_MAX_AGE_HOURS.load(Ordering::Relaxed);
+        let cutoff_ms: u64 = {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            now_ms.saturating_sub(max_age_hours * 3_600_000)
+        };
+        eprintln!("[p43::bridge] message age filter: ignore messages older than {max_age_hours} h");
+
+        tokio::select! {
+            _ = stop_rx.notified() => {
+                eprintln!("[p43::bridge] Reconnect requested — stopping listener for catch-up");
+            }
+            _ = p43::matrix::global::listen_room(
+                &room_id,
+                since.as_deref(),
+                on_pointer,
+                move |_sender, body, ts_ms, event_id| {
+                    if ts_ms < cutoff_ms {
+                        eprintln!("[p43::bridge] skipping message older than {max_age_hours} h (ts={ts_ms})");
+                        return;
+                    }
+                    if let Ok(msg) = p43::protocol::Message::from_json(&body) {
+                        let _ = external_tx
+                            .send(p43::bus::ExternalBusMessage { message: msg, event_id });
+                    }
+                },
+            ) => {}
+        }
+
+        // ── Teardown ──────────────────────────────────────────────────────────
+        // The sync loop exited (timeout, network drop, or server close).
+        // Abort all bus tasks immediately so their sink clones are dropped,
+        // which closes the FRB stream and fires onDone in Dart, triggering
+        // _scheduleReconnect after 5 s.
+        //
+        // Also clear the shared cell senders: external_tx_cell() held a clone
+        // of external_tx that would otherwise keep the decrypt middleware's
+        // external_rx alive even after the event handler was deregistered in
+        // room::listen (Fix 1), preventing the bus pipeline from draining.
+        decrypt_handle.abort();
+        encrypt_handle.abort();
+        dispatcher_handle.abort();
+        if let Ok(mut guard) = external_tx_cell().lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = outbound_tx_cell().lock() {
+            *guard = None;
+        }
     });
 }
 
@@ -1487,7 +1599,7 @@ pub fn bus_unlock_session(
     // Replay any BusSecure messages that arrived while the session was locked.
     // We drain the queue first, then inject each message back onto the external
     // bus so the full decrypt → internal-bus → AppMessage pipeline handles them.
-    let buffered: Vec<p43::protocol::Message> = locked_msg_queue()
+    let buffered: Vec<p43::bus::ExternalBusMessage> = locked_msg_queue()
         .lock()
         .map(|mut q| q.drain(..).collect())
         .unwrap_or_default();
@@ -1495,8 +1607,8 @@ pub fn bus_unlock_session(
     if !buffered.is_empty() {
         if let Ok(guard) = external_tx_cell().lock() {
             if let Some(ref tx) = *guard {
-                for msg in buffered {
-                    let _ = tx.send(msg);
+                for ext_msg in buffered {
+                    let _ = tx.send(ext_msg);
                 }
             }
         }
@@ -1565,7 +1677,9 @@ async fn send_via_bridge(
     } else {
         msg.to_json()?
     };
-    p43::matrix::global::send_message(room_id, &json).await
+    p43::matrix::global::send_message(room_id, &json)
+        .await
+        .map(|_| ())
 }
 
 #[allow(dead_code)]
@@ -1636,6 +1750,19 @@ pub fn mx_set_cache_key_enabled(enabled: bool) {
             cache.clear();
         }
     }
+}
+
+/// Set the maximum age of Matrix messages the UI will process.
+///
+/// Messages with `origin_server_ts` older than `hours` before *now* are
+/// silently dropped before they reach the bus pipeline.
+/// Default is 8 h.  Pass 0 to disable the filter (accept all messages).
+///
+/// Call at startup with the persisted setting value, and again whenever the
+/// user changes it in Settings.
+#[frb]
+pub fn mx_set_message_max_age_hours(hours: u64) {
+    MESSAGE_MAX_AGE_HOURS.store(hours, Ordering::Relaxed);
 }
 
 /// Update the credential cache timeout.

@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 382581620;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 626035449;
 
 // Section: executor
 
@@ -1373,6 +1373,40 @@ fn wire__crate__api__simple__mx_confirm_verify_impl(
         },
     )
 }
+fn wire__crate__api__simple__mx_force_reconnect_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mx_force_reconnect",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::simple::mx_force_reconnect();
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__mx_get_agent_room_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2170,6 +2204,41 @@ fn wire__crate__api__simple__mx_set_cache_key_enabled_impl(
                 transform_result_sse::<_, ()>((move || {
                     let output_ok = Result::<_, ()>::Ok({
                         crate::api::simple::mx_set_cache_key_enabled(api_enabled);
+                    })?;
+                    Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__api__simple__mx_set_message_max_age_hours_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mx_set_message_max_age_hours",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_hours = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok = Result::<_, ()>::Ok({
+                        crate::api::simple::mx_set_message_max_age_hours(api_hours);
                     })?;
                     Ok(output_ok)
                 })())
@@ -3080,57 +3149,64 @@ fn pde_ffi_dispatcher_primary_impl(
         35 => wire__crate__api__simple__lock_all_impl(port, ptr, rust_vec_len, data_len),
         36 => wire__crate__api__simple__mx_clear_caches_impl(port, ptr, rust_vec_len, data_len),
         37 => wire__crate__api__simple__mx_confirm_verify_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__simple__mx_get_agent_room_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__simple__mx_is_logged_in_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__simple__mx_join_room_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__simple__mx_list_devices_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__simple__mx_list_rooms_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__simple__mx_listen_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__simple__mx_listen_all_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__simple__mx_login_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__simple__mx_logout_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__simple__mx_prime_passphrase_cache_impl(
+        38 => wire__crate__api__simple__mx_force_reconnect_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__simple__mx_get_agent_room_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__simple__mx_is_logged_in_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__simple__mx_join_room_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__simple__mx_list_devices_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__simple__mx_list_rooms_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__simple__mx_listen_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__simple__mx_listen_all_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__simple__mx_login_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__simple__mx_logout_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__simple__mx_prime_passphrase_cache_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => wire__crate__api__simple__mx_reject_sign_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__simple__mx_respond_csr_impl(port, ptr, rust_vec_len, data_len),
-        50 => {
+        49 => wire__crate__api__simple__mx_reject_sign_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__simple__mx_respond_csr_impl(port, ptr, rust_vec_len, data_len),
+        51 => {
             wire__crate__api__simple__mx_respond_list_keys_impl(port, ptr, rust_vec_len, data_len)
         }
-        51 => wire__crate__api__simple__mx_respond_sign_impl(port, ptr, rust_vec_len, data_len),
-        52 => {
+        52 => wire__crate__api__simple__mx_respond_sign_impl(port, ptr, rust_vec_len, data_len),
+        53 => {
             wire__crate__api__simple__mx_respond_sign_cached_impl(port, ptr, rust_vec_len, data_len)
         }
-        53 => {
+        54 => {
             wire__crate__api__simple__mx_respond_sign_card_impl(port, ptr, rust_vec_len, data_len)
         }
-        54 => wire__crate__api__simple__mx_respond_sign_card_cached_impl(
+        55 => wire__crate__api__simple__mx_respond_sign_card_cached_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__api__simple__mx_restore_impl(port, ptr, rust_vec_len, data_len),
-        56 => wire__crate__api__simple__mx_send_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__simple__mx_set_agent_room_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__simple__mx_set_cache_key_enabled_impl(
+        56 => wire__crate__api__simple__mx_restore_impl(port, ptr, rust_vec_len, data_len),
+        57 => wire__crate__api__simple__mx_send_impl(port, ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__simple__mx_set_agent_room_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__simple__mx_set_cache_key_enabled_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        59 => wire__crate__api__simple__mx_start_verify_impl(port, ptr, rust_vec_len, data_len),
-        60 => wire__crate__api__simple__register_card_ident_impl(port, ptr, rust_vec_len, data_len),
-        61 => {
+        60 => wire__crate__api__simple__mx_set_message_max_age_hours_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        61 => wire__crate__api__simple__mx_start_verify_impl(port, ptr, rust_vec_len, data_len),
+        62 => wire__crate__api__simple__register_card_ident_impl(port, ptr, rust_vec_len, data_len),
+        63 => {
             wire__crate__api__simple__set_active_traceparent_impl(port, ptr, rust_vec_len, data_len)
         }
-        62 => wire__crate__api__simple__set_key_enabled_impl(port, ptr, rust_vec_len, data_len),
-        63 => wire__crate__api__simple__set_store_dir_impl(port, ptr, rust_vec_len, data_len),
-        64 => wire__crate__api__simple__shutdown_telemetry_impl(port, ptr, rust_vec_len, data_len),
-        65 => {
+        64 => wire__crate__api__simple__set_key_enabled_impl(port, ptr, rust_vec_len, data_len),
+        65 => wire__crate__api__simple__set_store_dir_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__simple__shutdown_telemetry_impl(port, ptr, rust_vec_len, data_len),
+        67 => {
             wire__crate__api__simple__verify_key_passphrase_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),

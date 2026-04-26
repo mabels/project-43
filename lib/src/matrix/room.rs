@@ -9,11 +9,11 @@ use matrix_sdk::{
     deserialized_responses::TimelineEventKind,
     room::{MessagesOptions, Room},
     ruma::{
-        events::{
-            room::message::{MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent},
-            AnyMessageLikeEvent, AnyTimelineEvent,
+        events::room::message::{
+            MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
         },
-        OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomAliasId, RoomId, RoomOrAliasId, UInt,
+        OwnedEventId, OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomAliasId, RoomId,
+        RoomOrAliasId, UInt,
     },
     Client, LoopCtrl,
 };
@@ -104,12 +104,14 @@ pub fn list_joined_rooms(client: &Client) -> Vec<RoomInfo> {
 ///
 /// The client must have been synced at least once so the room appears in
 /// session state.
-pub async fn send_message(client: &Client, room_id: &RoomId, text: &str) -> Result<()> {
+/// Send a plain-text message and return the Matrix event ID of the sent event.
+pub async fn send_message(client: &Client, room_id: &RoomId, text: &str) -> Result<String> {
     let room = get_room(client, room_id)?;
-    room.send(RoomMessageEventContent::text_plain(text))
+    let resp = room
+        .send(RoomMessageEventContent::text_plain(text))
         .await
         .context("Failed to send message")?;
-    Ok(())
+    Ok(resp.event_id.to_string())
 }
 
 // ── Listen ────────────────────────────────────────────────────────────────────
@@ -137,10 +139,12 @@ pub type ListenPointer = String;
 ///
 /// ## Callback
 ///
-/// `on_message(sender: OwnedUserId, body: String)` is called for every
-/// qualifying message — catch-up and live — oldest first.  The closure is
-/// required to be `Send + Sync + 'static` because it is shared with the
-/// event-handler thread.
+/// `on_message(sender, body, ts_ms, event_id)` is called for every
+/// qualifying message — catch-up and live — oldest first.  `event_id` is
+/// the Matrix event ID (`$…`) of the m.room.message event; consumers can
+/// pass it to `redact_event` / `redact_room_event` after processing to
+/// clean up the room.  The closure must be `Send + Sync + 'static` because
+/// it is shared with the event-handler thread.
 pub async fn listen<F, P>(
     client: &Client,
     room_id: &RoomId,
@@ -149,10 +153,9 @@ pub async fn listen<F, P>(
     on_pointer: P,
 ) -> Result<ListenPointer>
 where
-    F: Fn(OwnedUserId, String) + Send + Sync + 'static,
-    // Called with the latest `next_batch` token on every sync batch.
-    // Use this to persist the token so reconnects skip already-seen messages.
-    // Pass `|_| {}` to ignore.
+    // F: called with (sender, body, origin_server_ts_ms, event_id) for each message.
+    F: Fn(OwnedUserId, String, u64, String) + Send + Sync + 'static,
+    // P: called with the latest `next_batch` token on every sync batch.
     P: Fn(String) + Send + Sync + 'static,
 {
     let on_message = Arc::new(on_message);
@@ -171,7 +174,7 @@ where
                 .context("Initial sync before history pagination failed")?;
 
             let room = get_room(client, room_id)?;
-            let mut all: Vec<(OwnedUserId, String)> = Vec::new();
+            let mut all: Vec<(OwnedUserId, String, u64, String)> = Vec::new();
             let mut from: Option<String> = None;
 
             // Paginate backward until the server signals we've reached the
@@ -189,8 +192,8 @@ where
                     .context("Failed to fetch message history page")?;
 
                 for ev in page.chunk {
-                    if let Some(pair) = extract_text_event(&ev) {
-                        all.push(pair);
+                    if let Some(quad) = extract_text_event(&ev) {
+                        all.push(quad);
                     }
                 }
 
@@ -202,8 +205,8 @@ where
 
             // `backward()` yields newest-first; reverse to oldest-first.
             all.reverse();
-            for (sender, body) in all {
-                on_message(sender, body);
+            for (sender, body, ts_ms, event_id) in all {
+                on_message(sender, body, ts_ms, event_id);
             }
 
             sync_resp.next_batch
@@ -214,7 +217,7 @@ where
         // then do a single zero-timeout sync from `token`.  This fires the
         // handler for every event that arrived after `token` was issued.
         Some(token) => {
-            let (tx, mut rx) = mpsc::channel::<(OwnedUserId, String)>(256);
+            let (tx, mut rx) = mpsc::channel::<(OwnedUserId, String, u64, String)>(256);
             let tx = Arc::new(tx);
 
             let handle = client.add_room_event_handler(room_id, {
@@ -225,7 +228,11 @@ where
                         let MessageType::Text(ref text) = ev.content.msgtype else {
                             return;
                         };
-                        let _ = tx.send((ev.sender.clone(), text.body.clone())).await;
+                        let ts_ms = u64::from(ev.origin_server_ts.get());
+                        let event_id = ev.event_id.to_string();
+                        let _ = tx
+                            .send((ev.sender.clone(), text.body.clone(), ts_ms, event_id))
+                            .await;
                     }
                 }
             });
@@ -240,8 +247,8 @@ where
             client.remove_event_handler(handle);
             drop(tx); // close sender; rx.recv() will return None once drained
 
-            while let Some((sender, body)) = rx.recv().await {
-                on_message(sender, body);
+            while let Some((sender, body, ts_ms, event_id)) = rx.recv().await {
+                on_message(sender, body, ts_ms, event_id);
             }
 
             resp.next_batch
@@ -249,7 +256,11 @@ where
     };
 
     // ── Live tail ─────────────────────────────────────────────────────────
-    client.add_room_event_handler(room_id, {
+    // Save the handle so we can deregister when the sync loop exits.
+    // Without this, the handler keeps an Arc to `on_message` (which captures
+    // `external_tx`) alive inside the matrix-sdk client indefinitely, blocking
+    // the bus pipeline from tearing down and the FRB sink from closing.
+    let live_handle = client.add_room_event_handler(room_id, {
         let cb = Arc::clone(&on_message);
         move |ev: OriginalSyncRoomMessageEvent, _room: Room| {
             let cb = Arc::clone(&cb);
@@ -257,7 +268,9 @@ where
                 let MessageType::Text(ref text) = ev.content.msgtype else {
                     return;
                 };
-                cb(ev.sender.clone(), text.body.clone());
+                let ts_ms = u64::from(ev.origin_server_ts.get());
+                let event_id = ev.event_id.to_string();
+                cb(ev.sender.clone(), text.body.clone(), ts_ms, event_id);
             }
         }
     });
@@ -267,7 +280,7 @@ where
 
     // 2 s long-poll: server returns immediately on new events, timeout only
     // applies when the room is idle.  Keeps worst-case receive latency ≤ 2 s.
-    client
+    let sync_result = client
         .sync_with_callback(
             SyncSettings::default()
                 .token(initial_token)
@@ -290,7 +303,14 @@ where
             },
         )
         .await
-        .context("Sync loop terminated unexpectedly")?;
+        .context("Sync loop terminated unexpectedly");
+
+    // Deregister before propagating any error so the `on_message` closure
+    // (and the `external_tx` it captures) are released promptly, letting the
+    // bus pipeline wind down and the FRB sink close on the Dart side.
+    client.remove_event_handler(live_handle);
+
+    sync_result?;
 
     let token = Arc::try_unwrap(last_token)
         .map_err(|_| anyhow::anyhow!("last_token Arc still shared after sync exit"))?
@@ -410,31 +430,145 @@ fn get_room(client: &Client, room_id: &RoomId) -> Result<Room> {
         .with_context(|| format!("Room {room_id} not found — are you a member?"))
 }
 
-/// Try to extract a `(sender, body)` pair from a [`TimelineEvent`].
+/// Try to extract a `(sender, body, origin_server_ts_ms, event_id)` quad from a
+/// [`TimelineEvent`].
 ///
 /// Returns `Some` only for plain-text `m.room.message` events; silently
-/// drops state events, redactions, reactions, and encrypted messages that
-/// cannot be decrypted.
+/// drops state events, redactions, reactions, and encrypted messages.
 ///
 /// [`TimelineEvent`]: matrix_sdk::deserialized_responses::TimelineEvent
 fn extract_text_event(
     ev: &matrix_sdk::deserialized_responses::TimelineEvent,
-) -> Option<(OwnedUserId, String)> {
-    // PlainText events carry a Raw<AnySyncTimelineEvent>; the outer
-    // TimelineEvent wrapper does not implement AnyTimelineEvent directly,
-    // so we round-trip via the raw JSON string.
-    let parsed: AnyTimelineEvent = match &ev.kind {
+) -> Option<(OwnedUserId, String, u64, String)> {
+    // Extract raw JSON regardless of kind so we can read origin_server_ts
+    // and event_id without fighting the ruma type hierarchy.
+    let raw: serde_json::Value = match &ev.kind {
         TimelineEventKind::PlainText { event } => serde_json::from_str(event.json().get()).ok()?,
-        TimelineEventKind::Decrypted(dec) => dec.event.deserialize().ok()?,
+        TimelineEventKind::Decrypted(dec) => serde_json::from_str(dec.event.json().get()).ok()?,
         _ => return None,
     };
 
-    if let AnyTimelineEvent::MessageLike(AnyMessageLikeEvent::RoomMessage(msg)) = parsed {
-        if let Some(orig) = msg.as_original() {
-            if let MessageType::Text(ref text) = orig.content.msgtype {
-                return Some((msg.sender().to_owned(), text.body.clone()));
+    if raw["type"].as_str() != Some("m.room.message") {
+        return None;
+    }
+    if raw["content"]["msgtype"].as_str() != Some("m.text") {
+        return None;
+    }
+
+    let sender: OwnedUserId = raw["sender"].as_str()?.try_into().ok()?;
+    let body: String = raw["content"]["body"].as_str()?.to_owned();
+    let ts_ms: u64 = raw["origin_server_ts"].as_u64()?;
+    let event_id: String = raw["event_id"].as_str()?.to_owned();
+
+    Some((sender, body, ts_ms, event_id))
+}
+
+// ── Redact ────────────────────────────────────────────────────────────────────
+
+/// Redact a single event by its Matrix event ID.
+///
+/// Used by consumers to clean up processed transaction messages from the room.
+/// Errors are returned to the caller; they should log and skip rather than
+/// treating them as fatal (the event may already be redacted or the user may
+/// lack permission).
+pub async fn redact_event(client: &Client, room_id: &RoomId, event_id: &str) -> Result<()> {
+    let room = get_room(client, room_id)?;
+    let eid: OwnedEventId = event_id
+        .try_into()
+        .with_context(|| format!("Invalid event ID: {event_id}"))?;
+    room.redact(&eid, None, None)
+        .await
+        .with_context(|| format!("Failed to redact event {event_id}"))?;
+    Ok(())
+}
+
+// ── Purge ─────────────────────────────────────────────────────────────────────
+
+/// Redact all `m.room.message` events in `room_id` whose
+/// `origin_server_ts` is older than `older_than_ms` (Unix timestamp, ms).
+///
+/// State events (m.room.create, m.room.member, …) are never touched.
+/// Message content is not inspected — any m.room.message older than the
+/// cutoff is redacted regardless of body.
+///
+/// Returns the number of events successfully redacted.
+/// Errors from individual redactions are logged and skipped.
+pub async fn purge_room_history(
+    client: &Client,
+    room_id: &RoomId,
+    older_than_ms: u64,
+) -> Result<usize> {
+    let room = get_room(client, room_id)?;
+    let mut redacted = 0usize;
+    let mut from: Option<String> = None;
+
+    loop {
+        let mut opts = MessagesOptions::backward();
+        opts.limit = UInt::try_from(100u64).unwrap_or(UInt::MAX);
+        opts.from = from.clone();
+
+        let page = room
+            .messages(opts)
+            .await
+            .context("Failed to fetch message history page during purge")?;
+
+        for ev in &page.chunk {
+            // Parse raw JSON from any event kind — we only need event_id,
+            // type, and origin_server_ts; we never inspect the message body.
+            let raw: serde_json::Value = match &ev.kind {
+                TimelineEventKind::PlainText { event } => {
+                    serde_json::from_str(event.json().get()).unwrap_or_default()
+                }
+                TimelineEventKind::Decrypted(dec) => {
+                    serde_json::from_str(dec.event.json().get()).unwrap_or_default()
+                }
+                _ => serde_json::Value::Null,
+            };
+
+            // Skip events we could not parse (e.g. unknown timeline kinds).
+            let ts_ms = match raw["origin_server_ts"].as_u64() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            // Event is within the retention window — leave it alone.
+            if ts_ms >= older_than_ms {
+                continue;
+            }
+
+            // Only redact user messages; never touch room state events.
+            if raw["type"].as_str() != Some("m.room.message") {
+                continue;
+            }
+
+            let event_id_str = match raw["event_id"].as_str() {
+                Some(id) => id,
+                None => continue,
+            };
+            let event_id: OwnedEventId = match event_id_str.try_into() {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+
+            match room.redact(&event_id, None, None).await {
+                Ok(_) => {
+                    redacted += 1;
+                    eprintln!("[p43::matrix] redacted {event_id_str}");
+                }
+                Err(e) => {
+                    eprintln!("[p43::matrix] warning: could not redact {event_id_str}: {e}");
+                }
             }
         }
+
+        // Backward pagination delivers newest-first.  A page full of newer
+        // events does NOT mean there are no old ones — keep going until the
+        // server signals the beginning of the timeline (end == None).
+        match page.end {
+            None => break,
+            Some(t) => from = Some(t),
+        }
     }
-    None
+
+    Ok(redacted)
 }

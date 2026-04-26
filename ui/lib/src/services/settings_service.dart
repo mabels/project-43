@@ -17,6 +17,7 @@ class AgentSettings {
     this.otelEndpoint = '',
     this.deviceCertTtlDays = 180,
     this.defaultKeyFingerprint,
+    this.messageMaxAgeHours = 8,
   });
 
   /// When `true` and credentials for the requested key are cached, sign
@@ -63,6 +64,11 @@ class AgentSettings {
   /// `null` means use the first available key.
   final String? defaultKeyFingerprint;
 
+  /// How many hours back the UI will process Matrix messages.
+  /// Messages older than this are silently ignored.
+  /// Default: 8 h.  Set to 0 to accept all messages regardless of age.
+  final int messageMaxAgeHours;
+
   AgentSettings copyWith({
     bool? autoApproveWhenCached,
     bool? cacheDecryptedKey,
@@ -71,6 +77,7 @@ class AgentSettings {
     String? otelEndpoint,
     int? deviceCertTtlDays,
     Object? defaultKeyFingerprint = _sentinel,
+    int? messageMaxAgeHours,
   }) =>
       AgentSettings(
         autoApproveWhenCached:
@@ -85,6 +92,7 @@ class AgentSettings {
         defaultKeyFingerprint: defaultKeyFingerprint == _sentinel
             ? this.defaultKeyFingerprint
             : defaultKeyFingerprint as String?,
+        messageMaxAgeHours: messageMaxAgeHours ?? this.messageMaxAgeHours,
       );
 
   Map<String, dynamic> toJson() => {
@@ -95,6 +103,7 @@ class AgentSettings {
         'otelEndpoint': otelEndpoint,
         'deviceCertTtlDays': deviceCertTtlDays,
         'defaultKeyFingerprint': defaultKeyFingerprint,
+        'messageMaxAgeHours': messageMaxAgeHours,
       };
 
   factory AgentSettings.fromJson(Map<String, dynamic> json) => AgentSettings(
@@ -105,8 +114,8 @@ class AgentSettings {
         notifyOnSignRequest: json['notifyOnSignRequest'] as bool? ?? true,
         otelEndpoint: json['otelEndpoint'] as String? ?? '',
         deviceCertTtlDays: json['deviceCertTtlDays'] as int? ?? 180,
-        defaultKeyFingerprint:
-            json['defaultKeyFingerprint'] as String?,
+        defaultKeyFingerprint: json['defaultKeyFingerprint'] as String?,
+        messageMaxAgeHours: json['messageMaxAgeHours'] as int? ?? 8,
       );
 }
 
@@ -148,6 +157,7 @@ class SettingsService extends ChangeNotifier {
     // Sync Rust caches with the persisted settings on startup.
     mxSetCacheKeyEnabled(enabled: _settings.cacheDecryptedKey);
     _syncCacheTimeout(_settings.cacheTimeoutMinutes);
+    mxSetMessageMaxAgeHours(hours: BigInt.from(_settings.messageMaxAgeHours));
     notifyListeners();
   }
 
@@ -157,6 +167,9 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
     if (updated.cacheDecryptedKey != prev.cacheDecryptedKey) {
       mxSetCacheKeyEnabled(enabled: updated.cacheDecryptedKey);
+    }
+    if (updated.messageMaxAgeHours != prev.messageMaxAgeHours) {
+      mxSetMessageMaxAgeHours(hours: BigInt.from(updated.messageMaxAgeHours));
     }
     if (updated.cacheTimeoutMinutes != prev.cacheTimeoutMinutes) {
       _syncCacheTimeout(updated.cacheTimeoutMinutes);

@@ -68,6 +68,23 @@ impl Message {
         }
     }
 
+    /// The `request_id` carried by this message, if any.
+    ///
+    /// `BusSecure` (opaque envelope) and other wrapper types return `None`.
+    /// All other variants carry a `request_id` field for correlation.
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::SshListKeysRequest(r) => Some(&r.request_id),
+            Self::SshListKeysResponse(r) => Some(&r.request_id),
+            Self::SshSignRequest(r) => Some(&r.request_id),
+            Self::SshSignResponse(r) => Some(&r.request_id),
+            Self::BusCsrRequest(r) => Some(&r.request_id),
+            Self::BusCertResponse(r) => Some(&r.request_id),
+            Self::BusSecure(_) => None,
+            Self::Error(e) => e.request_id.as_deref(),
+        }
+    }
+
     /// Serialise to a JSON string ready to be sent as a Matrix event body.
     pub fn to_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string(self)?)

@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'simple.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `authority_session`, `credential_cache`, `default_store_dir`, `external_tx_cell`, `locked_msg_queue`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `outbound_tx_cell`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `send_via_bridge`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
+// These functions are ignored because they are not marked as `pub`: `authority_session`, `credential_cache`, `default_store_dir`, `external_tx_cell`, `listener_stop_cell`, `locked_msg_queue`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `outbound_tx_cell`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `send_via_bridge`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
 
@@ -53,6 +53,15 @@ Future<void> clearActiveTraceparent() =>
 /// Pass `getApplicationSupportDirectory().path` (or equivalent).
 Future<void> setStoreDir({required String dir}) =>
     RustLib.instance.api.crateApiSimpleSetStoreDir(dir: dir);
+
+/// Signal the running Matrix listener to stop immediately.
+///
+/// Dart calls this from `didChangeAppLifecycleState(resumed)` so that messages
+/// that arrived while the app was backgrounded are caught up on reconnect.
+/// The listener tears down, the FRB stream fires `onDone`, and
+/// `_scheduleReconnect` re-opens the connection with the last saved pointer.
+Future<void> mxForceReconnect() =>
+    RustLib.instance.api.crateApiSimpleMxForceReconnect();
 
 /// Returns all keys in the local store (~/.config/project-43/keys).
 Future<List<KeyInfo>> listKeys() =>
@@ -487,6 +496,17 @@ Future<void> mxPrimePassphraseCache({
 /// user toggles the setting.
 Future<void> mxSetCacheKeyEnabled({required bool enabled}) =>
     RustLib.instance.api.crateApiSimpleMxSetCacheKeyEnabled(enabled: enabled);
+
+/// Set the maximum age of Matrix messages the UI will process.
+///
+/// Messages with `origin_server_ts` older than `hours` before *now* are
+/// silently dropped before they reach the bus pipeline.
+/// Default is 8 h.  Pass 0 to disable the filter (accept all messages).
+///
+/// Call at startup with the persisted setting value, and again whenever the
+/// user changes it in Settings.
+Future<void> mxSetMessageMaxAgeHours({required BigInt hours}) =>
+    RustLib.instance.api.crateApiSimpleMxSetMessageMaxAgeHours(hours: hours);
 
 /// Update the credential cache timeout.
 ///

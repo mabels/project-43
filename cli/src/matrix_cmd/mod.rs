@@ -4,15 +4,15 @@ use anyhow::{Context, Result};
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::ruma::OwnedDeviceId;
 use p43::matrix::{
-    client as mx_client, delete_devices, join_room, list_devices, list_joined_rooms, listen,
-    logout, resolve_room_id, send_message, set_room_alias, verify_own_device, ListenPointer,
-    MatrixConfig,
+    client as mx_client, delete_devices, device_id_from_config, join_room, list_devices,
+    list_joined_rooms, listen, logout, purge_room_history, resolve_room_id, send_message,
+    set_room_alias, verify_own_device, ListenPointer, MatrixConfig, RoomPointerStore,
 };
 use rpassword::prompt_password;
 use std::path::Path;
 use subcmd::{
-    DeleteDeviceArgs, DevicesArgs, JoinArgs, ListenArgs, LoginArgs, MatrixCmd, RoomsArgs, SendArgs,
-    SetAliasArgs,
+    DeleteDeviceArgs, DevicesArgs, JoinArgs, ListenArgs, LoginArgs, MatrixCmd, PurgeArgs,
+    RoomsArgs, SendArgs, SetAliasArgs,
 };
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
@@ -31,6 +31,7 @@ pub fn run(cmd: MatrixCmd, store_dir: &Path, rt: &tokio::runtime::Runtime) -> Re
         MatrixCmd::Send(args) => rt.block_on(do_send(args, &cfg)),
         MatrixCmd::Listen(args) => rt.block_on(do_listen(args, &cfg)),
         MatrixCmd::Verify => rt.block_on(do_verify(&cfg)),
+        MatrixCmd::Purge(args) => rt.block_on(do_purge(args, &cfg)),
     }
 }
 
@@ -201,18 +202,74 @@ async fn do_listen(args: ListenArgs, cfg: &MatrixConfig) -> Result<()> {
     let client = require_client(cfg).await?;
     let room_id = resolve_room_id(&client, &args.room).await?;
 
+    // Per-reader pointer store: app-state/<device_id>/cli.json
+    let store_root = cfg
+        .config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let device_id = device_id_from_config(&cfg.config_path).unwrap_or_else(|_| "unknown".into());
+    let ptr_store = RoomPointerStore::new(store_root, &device_id, "cli");
+
+    let since: Option<String> = match args.since {
+        Some(ref explicit) => Some(explicit.clone()),
+        None => ptr_store.get(room_id.as_str()),
+    };
+    match &since {
+        Some(token) => eprintln!("Resuming from pointer: {token}"),
+        None => eprintln!("No stored pointer — replaying full room history"),
+    };
+
+    let ptr_store = std::sync::Arc::new(ptr_store);
+    let room_id_str = room_id.to_string();
+
     let pointer: ListenPointer = listen(
         &client,
         &room_id,
-        args.since.as_deref(),
-        |sender, body| println!("[{sender}] {body}"),
-        |_| {},
+        since.as_deref(),
+        |sender, body, _ts_ms, _event_id| println!("[{sender}] {body}"),
+        move |token| {
+            let _ = ptr_store.set(&room_id_str, &token);
+        },
     )
     .await?;
 
-    // Print the pointer so the caller can capture it and pass it as
-    // --since on the next invocation to resume from this position.
     eprintln!("pointer: {pointer}");
+    Ok(())
+}
+
+// ── Purge ─────────────────────────────────────────────────────────────────────
+
+async fn do_purge(args: PurgeArgs, cfg: &MatrixConfig) -> Result<()> {
+    let client = require_client(cfg).await?;
+
+    let room_id = match args.room {
+        Some(ref r) => resolve_room_id(&client, r).await?,
+        None => {
+            // Fall back to saved agent room.
+            let saved = mx_client::load_config(&cfg.config_path)?
+                .context("No saved session — run `p43 matrix login` first")?;
+            let room_str = saved
+                .agent_room
+                .context("No default room set — run `p43 matrix join` or pass --room")?;
+            resolve_room_id(&client, &room_str).await?
+        }
+    };
+
+    let cutoff_ms: u64 = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("System clock is before Unix epoch")?
+            .as_millis() as u64;
+        now.saturating_sub(args.older_than_hours * 3_600_000)
+    };
+
+    eprintln!(
+        "Purging messages in {room_id} older than {} h (cutoff: {cutoff_ms} ms)…",
+        args.older_than_hours
+    );
+
+    let n = purge_room_history(&client, &room_id, cutoff_ms).await?;
+    eprintln!("Done — {n} message(s) redacted.");
     Ok(())
 }
 

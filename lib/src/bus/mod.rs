@@ -36,7 +36,7 @@ pub mod signer;
 pub use authority::{AuthorityKey, AuthorityPub};
 pub use bridge::{
     new_external_bus, new_internal_bus, new_outbound_queue, spawn_decrypt_middleware,
-    spawn_encrypt_worker, DecryptResult, InboundBusMessage, OutboundBusMessage,
+    spawn_encrypt_worker, DecryptResult, ExternalBusMessage, InboundBusMessage, OutboundBusMessage,
 };
 pub use cert::{CertPayload, DeviceCert};
 pub use csr::{unix_now, CsrPayload, DeviceCsr};

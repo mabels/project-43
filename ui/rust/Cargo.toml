@@ -16,21 +16,22 @@ p43 = { path = "../../lib", default-features = false, features = [
     "ssh",
     "bus",
 ] }
+# These deps are needed on all platforms including Android and iOS.
+anyhow    = "1"
+base64    = "0.22"
+dirs      = "6"
+hex       = "0.4"
+rpassword = "7"
+# tokio for spawning tasks from StreamSink bridge functions
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+# Bundled SQLite so no system libsqlite3 is required (important on Android).
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # pcsc (smart card / YubiKey) is not available on iOS or Android — gate it out.
 # Cargo merges features from [dependencies] and [target.*.dependencies]
 # for the same crate, so this just adds "pcsc" on desktop platforms only.
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 p43 = { path = "../../lib", features = ["pcsc"] }
-base64 = "0.22"
-dirs   = "6"
-anyhow = "1"
-hex    = "0.4"
-# tokio for spawning tasks from StreamSink bridge functions
-tokio = { version = "1", features = ["rt", "sync", "time"] }
-rpassword = "7"
-# Force bundled SQLite so Android doesn't need a system libsqlite3
-rusqlite = { version = "0.37", features = ["bundled"] }
 
 [features]
 telemetry = ["p43/telemetry"]

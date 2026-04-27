@@ -116,7 +116,7 @@ jobs:
 
       # ── Java (required by Android Gradle Plugin 8.x) ──────────────────────────
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"

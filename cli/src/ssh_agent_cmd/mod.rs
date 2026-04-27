@@ -345,6 +345,7 @@ pub fn run(
     } else {
         run_matrix(args, socket_path, store_dir, rt)
     }
+
 }
 
 // ── Local mode ────────────────────────────────────────────────────────────────
@@ -535,41 +536,46 @@ fn run_matrix(
             );
         }
 
-        // Async redact worker — collects (room_id, event_id) pairs and flushes
-        // them to the homeserver once per minute so redactions never block the
-        // transaction response path.
-        let (redact_tx, _redact_handle) = p43::matrix::global::spawn_redact_worker();
+        // Async redact worker + request event-id registry — only active when
+        // --redact-on-complete is set.  When the flag is off the server-side
+        // Synapse retention policy handles cleanup; no per-transaction redaction
+        // is performed and `on_sent` is not wired into the encrypt worker.
+        let redact_tx_opt: Option<mpsc::Sender<(String, String)>> = if args.redact_on_complete {
+            let (tx, _handle) = p43::matrix::global::spawn_redact_worker();
+            Some(tx)
+        } else {
+            None
+        };
 
-        // Request event-id registry: request_id → Matrix event_id of the sent
-        // request message.  Populated by the encrypt worker via `on_sent`; consumed
-        // by the dispatcher when the matching response arrives so that BOTH the
-        // request and response events can be queued for redaction together.
-        // If no response arrives (timeout) neither event is redacted.
         let req_event_map: Arc<std::sync::Mutex<HashMap<String, String>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
 
-        // Small task: drain the on_sent channel into req_event_map.
-        let (req_ev_tx, mut req_ev_rx) = tokio::sync::mpsc::channel::<(String, String)>(256);
-        {
-            let map = Arc::clone(&req_event_map);
-            tokio::spawn(async move {
-                while let Some((req_id, ev_id)) = req_ev_rx.recv().await {
-                    if let Ok(mut guard) = map.lock() {
-                        guard.insert(req_id, ev_id);
+        // Only wire the on_sent channel when redaction is enabled.
+        let req_ev_tx_opt: Option<mpsc::Sender<(String, String)>> =
+            if args.redact_on_complete {
+                let (req_ev_tx, mut req_ev_rx) =
+                    tokio::sync::mpsc::channel::<(String, String)>(256);
+                let map = Arc::clone(&req_event_map);
+                tokio::spawn(async move {
+                    while let Some((req_id, ev_id)) = req_ev_rx.recv().await {
+                        if let Ok(mut guard) = map.lock() {
+                            guard.insert(req_id, ev_id);
+                        }
                     }
-                }
-            });
-        }
+                });
+                Some(req_ev_tx)
+            } else {
+                None
+            };
 
         // 4c. Internal bus dispatcher: route responses to the pending map.
-        //     On each successful routing, look up the request event_id; if both
-        //     the request and response event_ids are known, queue both for
-        //     deferred redaction (≤60 s delay).
+        //     When --redact-on-complete is set, also queue both the request and
+        //     response event_ids for deferred redaction on each completed transaction.
         {
             let dispatch_pending = Arc::clone(&pending);
             let dispatch_room_id = room_id.clone();
             let dispatch_req_map = Arc::clone(&req_event_map);
-            let dispatch_redact_tx = redact_tx.clone();
+            let dispatch_redact_tx = redact_tx_opt.clone();
             let mut internal_rx = internal_tx.subscribe();
             tokio::spawn(async move {
                 loop {
@@ -597,17 +603,17 @@ fn run_matrix(
                             }
                         }
                         // Queue both req + res for deferred redaction only when
-                        // the request event_id was tracked (encrypted SSH messages).
-                        // Plaintext registration messages (CSR/cert) have no entry
-                        // in req_event_map and are left untouched.
-                        let res_eid = inbound.event_id.clone();
-                        if !res_eid.is_empty() {
-                            if let Ok(mut map) = dispatch_req_map.lock() {
-                                if let Some(req_eid) = map.remove(&id) {
-                                    let _ = dispatch_redact_tx
-                                        .try_send((dispatch_room_id.clone(), req_eid));
-                                    let _ = dispatch_redact_tx
-                                        .try_send((dispatch_room_id.clone(), res_eid));
+                        // --redact-on-complete is enabled and both event_ids are known.
+                        if let Some(ref redact_tx) = dispatch_redact_tx {
+                            let res_eid = inbound.event_id.clone();
+                            if !res_eid.is_empty() {
+                                if let Ok(mut map) = dispatch_req_map.lock() {
+                                    if let Some(req_eid) = map.remove(&id) {
+                                        let _ = redact_tx
+                                            .try_send((dispatch_room_id.clone(), req_eid));
+                                        let _ = redact_tx
+                                            .try_send((dispatch_room_id.clone(), res_eid));
+                                    }
                                 }
                             }
                         }
@@ -645,9 +651,8 @@ fn run_matrix(
         // 4d. Encrypt worker: outbound queue → seal → Matrix send.
         //     Spawned after registration so that cert_bytes and device_key are
         //     available; the worker runs for the lifetime of the agent.
-        //     `Some(req_ev_tx)` routes (request_id, event_id) pairs to the
-        //     registry task so the dispatcher can redact both sides of each
-        //     transaction once the response arrives.
+        //     `req_ev_tx_opt` is Some only when --redact-on-complete is set,
+        //     routing (request_id, event_id) pairs to the registry task.
         {
             let dk = Arc::clone(&device_key);
             let cb = Arc::clone(&cert_bytes);
@@ -657,7 +662,7 @@ fn run_matrix(
                 },
                 room_id.clone(),
                 outbound_rx,
-                Some(req_ev_tx),
+                req_ev_tx_opt,
             );
         }
 

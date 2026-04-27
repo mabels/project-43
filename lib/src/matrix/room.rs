@@ -17,7 +17,6 @@ use matrix_sdk::{
     },
     Client, LoopCtrl,
 };
-use tokio::sync::mpsc;
 
 // ── JoinResult ────────────────────────────────────────────────────────────────
 
@@ -213,45 +212,66 @@ where
         }
 
         // ── Since a previous pointer ──────────────────────────────────────
-        // Register a temporary event handler to collect catch-up events,
-        // then do a single zero-timeout sync from `token`.  This fires the
-        // handler for every event that arrived after `token` was issued.
+        // Anchor the live-tail start position with a quick zero-timeout
+        // sync from `token`, then fill the catch-up window via backward
+        // pagination.
+        //
+        // Why not rely on the sync's own event handlers for catch-up?
+        // The Matrix server caps the number of timeline events in a single
+        // sync response.  When many events accumulated while the UI was
+        // offline, the response has `limited: true` and silently omits
+        // older events.  An event-handler approach would miss everything
+        // that fell off the end of that limited window.
+        //
+        // Backward pagination with `to = token` fetches ALL events since
+        // `token` in 100-event pages, regardless of how many accumulated.
         Some(token) => {
-            let (tx, mut rx) = mpsc::channel::<(OwnedUserId, String, u64, String)>(256);
-            let tx = Arc::new(tx);
-
-            let handle = client.add_room_event_handler(room_id, {
-                let tx = Arc::clone(&tx);
-                move |ev: OriginalSyncRoomMessageEvent, _room: Room| {
-                    let tx = Arc::clone(&tx);
-                    async move {
-                        let MessageType::Text(ref text) = ev.content.msgtype else {
-                            return;
-                        };
-                        let ts_ms = u64::from(ev.origin_server_ts.get());
-                        let event_id = ev.event_id.to_string();
-                        let _ = tx
-                            .send((ev.sender.clone(), text.body.clone(), ts_ms, event_id))
-                            .await;
-                    }
-                }
-            });
-
             let resp = client
                 .sync_once(SyncSettings::default().token(token).timeout(Duration::ZERO))
                 .await
                 .context("Catch-up sync failed")?;
 
-            // Remove the temporary handler before draining the channel so
-            // the live handler registered below does not overlap with it.
-            client.remove_event_handler(handle);
-            drop(tx); // close sender; rx.recv() will return None once drained
+            let next_batch = resp.next_batch.clone();
 
-            while let Some((sender, body, ts_ms, event_id)) = rx.recv().await {
+            // Paginate backwards from `next_batch` (the anchor) to `token`
+            // (the stored pointer) to collect every event in the gap.
+            let room = get_room(client, room_id)?;
+            let mut all: Vec<(OwnedUserId, String, u64, String)> = Vec::new();
+            let mut from: Option<String> = Some(next_batch.clone());
+
+            loop {
+                let mut opts = MessagesOptions::backward();
+                opts.limit = UInt::try_from(100u64).unwrap_or(UInt::MAX);
+                opts.from = from.clone();
+                opts.to = Some(token.to_string());
+
+                let page = room
+                    .messages(opts)
+                    .await
+                    .context("Failed to fetch catch-up history page")?;
+
+                for ev in &page.chunk {
+                    if let Some(quad) = extract_text_event(ev) {
+                        all.push(quad);
+                    }
+                }
+
+                // Stop when the server signals there is nothing older
+                // (end == None) or the page is empty (reached `to` token).
+                match (page.chunk.is_empty(), page.end) {
+                    (_, None) | (true, _) => break,
+                    (false, Some(t)) => from = Some(t),
+                }
+            }
+
+            // Backward pagination delivers newest-first; deliver oldest-first
+            // to the caller so messages are processed in chronological order.
+            all.reverse();
+            for (sender, body, ts_ms, event_id) in all {
                 on_message(sender, body, ts_ms, event_id);
             }
 
-            resp.next_batch
+            next_batch
         }
     };
 

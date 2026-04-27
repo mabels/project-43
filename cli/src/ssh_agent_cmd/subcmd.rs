@@ -79,4 +79,17 @@ pub struct SshAgentArgs {
     /// Auto-detected when exactly one device key exists.
     #[arg(long)]
     pub device: Option<String>,
+
+    /// Redact both the request and response Matrix events after a transaction
+    /// completes successfully (Matrix mode only).
+    ///
+    /// When enabled, the agent queues both event IDs for deferred redaction
+    /// (batched, at most once per minute) as soon as the response is received.
+    /// Timed-out requests are never redacted.
+    ///
+    /// Disabled by default because the Synapse server-side retention policy
+    /// (m.room.retention) handles cleanup automatically.  Enable this flag
+    /// only if you need faster per-transaction cleanup without a server policy.
+    #[arg(long)]
+    pub redact_on_complete: bool,
 }

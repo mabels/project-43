@@ -3301,7 +3301,7 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.31.0",
  "pgp",
- "rand 0.8.6",
+ "rand 0.9.4",
  "rpassword",
  "rsa",
  "secrecy",

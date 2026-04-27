@@ -87,7 +87,7 @@ jobs:
 
       # ── sccache ───────────────────────────────────────────────────────────────
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────────
       - name: Bootstrap rustup (no sudo)

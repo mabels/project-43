@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'simple.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `authority_session`, `credential_cache`, `default_store_dir`, `external_tx_cell`, `listener_stop_cell`, `locked_msg_queue`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `outbound_tx_cell`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `send_via_bridge`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingSign`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`
+// These functions are ignored because they are not marked as `pub`: `agent_state`, `authority_session`, `credential_cache`, `default_store_dir`, `ensure_registered_inprocess`, `external_tx_cell`, `forward`, `listener_stop_cell`, `locked_msg_queue`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `outbound_tx_cell`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `run_in_process_agent`, `send_via_bridge`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InProcessAgentState`, `InProcessSession`, `PendingListKeys`, `PendingSign`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `request_identities`, `sign`
 
 /// Initialise tracing.
 ///
@@ -148,6 +148,8 @@ Future<List<KeyInfo>> generateKey({
 ///
 /// On macOS the system PC/SC daemon handles the transport; no additional
 /// setup is needed.  Returns an empty list when no cards are present.
+///
+/// Not available on Android / iOS (no PC/SC subsystem) — returns an empty list.
 Future<List<ConnectedCardInfo>> listConnectedCards() =>
     RustLib.instance.api.crateApiSimpleListConnectedCards();
 
@@ -161,6 +163,8 @@ Future<List<ConnectedCardInfo>> listConnectedCards() =>
 /// - `uid`: user ID string for the cert (e.g. `"Alice <alice@example.com>"`).
 ///   Pass the empty string to fall back to the cardholder name on the card.
 /// - `pin`: card User Signing PIN (unlocks the SIG slot).
+///
+/// Not available on Android / iOS (no PC/SC subsystem).
 Future<List<KeyInfo>> importCard({
   required String cardIdent,
   required String uid,
@@ -562,6 +566,8 @@ Future<void> mxRespondSign({
 ///
 /// On success the PIN is cached in memory keyed by card AID ident so that
 /// `mx_respond_sign_card_cached` can skip the PIN dialog for subsequent requests.
+///
+/// Not available on Android / iOS (no PC/SC subsystem).
 Future<void> mxRespondSignCard({
   required String roomId,
   required String requestId,
@@ -583,6 +589,8 @@ Future<bool> hasCachedCardPin({required String cardIdent}) =>
 ///
 /// Returns an error if no PIN is cached for any card associated with this key.
 /// This is the auto-approve path after the first successful `mx_respond_sign_card`.
+///
+/// Not available on Android / iOS (no PC/SC subsystem).
 Future<void> mxRespondSignCardCached({
   required String roomId,
   required String requestId,
@@ -597,6 +605,8 @@ Future<void> mxRespondSignCardCached({
 /// `card_ident` is one of the strings from `KeyInfo.cardIdents`
 /// (e.g. `"0006:17684870"`).  Returns an error if no card with that ident is
 /// currently connected or accessible.
+///
+/// Not available on Android / iOS (no PC/SC subsystem).
 Future<int> getCardPinRetries({required String cardIdent}) =>
     RustLib.instance.api.crateApiSimpleGetCardPinRetries(cardIdent: cardIdent);
 
@@ -660,6 +670,38 @@ Future<List<BusPeer>> busListPeers() =>
 /// Returns `true` if the cert was found and deleted, `false` if it did not exist.
 Future<bool> busRemovePeer({required String deviceId}) =>
     RustLib.instance.api.crateApiSimpleBusRemovePeer(deviceId: deviceId);
+
+/// Start the in-process SSH agent.
+///
+/// - `label`: device label used as the bus identity (defaults to the system
+///   hostname, same as `p43 ssh-agent --device <label>`).
+/// - `socket_path`: Unix socket path (defaults to `p43-ssh-agent.sock` next to
+///   the key store).
+///
+/// Returns the resolved socket path on success.  The agent registers with the
+/// bus authority on first run and thereafter reuses the stored cert.
+///
+/// Desktop-only (macOS / Linux).  Returns an error on iOS / Android.
+Future<String> sshAgentStart({String? label, String? socketPath}) => RustLib
+    .instance
+    .api
+    .crateApiSimpleSshAgentStart(label: label, socketPath: socketPath);
+
+/// Stop the in-process SSH agent.
+///
+/// Sends a stop signal to the running agent task; the Unix socket is unlinked
+/// before the task exits.  Returns an error when no agent is running.
+Future<void> sshAgentStop() =>
+    RustLib.instance.api.crateApiSimpleSshAgentStop();
+
+/// Returns `true` if the in-process SSH agent is currently running.
+Future<bool> sshAgentIsRunning() =>
+    RustLib.instance.api.crateApiSimpleSshAgentIsRunning();
+
+/// Returns the Unix socket path of the running in-process SSH agent, or `None`
+/// when no agent is running.
+Future<String?> sshAgentSocketPath() =>
+    RustLib.instance.api.crateApiSimpleSshAgentSocketPath();
 
 @freezed
 sealed class AgentRequest with _$AgentRequest {

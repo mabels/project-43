@@ -16,6 +16,7 @@ use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, PrivateKey, Signature};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use subcmd::SshAgentArgs;
 use tokio::net::UnixListener;
@@ -146,26 +147,41 @@ type DecryptState = std::sync::Mutex<Option<(Arc<DeviceKey>, [u8; 32])>>;
 struct MatrixProxySession {
     pending: PendingMap,
     /// Outbound queue — sends plaintext messages for the encrypt worker.
-    outbound_tx: mpsc::Sender<p43::bus::OutboundBusMessage>,
+    /// Unbounded so parallel requests never block on enqueue.
+    outbound_tx: mpsc::UnboundedSender<p43::bus::OutboundBusMessage>,
     /// X25519 public key of the authority — used as the seal recipient.
     authority_ecdh_pub: [u8; 32],
+    /// How long to wait for the phone to respond before returning an error.
+    /// The pending-map entry is removed on timeout so no memory leaks.
+    timeout: std::time::Duration,
+    /// When true, log send / txd / forward timestamps + transaction IDs to stderr.
+    verbose: bool,
+    /// Instant each request was enqueued, keyed by request_id.
+    /// Populated in `forward()` when verbose; cleared by the on_sent consumer.
+    send_instants: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 impl MatrixProxySession {
     fn new(
         pending: PendingMap,
-        outbound_tx: mpsc::Sender<p43::bus::OutboundBusMessage>,
+        outbound_tx: mpsc::UnboundedSender<p43::bus::OutboundBusMessage>,
         authority_ecdh_pub: [u8; 32],
+        timeout: std::time::Duration,
+        verbose: bool,
+        send_instants: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>>,
     ) -> Self {
         Self {
             pending,
             outbound_tx,
             authority_ecdh_pub,
+            timeout,
+            verbose,
+            send_instants,
         }
     }
 
     /// Enqueue `msg` for encryption and delivery, then block until a matching
-    /// response arrives on the internal bus (or the 30-second deadline expires).
+    /// response arrives on the internal bus (or the timeout expires).
     async fn forward(
         &self,
         msg: p43::protocol::Message,
@@ -178,7 +194,7 @@ impl MatrixProxySession {
 
         // Register the oneshot *before* enqueuing so we never miss a fast reply.
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending.lock().await.insert(request_id, tx);
+        self.pending.lock().await.insert(request_id.clone(), tx);
 
         // Build a recipient cert stub carrying only the ECDH pub so the
         // encrypt worker can seal to the authority without knowing its full cert.
@@ -198,22 +214,54 @@ impl MatrixProxySession {
             recipient_cert: Some(recipient_cert),
         };
 
+        // Unbounded sender — send never blocks or returns a capacity error.
         self.outbound_tx
             .send(outbound)
-            .await
             .map_err(|_| aerr("outbound queue closed"))?;
+
+        let sent_at = std::time::Instant::now();
+        if self.verbose {
+            eprintln!(
+                "[p43::ssh_agent] send     {} at {}",
+                request_id,
+                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            );
+            if let Ok(mut m) = self.send_instants.lock() {
+                m.insert(request_id.clone(), sent_at);
+            }
+        }
+
+        let timeout_secs = self.timeout.as_secs();
 
         // Span: time waiting for the phone to respond (phone round-trip latency).
         #[cfg(feature = "telemetry")]
-        let wait_fut = tokio::time::timeout(std::time::Duration::from_secs(30), rx).instrument(
-            tracing::info_span!("ssh_agent.matrix_wait", timeout_secs = 30),
-        );
+        let wait_fut = tokio::time::timeout(self.timeout, rx)
+            .instrument(tracing::info_span!("ssh_agent.matrix_wait", timeout_secs));
         #[cfg(not(feature = "telemetry"))]
-        let wait_fut = tokio::time::timeout(std::time::Duration::from_secs(30), rx);
-        wait_fut
-            .await
-            .map_err(|_| aerr("p43 request timed out (30 s) — is the phone online?"))?
-            .map_err(|_| aerr("response channel closed"))
+        let wait_fut = tokio::time::timeout(self.timeout, rx);
+
+        match wait_fut.await {
+            Ok(Ok(msg)) => {
+                if self.verbose {
+                    eprintln!(
+                        "[p43::ssh_agent] forward  {} at {}  (+{} ms)",
+                        request_id,
+                        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                        sent_at.elapsed().as_millis(),
+                    );
+                }
+                Ok(msg)
+            }
+            Err(_elapsed) => {
+                // Timed out — reclaim the pending-map slot so it never grows
+                // unbounded under a stream of unanswered requests.
+                self.pending.lock().await.remove(&request_id);
+                Err(aerr(format!(
+                    "p43 request timed out ({timeout_secs} s) — is the phone online?"
+                )))
+            }
+            Ok(Err(_)) => Err(aerr("response channel closed")),
+        }
     }
 }
 
@@ -311,6 +359,90 @@ fn resolve_socket(socket: Option<&str>, store_dir: &Path) -> PathBuf {
     }
 }
 
+/// Resolve the PID file path: explicit value wins, otherwise
+/// `p43-ssh-agent.pid` next to the key store.
+fn resolve_pid_file(pid_file: Option<&str>, store_dir: &Path) -> PathBuf {
+    match pid_file {
+        Some(s) => expand_tilde(s),
+        None => {
+            let base = store_dir.parent().unwrap_or(store_dir);
+            base.join("p43-ssh-agent.pid")
+        }
+    }
+}
+
+/// Resolve the log file path: explicit value wins, otherwise
+/// `p43-ssh-agent.log` next to the key store.
+fn resolve_log_file(log_file: Option<&str>, store_dir: &Path) -> PathBuf {
+    match log_file {
+        Some(s) => expand_tilde(s),
+        None => {
+            let base = store_dir.parent().unwrap_or(store_dir);
+            base.join("p43-ssh-agent.log")
+        }
+    }
+}
+
+/// Write `pid` to `path`, creating parent directories as needed.
+fn write_pid_file(path: &Path, pid: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create parent dirs for {}", path.display()))?;
+    }
+    std::fs::write(path, pid.to_string())
+        .with_context(|| format!("write PID file {}", path.display()))
+}
+
+/// Re-exec the current binary without `--daemon`, redirect its stdio to
+/// `log_path` (stdout + stderr, append mode), write the child PID to
+/// `pid_path`, then return so the caller (parent process) can exit cleanly.
+fn spawn_daemon(pid_path: &Path, log_path: &Path) -> Result<()> {
+    let exe = std::env::current_exe().context("resolve current executable path")?;
+
+    // Collect all argv tokens except the program name and any "--daemon" flag.
+    let child_args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "--daemon")
+        .collect();
+
+    // Open the log file in append mode so successive restarts accumulate.
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create parent dirs for {}", log_path.display()))?;
+    }
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("open log file {}", log_path.display()))?;
+    // Both stdout and stderr go to the same file.
+    let log_out = log_file.try_clone().context("clone log file handle")?;
+
+    let child = std::process::Command::new(&exe)
+        .args(&child_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_out))
+        .stderr(Stdio::from(log_file))
+        .spawn()
+        .context("spawn daemon child process")?;
+
+    let pid = child.id();
+    write_pid_file(pid_path, pid)?;
+
+    // On Unix, dropping `Child` without calling wait() does NOT kill the
+    // child — it simply becomes orphaned and is re-parented to init/PID 1.
+    drop(child);
+
+    eprintln!(
+        "p43 ssh-agent daemon started (PID {pid})\nPID file: {}\nLog file: {}",
+        pid_path.display(),
+        log_path.display(),
+    );
+    Ok(())
+}
+
+// ── Run ───────────────────────────────────────────────────────────────────────
+
 pub fn run(
     args: SshAgentArgs,
     store_dir: &Path,
@@ -319,8 +451,54 @@ pub fn run(
     pin: Option<String>,
     rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
+    // ── Stop mode ─────────────────────────────────────────────────────────────
+    // Read the PID file, send SIGTERM, remove the file, and exit.
+    if args.stop {
+        let pid_path = resolve_pid_file(args.pid_file.as_deref(), store_dir);
+        let raw = std::fs::read_to_string(&pid_path)
+            .with_context(|| format!("Cannot read PID file: {}", pid_path.display()))?;
+        let pid: i32 = raw
+            .trim()
+            .parse()
+            .context("PID file does not contain a valid integer")?;
+        // SAFETY: kill(2) is always safe with a known signal constant; we
+        // check the return value immediately.
+        let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("Failed to send SIGTERM to PID {pid}: {err}");
+        }
+        eprintln!("Sent SIGTERM to p43 ssh-agent (PID {pid})");
+        // Best-effort cleanup so a subsequent --daemon doesn't see a stale file.
+        if let Err(e) = std::fs::remove_file(&pid_path) {
+            eprintln!(
+                "Warning: could not remove PID file {}: {e}",
+                pid_path.display()
+            );
+        }
+        return Ok(());
+    }
+
     let socket_path = resolve_socket(args.socket.as_deref(), store_dir);
     let _ = std::fs::remove_file(&socket_path);
+
+    // ── Daemon mode ───────────────────────────────────────────────────────────
+    // Re-exec ourselves without --daemon, write the child PID, and exit the
+    // parent.  The child continues below in normal (foreground) mode.
+    if args.daemon {
+        let pid_path = resolve_pid_file(args.pid_file.as_deref(), store_dir);
+        let log_path = resolve_log_file(args.log_file.as_deref(), store_dir);
+        spawn_daemon(&pid_path, &log_path)?;
+        return Ok(());
+    }
+
+    // ── Foreground PID file ───────────────────────────────────────────────────
+    // When --pid-file is set but --daemon is not, write our own PID so that
+    // `p43 ssh-agent --stop` can still find us.
+    if let Some(ref pf) = args.pid_file {
+        let pid_path = expand_tilde(pf);
+        write_pid_file(&pid_path, std::process::id())?;
+    }
 
     // A synchronous span that closes immediately — confirms the OTel pipeline
     // is live within the first batch flush (≤5 s) without waiting for a sign.
@@ -345,7 +523,6 @@ pub fn run(
     } else {
         run_matrix(args, socket_path, store_dir, rt)
     }
-
 }
 
 // ── Local mode ────────────────────────────────────────────────────────────────
@@ -550,23 +727,48 @@ fn run_matrix(
         let req_event_map: Arc<std::sync::Mutex<HashMap<String, String>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
 
-        // Only wire the on_sent channel when redaction is enabled.
-        let req_ev_tx_opt: Option<mpsc::Sender<(String, String)>> =
-            if args.redact_on_complete {
-                let (req_ev_tx, mut req_ev_rx) =
-                    tokio::sync::mpsc::channel::<(String, String)>(256);
-                let map = Arc::clone(&req_event_map);
-                tokio::spawn(async move {
-                    while let Some((req_id, ev_id)) = req_ev_rx.recv().await {
-                        if let Ok(mut guard) = map.lock() {
-                            guard.insert(req_id, ev_id);
+        // Wire the on_sent channel when redaction or verbose is enabled.
+        // The consumer logs "txd" (transmitted to Matrix) when verbose, and stores
+        // (request_id → event_id) in req_event_map when --redact-on-complete.
+        let send_instants: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let req_ev_tx_opt: Option<mpsc::Sender<(String, String)>> = if args.redact_on_complete
+            || args.verbose
+        {
+            let (req_ev_tx, mut req_ev_rx) = tokio::sync::mpsc::channel::<(String, String)>(256);
+            let map = Arc::clone(&req_event_map);
+            let instants = Arc::clone(&send_instants);
+            let verbose = args.verbose;
+            let redact = args.redact_on_complete;
+            tokio::spawn(async move {
+                while let Some((req_id, _ev_id)) = req_ev_rx.recv().await {
+                    if verbose {
+                        let elapsed_ms = instants
+                            .lock()
+                            .ok()
+                            .and_then(|mut m| m.remove(&req_id))
+                            .map(|t| t.elapsed().as_millis());
+                        if let Some(ms) = elapsed_ms {
+                            eprintln!(
+                                "[p43::ssh_agent] txd      {} at {}  (+{} ms)",
+                                req_id,
+                                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                                ms,
+                            );
                         }
                     }
-                });
-                Some(req_ev_tx)
-            } else {
-                None
-            };
+                    if redact {
+                        if let Ok(mut guard) = map.lock() {
+                            guard.insert(req_id, _ev_id);
+                        }
+                    }
+                }
+            });
+            Some(req_ev_tx)
+        } else {
+            None
+        };
 
         // 4c. Internal bus dispatcher: route responses to the pending map.
         //     When --redact-on-complete is set, also queue both the request and
@@ -597,7 +799,8 @@ fn run_matrix(
                         _ => None,
                     };
                     if let Some(id) = request_id {
-                        if let Ok(mut guard) = dispatch_pending.try_lock() {
+                        {
+                            let mut guard = dispatch_pending.lock().await;
                             if let Some(tx) = guard.remove(&id) {
                                 let _ = tx.send(inbound.message);
                             }
@@ -609,10 +812,10 @@ fn run_matrix(
                             if !res_eid.is_empty() {
                                 if let Ok(mut map) = dispatch_req_map.lock() {
                                     if let Some(req_eid) = map.remove(&id) {
-                                        let _ = redact_tx
-                                            .try_send((dispatch_room_id.clone(), req_eid));
-                                        let _ = redact_tx
-                                            .try_send((dispatch_room_id.clone(), res_eid));
+                                        let _ =
+                                            redact_tx.try_send((dispatch_room_id.clone(), req_eid));
+                                        let _ =
+                                            redact_tx.try_send((dispatch_room_id.clone(), res_eid));
                                     }
                                 }
                             }
@@ -667,8 +870,14 @@ fn run_matrix(
         }
 
         // 6. Bind the Unix socket and start the agent.
-        let session =
-            MatrixProxySession::new(Arc::clone(&pending), outbound_tx, authority_ecdh_pub);
+        let session = MatrixProxySession::new(
+            Arc::clone(&pending),
+            outbound_tx,
+            authority_ecdh_pub,
+            std::time::Duration::from_secs(args.timeout_secs),
+            args.verbose,
+            send_instants,
+        );
 
         eprintln!(
             "p43 ssh-agent (Matrix proxy → {room_id}): listening on {sock}\n\

@@ -8,6 +8,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:p43/src/rust/api/simple.dart' as rust;
 import '../../services/biometric_service.dart';
 import '../../services/settings_service.dart';
+import '../../services/window_service.dart';
 
 // ── Authority status / init tile ──────────────────────────────────────────────
 
@@ -2095,6 +2096,10 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
         orElse: () => sealedKeys.first, // sentinel — checked below
       );
       if (saved.contains(match.fingerprint)) {
+        // Ensure the app is the key window before the macOS auth sheet
+        // appears — otherwise the Touch ID / password prompt is behind
+        // the app window and the user cannot interact with it.
+        WindowService.instance.bringToFront();
         final credential = await BiometricService.instance.authenticate(
           match.fingerprint,
           reason: 'Unlock p43 session',

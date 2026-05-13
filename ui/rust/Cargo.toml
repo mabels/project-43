@@ -18,6 +18,7 @@ p43 = { path = "../../lib", default-features = false, features = [
 ] }
 # These deps are needed on all platforms including Android and iOS.
 anyhow    = "1"
+chrono    = { version = "0.4", features = ["clock"] }
 base64    = "0.22"
 dirs      = "6"
 hex       = "0.4"
@@ -30,8 +31,14 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # pcsc (smart card / YubiKey) is not available on iOS or Android — gate it out.
 # Cargo merges features from [dependencies] and [target.*.dependencies]
 # for the same crate, so this just adds "pcsc" on desktop platforms only.
+#
+# ssh-agent-lib / ssh-key / uuid are required for the in-process SSH agent
+# (desktop only).
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
-p43 = { path = "../../lib", features = ["pcsc"] }
+p43           = { path = "../../lib", features = ["pcsc"] }
+ssh-agent-lib = "0.5"
+ssh-key       = { version = "0.6", features = ["alloc", "ed25519"] }
+uuid          = { version = "1", features = ["v4"] }
 
 [features]
 telemetry = ["p43/telemetry"]

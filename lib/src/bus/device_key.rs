@@ -49,6 +49,11 @@ impl DeviceKey {
         X25519Public::from(&self.ecdh).to_bytes()
     }
 
+    /// Raw 32-byte X25519 private key — used as the WireGuard private key.
+    pub fn ecdh_secret(&self) -> [u8; 32] {
+        self.ecdh.to_bytes()
+    }
+
     /// First 8 bytes of the signing public key — used as COSE `kid`.
     pub fn fingerprint(&self) -> [u8; 8] {
         let pk = self.sign_pubkey();

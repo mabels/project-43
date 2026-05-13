@@ -119,12 +119,18 @@ pub fn new_internal_bus() -> (
     broadcast::channel(BUS_CHANNEL_CAPACITY)
 }
 
-/// Create an mpsc channel for the **outbound** queue.
+/// Create an **unbounded** mpsc channel for the **outbound** queue.
+///
+/// Unbounded so that enqueuing a message in `MatrixProxySession::forward` never
+/// blocks or returns a capacity error, even under a burst of parallel SSH
+/// requests.  Back-pressure is provided by the Matrix send round-trip itself:
+/// the encrypt worker processes one message at a time and the caller waits for
+/// a response before considering the transaction complete.
 pub fn new_outbound_queue() -> (
-    mpsc::Sender<OutboundBusMessage>,
-    mpsc::Receiver<OutboundBusMessage>,
+    mpsc::UnboundedSender<OutboundBusMessage>,
+    mpsc::UnboundedReceiver<OutboundBusMessage>,
 ) {
-    mpsc::channel(BUS_CHANNEL_CAPACITY)
+    mpsc::unbounded_channel()
 }
 
 // ── Decrypt middleware ────────────────────────────────────────────────────────
@@ -231,7 +237,7 @@ pub fn spawn_decrypt_middleware(
 pub fn spawn_encrypt_worker(
     seal: impl Fn(&protocol::Message, &CertPayload) -> Option<protocol::Message> + Send + 'static,
     room_id: String,
-    mut outbound_rx: mpsc::Receiver<OutboundBusMessage>,
+    mut outbound_rx: mpsc::UnboundedReceiver<OutboundBusMessage>,
     on_sent: Option<mpsc::Sender<(String, String)>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

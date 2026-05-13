@@ -5,7 +5,7 @@ enum RequestStatus { pending, responding, done, error }
 // ── Request entry ─────────────────────────────────────────────────────────────
 
 class RequestEntry {
-  const RequestEntry({
+  RequestEntry({
     required this.type,
     required this.requestId,
     required this.description,
@@ -17,7 +17,8 @@ class RequestEntry {
     this.errorMessage,
     this.sourceLabel = '',
     this.sourceDeviceId = '',
-  });
+    DateTime? timestamp,
+  }) : timestamp = timestamp ?? DateTime.now();
 
   final String type;
   final String requestId;
@@ -34,6 +35,9 @@ class RequestEntry {
 
   /// Stable device identifier from the sender's bus certificate.
   final String sourceDeviceId;
+
+  /// Wall-clock time when this entry was created.
+  final DateTime timestamp;
 
   RequestEntry copyWith({
     RequestStatus? status,
@@ -55,5 +59,6 @@ class RequestEntry {
     errorMessage: errorMessage ?? this.errorMessage,
     sourceLabel: sourceLabel ?? this.sourceLabel,
     sourceDeviceId: sourceDeviceId ?? this.sourceDeviceId,
+    timestamp: timestamp, // preserve original arrival time
   );
 }

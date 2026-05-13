@@ -130,6 +130,14 @@ struct PendingSign {
     /// inside a `BusSecure` envelope.  Used to encrypt the response back to
     /// the requesting device.  `None` for plaintext requests (legacy / tests).
     sender_cert: Option<p43::bus::CertPayload>,
+    /// Wall-clock instant the request arrived — used to compute response latency.
+    received_at: std::time::Instant,
+}
+
+/// Data held for an in-flight `ssh.list_keys_request`.
+struct PendingListKeys {
+    sender_cert: Option<p43::bus::CertPayload>,
+    received_at: std::time::Instant,
 }
 
 static PENDING_SIGNS: OnceLock<Mutex<HashMap<String, PendingSign>>> = OnceLock::new();
@@ -181,10 +189,11 @@ fn authority_session() -> &'static Mutex<Option<(p43::bus::AuthorityKey, Vec<u8>
 // functions send through here so that encryption is handled by the worker task
 // rather than inline.  Protected by a Mutex so it can be replaced on reconnect.
 
-static OUTBOUND_TX: OnceLock<Mutex<Option<mpsc::Sender<p43::bus::OutboundBusMessage>>>> =
+static OUTBOUND_TX: OnceLock<Mutex<Option<mpsc::UnboundedSender<p43::bus::OutboundBusMessage>>>> =
     OnceLock::new();
 
-fn outbound_tx_cell() -> &'static Mutex<Option<mpsc::Sender<p43::bus::OutboundBusMessage>>> {
+fn outbound_tx_cell() -> &'static Mutex<Option<mpsc::UnboundedSender<p43::bus::OutboundBusMessage>>>
+{
     OUTBOUND_TX.get_or_init(|| Mutex::new(None))
 }
 
@@ -221,10 +230,9 @@ fn locked_msg_queue() -> &'static Mutex<std::collections::VecDeque<p43::bus::Ext
 // Keyed by `request_id` of an in-flight `ssh.list_keys_request`.  Stores the
 // sender cert (if the request arrived encrypted) so the response can be sealed.
 
-static PENDING_LIST_KEYS: OnceLock<Mutex<HashMap<String, Option<p43::bus::CertPayload>>>> =
-    OnceLock::new();
+static PENDING_LIST_KEYS: OnceLock<Mutex<HashMap<String, PendingListKeys>>> = OnceLock::new();
 
-fn pending_list_keys() -> &'static Mutex<HashMap<String, Option<p43::bus::CertPayload>>> {
+fn pending_list_keys() -> &'static Mutex<HashMap<String, PendingListKeys>> {
     PENDING_LIST_KEYS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -779,11 +787,19 @@ pub async fn mx_set_agent_room(room_id: String) -> anyhow::Result<()> {
 )]
 pub async fn mx_respond_list_keys(room_id: String, request_id: String) -> anyhow::Result<()> {
     // Consume the sender cert so the response can be sealed if available.
-    let sender_cert = pending_list_keys()
+    let pending_lk = pending_list_keys()
         .lock()
         .ok()
-        .and_then(|mut m| m.remove(&request_id))
-        .flatten();
+        .and_then(|mut m| m.remove(&request_id));
+    if let Some(ref p) = pending_lk {
+        eprintln!(
+            "[p43::ui] res   {} at {}  (+{} ms)",
+            request_id,
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            p.received_at.elapsed().as_millis(),
+        );
+    }
+    let sender_cert = pending_lk.and_then(|p| p.sender_cert);
 
     let store_dir = default_store_dir();
     let keys = p43::ssh_agent::list_ssh_public_keys(&store_dir);
@@ -988,8 +1004,17 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                     let sender_cert = inbound.sender_cert;
                     let event = match inbound.message {
                         p43::protocol::Message::SshListKeysRequest(r) => {
+                            let now = std::time::Instant::now();
+                            eprintln!(
+                                "[p43::ui] req   {} at {}",
+                                r.request_id,
+                                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                            );
                             if let Ok(mut map) = pending_list_keys().lock() {
-                                map.insert(r.request_id.clone(), sender_cert);
+                                map.insert(
+                                    r.request_id.clone(),
+                                    PendingListKeys { sender_cert, received_at: now },
+                                );
                             }
                             Some(AppMessage::AgentEvent {
                                 event: AgentRequest::ListKeys {
@@ -1006,6 +1031,12 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                                 .as_ref()
                                 .map(|c| c.device_id.clone())
                                 .unwrap_or_default();
+                            let now = std::time::Instant::now();
+                            eprintln!(
+                                "[p43::ui] req   {} at {}",
+                                r.request_id,
+                                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                            );
                             if let Ok(mut map) = pending_signs().lock() {
                                 map.insert(
                                     r.request_id.clone(),
@@ -1014,6 +1045,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                                         data: r.data.clone(),
                                         flags: r.flags,
                                         sender_cert,
+                                        received_at: now,
                                     },
                                 );
                             }
@@ -1295,7 +1327,7 @@ fn unlock_authority(
                 let entry = ks.list().ok()?.into_iter().find(|e| e.fingerprint == fp)?;
                 entry.card_idents.into_iter().next()
             });
-            return p43::bus::authority::unlock_card(encrypted, card_pin, ident.as_deref());
+            p43::bus::authority::unlock_card(encrypted, card_pin, ident.as_deref())
         }
         #[cfg(any(target_os = "ios", target_os = "android"))]
         anyhow::bail!("card unlock is not supported on this platform")
@@ -1670,7 +1702,7 @@ async fn send_via_bridge(
     msg: p43::protocol::Message,
     sender_cert: Option<p43::bus::CertPayload>,
 ) -> anyhow::Result<()> {
-    let tx_opt: Option<mpsc::Sender<p43::bus::OutboundBusMessage>> =
+    let tx_opt: Option<mpsc::UnboundedSender<p43::bus::OutboundBusMessage>> =
         outbound_tx_cell().lock().ok().and_then(|g| g.clone());
 
     if let Some(tx) = tx_opt {
@@ -1678,7 +1710,6 @@ async fn send_via_bridge(
             message: msg,
             recipient_cert: sender_cert,
         })
-        .await
         .map_err(|_| anyhow::anyhow!("outbound queue closed"))?;
         return Ok(());
     }
@@ -1853,6 +1884,12 @@ pub async fn mx_respond_sign(
         .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
         .remove(&request_id)
         .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
+    eprintln!(
+        "[p43::ui] res   {} at {}  (+{} ms)",
+        request_id,
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        pending.received_at.elapsed().as_millis(),
+    );
 
     let store_dir = default_store_dir();
 
@@ -1918,6 +1955,12 @@ pub async fn mx_respond_sign_card(
             .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
             .remove(&request_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
+        eprintln!(
+            "[p43::ui] res   {} at {}  (+{} ms)",
+            request_id,
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            pending.received_at.elapsed().as_millis(),
+        );
 
         let store_dir = default_store_dir();
 
@@ -1978,16 +2021,30 @@ pub async fn mx_respond_sign_card_cached(
 ) -> anyhow::Result<()> {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
-        let pending = pending_signs()
-            .lock()
-            .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
-            .remove(&request_id)
-            .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
-
         let store_dir = default_store_dir();
 
+        // Peek at the pending entry (clone fields out) WITHOUT removing it yet.
+        // We only remove once we have confirmed the PIN is cached — a cache miss
+        // must leave the entry intact so the caller can fall back to PIN entry.
+        let (fingerprint, data, flags, sender_cert, received_at) = {
+            let guard = pending_signs()
+                .lock()
+                .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?;
+            let p = guard.get(&request_id).ok_or_else(|| {
+                anyhow::anyhow!("Unknown or already-handled request_id {request_id}")
+            })?;
+            (
+                p.fingerprint.clone(),
+                p.data.clone(),
+                p.flags,
+                p.sender_cert.clone(),
+                p.received_at,
+            )
+        }; // lock released here — entry still present
+
         // Resolve card idents for this fingerprint, then look up a cached PIN.
-        let meta = p43::ssh_agent::get_ssh_key_meta(&store_dir, &pending.fingerprint)
+        // If the PIN is not cached this returns Err and the entry stays in the map.
+        let meta = p43::ssh_agent::get_ssh_key_meta(&store_dir, &fingerprint)
             .ok_or_else(|| anyhow::anyhow!("No key metadata found for fingerprint"))?;
 
         let pin = {
@@ -2001,19 +2058,26 @@ pub async fn mx_respond_sign_card_cached(
                 .ok_or_else(|| anyhow::anyhow!("No cached PIN for this card — enter PIN first"))?
         };
 
-        let sig = p43::ssh_agent::sign_with_card_key(
-            &store_dir,
-            &pending.fingerprint,
-            &pin,
-            &pending.data,
-            pending.flags,
-        )?;
+        // PIN confirmed cached — now remove the pending entry.
+        pending_signs()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
+            .remove(&request_id);
+
+        eprintln!(
+            "[p43::ui] res   {} at {}  (+{} ms)",
+            request_id,
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            received_at.elapsed().as_millis(),
+        );
+
+        let sig = p43::ssh_agent::sign_with_card_key(&store_dir, &fingerprint, &pin, &data, flags)?;
 
         let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
             request_id,
             signature: sig,
         });
-        return send_via_bridge(&room_id, response, pending.sender_cert).await;
+        return send_via_bridge(&room_id, response, sender_cert).await;
     }
     #[cfg(any(target_os = "ios", target_os = "android"))]
     anyhow::bail!("PC/SC card operations are not supported on this platform")
@@ -2060,6 +2124,12 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
         .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?
         .remove(&request_id)
         .ok_or_else(|| anyhow::anyhow!("Unknown or already-handled request_id {request_id}"))?;
+    eprintln!(
+        "[p43::ui] res   {} at {}  (+{} ms)",
+        request_id,
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        pending.received_at.elapsed().as_millis(),
+    );
 
     // ── Fast path 1: cached decrypted RSA key (zero-KDF for RSA keys) ─────────
     if p43::ssh_agent::has_cached_rsa_key(&pending.fingerprint) {
@@ -2112,10 +2182,18 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
 )]
 pub async fn mx_reject_sign(room_id: String, request_id: String) -> anyhow::Result<()> {
     // Discard from pending map.
-    let _ = pending_signs()
+    let removed = pending_signs()
         .lock()
         .ok()
         .and_then(|mut m| m.remove(&request_id));
+    if let Some(ref p) = removed {
+        eprintln!(
+            "[p43::ui] rej   {} at {}  (+{} ms)",
+            request_id,
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            p.received_at.elapsed().as_millis(),
+        );
+    }
 
     let msg = p43::protocol::Message::Error(p43::protocol::ErrorResponse {
         request_id: Some(request_id),
@@ -2267,4 +2345,604 @@ pub fn bus_list_peers() -> anyhow::Result<Vec<BusPeer>> {
 pub fn bus_remove_peer(device_id: String) -> anyhow::Result<bool> {
     let bus_dir = p43::bus::bus_dir(&default_store_dir());
     p43::bus::remove_peer(&bus_dir, &device_id)
+}
+
+// ── In-process SSH agent (desktop only) ──────────────────────────────────────
+//
+// On macOS / Linux the UI can run the SSH agent in-process instead of
+// launching a separate `p43 ssh-agent` process.  The agent:
+//
+//   1. Loads or generates a DeviceKey for the given label (default: hostname).
+//   2. Registers with the bus authority (CSR → cert) via the Matrix room —
+//      identical to `p43 ssh-agent` Matrix-proxy mode.
+//   3. Binds a Unix socket and handles SSH requests, forwarding each one as a
+//      `SshSignRequest` / `SshListKeysRequest` bus message and awaiting the
+//      response that the phone sends back.
+//
+// The external bus (EXTERNAL_TX) is shared with `mx_listen_all`.  The agent
+// subscribes to it directly for its own receiver so that each layer runs an
+// independent decrypt middleware — one keyed by the authority key (UI side)
+// and one keyed by the agent device key (agent side).
+
+struct InProcessAgentState {
+    socket_path: PathBuf,
+    /// Consumed exactly once by `ssh_agent_stop`.
+    stop_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+static AGENT_STATE: OnceLock<Mutex<Option<InProcessAgentState>>> = OnceLock::new();
+
+fn agent_state() -> &'static Mutex<Option<InProcessAgentState>> {
+    AGENT_STATE.get_or_init(|| Mutex::new(None))
+}
+
+/// Start the in-process SSH agent.
+///
+/// - `label`: device label used as the bus identity (defaults to the system
+///   hostname, same as `p43 ssh-agent --device <label>`).
+/// - `socket_path`: Unix socket path (defaults to `p43-ssh-agent.sock` next to
+///   the key store).
+///
+/// Returns the resolved socket path on success.  The agent registers with the
+/// bus authority on first run and thereafter reuses the stored cert.
+///
+/// Desktop-only (macOS / Linux).  Returns an error on iOS / Android.
+#[frb]
+pub fn ssh_agent_start(
+    label: Option<String>,
+    socket_path: Option<String>,
+) -> anyhow::Result<String> {
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        // Reject if already running.
+        if let Ok(guard) = agent_state().lock() {
+            if guard.is_some() {
+                anyhow::bail!("SSH agent is already running");
+            }
+        }
+
+        let store_dir = default_store_dir();
+        let bus_dir = p43::bus::bus_dir(&store_dir);
+
+        // Resolve socket path (expand leading `~/`).
+        let sock_path: PathBuf = match socket_path.as_deref() {
+            Some(s) => {
+                if let Some(rest) = s.strip_prefix("~/") {
+                    dirs::home_dir().unwrap_or_default().join(rest)
+                } else {
+                    PathBuf::from(s)
+                }
+            }
+            None => {
+                let base = store_dir.parent().unwrap_or(&store_dir);
+                base.join("p43-ssh-agent.sock")
+            }
+        };
+
+        // Remove stale socket file from a prior crash.
+        let _ = std::fs::remove_file(&sock_path);
+
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+        {
+            let mut guard = agent_state().lock().unwrap();
+            *guard = Some(InProcessAgentState {
+                socket_path: sock_path.clone(),
+                stop_tx: Some(stop_tx),
+            });
+        }
+
+        let sock_path_task = sock_path.clone();
+        let label_task = label;
+        tokio_rt().spawn(async move {
+            if let Err(e) =
+                run_in_process_agent(label_task, store_dir, bus_dir, sock_path_task, stop_rx).await
+            {
+                eprintln!("[p43::ssh_agent::inprocess] error: {e}");
+            }
+            // Clear state so ssh_agent_is_running() returns false.
+            if let Ok(mut guard) = agent_state().lock() {
+                *guard = None;
+            }
+        });
+
+        return Ok(sock_path.to_string_lossy().into_owned());
+    }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    anyhow::bail!("SSH agent is not supported on this platform")
+}
+
+/// Stop the in-process SSH agent.
+///
+/// Sends a stop signal to the running agent task; the Unix socket is unlinked
+/// before the task exits.  Returns an error when no agent is running.
+#[frb]
+pub fn ssh_agent_stop() -> anyhow::Result<()> {
+    let stop_tx = agent_state()
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.as_mut().and_then(|s| s.stop_tx.take()));
+
+    match stop_tx {
+        Some(tx) => {
+            let _ = tx.send(());
+            Ok(())
+        }
+        None => anyhow::bail!("SSH agent is not running"),
+    }
+}
+
+/// Returns `true` if the in-process SSH agent is currently running.
+#[frb]
+pub fn ssh_agent_is_running() -> bool {
+    agent_state().lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// Returns the Unix socket path of the running in-process SSH agent, or `None`
+/// when no agent is running.
+#[frb]
+pub fn ssh_agent_socket_path() -> Option<String> {
+    agent_state().lock().ok().and_then(|g| {
+        g.as_ref()
+            .map(|s| s.socket_path.to_string_lossy().into_owned())
+    })
+}
+
+// ── Agent runner (desktop-only async impl) ────────────────────────────────────
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+async fn run_in_process_agent(
+    label: Option<String>,
+    store_dir: PathBuf,
+    bus_dir: PathBuf,
+    sock_path: PathBuf,
+    mut stop_rx: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<()> {
+    use std::sync::Arc;
+
+    use anyhow::Context as _;
+    use p43::bus::{self, AuthorityPub};
+    use p43::protocol::Message;
+    use ssh_agent_lib::agent::listen;
+    use tokio::net::UnixListener;
+
+    // 1. Resolve agent room from the persisted Matrix config.
+    let room_id = p43::matrix::resolve_agent_room(None, &store_dir)
+        .await
+        .context("Cannot resolve agent room — call mx_set_agent_room first")?;
+
+    // 2. Shared pending map: request_id → oneshot response channel.
+    type PendingMap =
+        Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<Message>>>>;
+    let pending: PendingMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    // 3. Shared decrypt state — populated after ensure_registered_inprocess.
+    //    The decrypt middleware reads this on every BusSecure message.
+    type DecryptState = std::sync::Mutex<Option<(Arc<p43::bus::DeviceKey>, [u8; 32])>>;
+    let decrypt_state: Arc<DecryptState> = Arc::new(std::sync::Mutex::new(None));
+
+    // 4. Agent-private internal bus (separate from mx_listen_all's internal bus).
+    let (internal_tx, _initial_rx) = p43::bus::new_internal_bus();
+
+    // 5. Agent-private outbound queue.  Uses the device key for sealing —
+    //    different from OUTBOUND_TX which uses the authority key.
+    let (outbound_tx, outbound_rx) = p43::bus::new_outbound_queue();
+
+    // 6. External-bus subscription task (reconnect-aware).
+    //
+    //    The agent subscribes to EXTERNAL_TX for its own receiver.  When
+    //    mx_listen_all reconnects it clears and replaces EXTERNAL_TX, which
+    //    closes the old receiver.  This task loops to re-subscribe.
+    {
+        let ds = Arc::clone(&decrypt_state);
+        let it = internal_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let rx_opt = external_tx_cell()
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|tx| tx.subscribe()));
+
+                let Some(rx) = rx_opt else {
+                    // mx_listen_all not started yet — retry shortly.
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    continue;
+                };
+
+                let ds2 = Arc::clone(&ds);
+                let handle = p43::bus::spawn_decrypt_middleware(
+                    move |env| {
+                        let Ok(guard) = ds2.try_lock() else {
+                            return p43::bus::DecryptResult::Skip;
+                        };
+                        let Some((ref key, ref auth_pub)) = *guard else {
+                            // Not yet registered — ignore encrypted messages.
+                            return p43::bus::DecryptResult::Skip;
+                        };
+                        if env.from == key.device_id() {
+                            return p43::bus::DecryptResult::Skip;
+                        }
+                        match p43::bus::open_protocol_message(key.as_ref(), auth_pub, env) {
+                            Ok((inner, cert)) => p43::bus::DecryptResult::Ok(inner, Box::new(cert)),
+                            Err(e) => p43::bus::DecryptResult::Err(e.to_string()),
+                        }
+                    },
+                    |_| {}, // no locked-session UI for the in-process agent
+                    rx,
+                    it.clone(),
+                );
+
+                // Wait until the middleware task exits (external_rx closed).
+                let _ = handle.await;
+                eprintln!(
+                    "[p43::ssh_agent::inprocess] external bus closed — \
+                     re-subscribing in 1 s…"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    // 7. Internal bus dispatcher → pending map.
+    {
+        let dispatch_pending = Arc::clone(&pending);
+        let mut internal_rx = internal_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let inbound = match internal_rx.recv().await {
+                    Ok(m) => m,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!(
+                            "[p43::ssh_agent::inprocess] internal_rx lagged, \
+                             dropped {n} messages"
+                        );
+                        continue;
+                    }
+                };
+                let request_id = match &inbound.message {
+                    Message::SshListKeysResponse(r) => Some(r.request_id.clone()),
+                    Message::SshSignResponse(r) => Some(r.request_id.clone()),
+                    Message::BusCertResponse(r) => Some(r.request_id.clone()),
+                    Message::Error(e) => e.request_id.clone(),
+                    _ => None,
+                };
+                if let Some(id) = request_id {
+                    let mut guard = dispatch_pending.lock().await;
+                    if let Some(tx) = guard.remove(&id) {
+                        let _ = tx.send(inbound.message);
+                    }
+                }
+            }
+        });
+    }
+
+    // 8. Register the device key with the bus authority (CSR → cert flow).
+    //    Blocks until the phone approves the CSR.
+    let (device_label, device_key) =
+        ensure_registered_inprocess(&bus_dir, label.as_deref(), &room_id, &pending).await?;
+
+    // 9. Load authority pub and activate the decrypt state so the middleware
+    //    can now unwrap encrypted responses from the phone.
+    let authority_pub = AuthorityPub::load(&bus::authority_pub_path(&bus_dir))
+        .context("read authority.pub.cbor after registration")?;
+    let authority_sign_pub = authority_pub
+        .ed25519_pub_array()
+        .context("extract authority Ed25519 pubkey")?;
+    let authority_ecdh_pub = authority_pub
+        .x25519_pub_array()
+        .context("extract authority X25519 pubkey")?;
+    let device_key = Arc::new(device_key);
+
+    if let Ok(mut guard) = decrypt_state.lock() {
+        *guard = Some((Arc::clone(&device_key), authority_sign_pub));
+    }
+
+    // 10. Spawn the encrypt worker.  Uses the device key for sealing so the
+    //     phone can verify the sender cert embedded in each BusSecure envelope.
+    let cert_bytes = Arc::new(
+        std::fs::read(bus::device_cert_path(&bus_dir, &device_label))
+            .context("read device cert after registration")?,
+    );
+    {
+        let dk = Arc::clone(&device_key);
+        let cb = Arc::clone(&cert_bytes);
+        p43::bus::spawn_encrypt_worker(
+            move |msg, recipient| {
+                p43::bus::seal_protocol_message(dk.as_ref(), &cb, recipient, msg).ok()
+            },
+            room_id.clone(),
+            outbound_rx,
+            None,
+        );
+    }
+
+    // 11. Build the SSH agent session and bind the socket.
+    let session = InProcessSession {
+        pending: Arc::clone(&pending),
+        outbound_tx,
+        authority_ecdh_pub,
+        timeout: std::time::Duration::from_secs(120),
+    };
+
+    let listener = UnixListener::bind(&sock_path)
+        .with_context(|| format!("bind agent socket {}", sock_path.display()))?;
+
+    eprintln!(
+        "[p43::ssh_agent::inprocess] listening on {sock}\n\
+         Run:  export SSH_AUTH_SOCK={sock}",
+        sock = sock_path.display(),
+    );
+
+    tokio::select! {
+        _ = &mut stop_rx => {
+            eprintln!("[p43::ssh_agent::inprocess] stop signal received");
+        }
+        result = listen(listener, session) => {
+            result.context("SSH agent listener error")?;
+        }
+    }
+
+    let _ = std::fs::remove_file(&sock_path);
+    eprintln!("[p43::ssh_agent::inprocess] stopped");
+    Ok(())
+}
+
+// ── InProcessSession ──────────────────────────────────────────────────────────
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[derive(Clone)]
+struct InProcessSession {
+    pending: std::sync::Arc<
+        tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<p43::protocol::Message>>>,
+    >,
+    outbound_tx: mpsc::UnboundedSender<p43::bus::OutboundBusMessage>,
+    authority_ecdh_pub: [u8; 32],
+    timeout: std::time::Duration,
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+impl InProcessSession {
+    /// Enqueue `msg` for delivery, then block until a matching response
+    /// arrives on the internal bus (or the timeout expires).
+    async fn forward(
+        &self,
+        msg: p43::protocol::Message,
+    ) -> Result<p43::protocol::Message, ssh_agent_lib::error::AgentError> {
+        use ssh_agent_lib::error::AgentError;
+
+        let request_id = match &msg {
+            p43::protocol::Message::SshListKeysRequest(r) => r.request_id.clone(),
+            p43::protocol::Message::SshSignRequest(r) => r.request_id.clone(),
+            _ => {
+                return Err(AgentError::other(std::io::Error::other(
+                    "not a forwardable request type",
+                )))
+            }
+        };
+
+        // Register the oneshot *before* enqueuing so a fast response is
+        // never missed.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending.lock().await.insert(request_id.clone(), tx);
+
+        // Build a recipient cert stub carrying only the authority ECDH pub.
+        // The encrypt worker uses this to seal the message to the authority.
+        let recipient_cert = p43::bus::CertPayload {
+            version: 1,
+            device_id: String::new(),
+            label: String::new(),
+            sign_pubkey: vec![0u8; 32],
+            ecdh_pubkey: self.authority_ecdh_pub.to_vec(),
+            issuer_fp: vec![],
+            iat: 0,
+            exp: None,
+        };
+
+        self.outbound_tx
+            .send(p43::bus::OutboundBusMessage {
+                message: msg,
+                recipient_cert: Some(recipient_cert),
+            })
+            .map_err(|_| AgentError::other(std::io::Error::other("outbound queue closed")))?;
+
+        let timeout_secs = self.timeout.as_secs();
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Err(_elapsed) => {
+                self.pending.lock().await.remove(&request_id);
+                Err(AgentError::other(std::io::Error::other(format!(
+                    "p43 request timed out ({timeout_secs} s) — is the phone online?"
+                ))))
+            }
+            Ok(Err(_)) => Err(AgentError::other(std::io::Error::other(
+                "response channel closed",
+            ))),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[ssh_agent_lib::async_trait]
+impl ssh_agent_lib::agent::Session for InProcessSession {
+    async fn request_identities(
+        &mut self,
+    ) -> Result<Vec<ssh_agent_lib::proto::Identity>, ssh_agent_lib::error::AgentError> {
+        use ssh_agent_lib::error::AgentError;
+        use ssh_agent_lib::proto::Identity;
+
+        let req = p43::protocol::Message::SshListKeysRequest(p43::protocol::SshListKeysRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+        });
+        match self.forward(req).await? {
+            p43::protocol::Message::SshListKeysResponse(r) => r
+                .keys
+                .iter()
+                .map(|k| {
+                    let pk = ssh_key::public::PublicKey::from_bytes(&k.public_key)
+                        .map_err(|e| AgentError::other(std::io::Error::other(e.to_string())))?;
+                    Ok(Identity {
+                        pubkey: pk.key_data().clone(),
+                        comment: k.comment.clone(),
+                    })
+                })
+                .collect(),
+            p43::protocol::Message::Error(e) => {
+                Err(AgentError::other(std::io::Error::other(e.message)))
+            }
+            _ => Err(AgentError::other(std::io::Error::other(
+                "unexpected response type for list_keys",
+            ))),
+        }
+    }
+
+    async fn sign(
+        &mut self,
+        request: ssh_agent_lib::proto::SignRequest,
+    ) -> Result<ssh_key::Signature, ssh_agent_lib::error::AgentError> {
+        use ssh_agent_lib::error::AgentError;
+        use ssh_key::HashAlg;
+
+        let pk = ssh_key::public::PublicKey::new(request.pubkey.clone(), "");
+        let fingerprint = pk.fingerprint(HashAlg::Sha256).to_string();
+
+        let req = p43::protocol::Message::SshSignRequest(p43::protocol::SshSignRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            fingerprint,
+            data: request.data.to_vec(),
+            flags: request.flags,
+            description: "SSH sign request (in-process agent)".into(),
+        });
+
+        match self.forward(req).await? {
+            p43::protocol::Message::SshSignResponse(r) => {
+                ssh_key::Signature::try_from(r.signature.as_slice())
+                    .map_err(|e| AgentError::other(std::io::Error::other(e.to_string())))
+            }
+            p43::protocol::Message::Error(e) => {
+                Err(AgentError::other(std::io::Error::other(e.message)))
+            }
+            _ => Err(AgentError::other(std::io::Error::other(
+                "unexpected response type for sign",
+            ))),
+        }
+    }
+}
+
+// ── In-process bus registration ───────────────────────────────────────────────
+
+/// Identical to the CLI's `ensure_registered` but uses the agent's own pending
+/// map (subscribed to the agent-private internal bus) instead of the CLI's
+/// local map.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+async fn ensure_registered_inprocess(
+    bus_dir: &std::path::Path,
+    device_label: Option<&str>,
+    room_id: &str,
+    pending: &std::sync::Arc<
+        tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<p43::protocol::Message>>>,
+    >,
+) -> anyhow::Result<(String, p43::bus::DeviceKey)> {
+    use anyhow::Context as _;
+    use base64::Engine as _;
+    use p43::bus::{self, AuthorityPub, DeviceCsr};
+    use p43::protocol::{BusCsrRequest, Message};
+
+    std::fs::create_dir_all(bus_dir)?;
+
+    let (label, key) = p43::bus::load_or_generate_device_key(bus_dir, device_label)?;
+
+    // Return early if a valid cert already exists.
+    let cert_path = bus::device_cert_path(bus_dir, &label);
+    if cert_path.exists() {
+        match p43::bus::DeviceCert::load(&cert_path) {
+            Ok(cert) => {
+                let now = p43::bus::unix_now()?;
+                let expired = cert.payload.exp.map(|e| now > e).unwrap_or(false);
+                if !expired {
+                    eprintln!(
+                        "[p43::bus] device '{}' already registered (cert valid)",
+                        label
+                    );
+                    return Ok((label, key));
+                }
+                eprintln!(
+                    "[p43::bus] cert for '{}' has expired — re-registering",
+                    label
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[p43::bus] could not load cert for '{}': {} — re-registering",
+                    label, e
+                );
+            }
+        }
+    }
+
+    // Generate CSR and send it to the Matrix room.
+    let csr = DeviceCsr::generate(&key)?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
+    pending.lock().await.insert(request_id.clone(), tx);
+
+    let msg = Message::BusCsrRequest(BusCsrRequest {
+        request_id: request_id.clone(),
+        device_label: label.clone(),
+        device_id: key.device_id(),
+        csr_b64: base64::engine::general_purpose::STANDARD.encode(&csr.cose_bytes),
+    });
+    p43::matrix::global::send_message(room_id, &msg.to_json()?)
+        .await
+        .context("send CSR request to Matrix room")?;
+
+    eprintln!(
+        "[p43::bus] CSR sent for device '{}' ({})\n\
+         Waiting for approval in the p43 app…",
+        label,
+        key.device_id()
+    );
+
+    // Block until the phone approves and sends back a BusCertResponse.
+    let response = rx.await.context("bus registration channel closed")?;
+    let cert_resp = match response {
+        Message::BusCertResponse(r) => r,
+        Message::Error(e) => anyhow::bail!("bus registration rejected: {}", e.message),
+        other => anyhow::bail!(
+            "unexpected message during registration: {}",
+            other.type_name()
+        ),
+    };
+
+    // Decode and verify the issued cert.
+    let cert_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&cert_resp.cert_b64)
+        .context("decode cert base64")?;
+    let authority_pub_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&cert_resp.authority_pub_b64)
+        .context("decode authority_pub base64")?;
+
+    let authority_pub = AuthorityPub::from_cbor_bytes(&authority_pub_bytes)
+        .context("decode CBOR AuthorityPub from BusCertResponse")?;
+    let authority_sign_pub = authority_pub.ed25519_pub_array()?;
+    let cert_payload = p43::bus::DeviceCert::verify(&cert_bytes, &authority_sign_pub)?;
+
+    // Persist cert and authority pub alongside the device key.
+    std::fs::write(&cert_path, &cert_bytes)
+        .with_context(|| format!("write cert to {}", cert_path.display()))?;
+    let auth_pub_path = bus::authority_pub_path(bus_dir);
+    authority_pub
+        .save(&auth_pub_path)
+        .with_context(|| format!("write authority pubkey to {}", auth_pub_path.display()))?;
+
+    eprintln!(
+        "[p43::bus] registered: device_id={} label={}\n  cert: {}\n  authority: {}",
+        cert_payload.device_id,
+        cert_payload.label,
+        cert_path.display(),
+        auth_pub_path.display(),
+    );
+
+    Ok((label, key))
 }

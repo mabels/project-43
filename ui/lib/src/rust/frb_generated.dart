@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 626035449;
+  int get rustContentHash => 1923080567;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -303,6 +303,17 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiSimpleSetStoreDir({required String dir});
 
   Future<void> crateApiSimpleShutdownTelemetry();
+
+  Future<bool> crateApiSimpleSshAgentIsRunning();
+
+  Future<String?> crateApiSimpleSshAgentSocketPath();
+
+  Future<String> crateApiSimpleSshAgentStart({
+    String? label,
+    String? socketPath,
+  });
+
+  Future<void> crateApiSimpleSshAgentStop();
 
   Future<void> crateApiSimpleVerifyKeyPassphrase({
     required String fingerprint,
@@ -2421,6 +2432,122 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "shutdown_telemetry", argNames: []);
 
   @override
+  Future<bool> crateApiSimpleSshAgentIsRunning() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 67,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiSimpleSshAgentIsRunningConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleSshAgentIsRunningConstMeta =>
+      const TaskConstMeta(debugName: "ssh_agent_is_running", argNames: []);
+
+  @override
+  Future<String?> crateApiSimpleSshAgentSocketPath() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 68,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiSimpleSshAgentSocketPathConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleSshAgentSocketPathConstMeta =>
+      const TaskConstMeta(debugName: "ssh_agent_socket_path", argNames: []);
+
+  @override
+  Future<String> crateApiSimpleSshAgentStart({
+    String? label,
+    String? socketPath,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_opt_String(label, serializer);
+          sse_encode_opt_String(socketPath, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 69,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleSshAgentStartConstMeta,
+        argValues: [label, socketPath],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleSshAgentStartConstMeta =>
+      const TaskConstMeta(
+        debugName: "ssh_agent_start",
+        argNames: ["label", "socketPath"],
+      );
+
+  @override
+  Future<void> crateApiSimpleSshAgentStop() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 70,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleSshAgentStopConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleSshAgentStopConstMeta =>
+      const TaskConstMeta(debugName: "ssh_agent_stop", argNames: []);
+
+  @override
   Future<void> crateApiSimpleVerifyKeyPassphrase({
     required String fingerprint,
     required String passphrase,
@@ -2434,7 +2561,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 67,
+            funcId: 71,
             port: port_,
           );
         },

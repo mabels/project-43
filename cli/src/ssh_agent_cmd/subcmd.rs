@@ -80,6 +80,22 @@ pub struct SshAgentArgs {
     #[arg(long)]
     pub device: Option<String>,
 
+    /// Log send / forward timestamps with transaction IDs to stderr (Matrix mode only).
+    ///
+    /// Each line looks like:
+    ///   [p43::ssh_agent] send     <txid> at <ISO-8601>
+    ///   [p43::ssh_agent] forward  <txid> at <ISO-8601>  (+<elapsed_ms> ms)
+    #[arg(long)]
+    pub verbose: bool,
+
+    /// Timeout for a single sign / list-keys round-trip (seconds, Matrix mode only).
+    ///
+    /// If the phone does not respond within this interval the agent returns
+    /// "agent refused operation" for that request.  The pending-map entry is
+    /// reclaimed immediately so no memory leaks.
+    #[arg(long, default_value_t = 60)]
+    pub timeout_secs: u64,
+
     /// Redact both the request and response Matrix events after a transaction
     /// completes successfully (Matrix mode only).
     ///
@@ -92,4 +108,34 @@ pub struct SshAgentArgs {
     /// only if you need faster per-transaction cleanup without a server policy.
     #[arg(long)]
     pub redact_on_complete: bool,
+
+    /// Run as a background daemon and write a PID file.
+    ///
+    /// The agent re-execs itself without this flag, redirecting stdin/stdout/stderr
+    /// to /dev/null.  The parent writes the daemon's PID to --pid-file and exits.
+    /// Stop the daemon with `p43 ssh-agent --stop`.
+    #[arg(long)]
+    pub daemon: bool,
+
+    /// Stop a running daemon by sending SIGTERM via its PID file, then exit.
+    ///
+    /// Reads the PID from --pid-file (or the default path) and sends SIGTERM.
+    /// Mutually exclusive with actually starting the agent.
+    #[arg(long)]
+    pub stop: bool,
+
+    /// Path for the PID file used by --daemon and --stop.
+    ///
+    /// Defaults to `p43-ssh-agent.pid` next to the key store
+    /// (usually ~/.config/project-43/p43-ssh-agent.pid).
+    #[arg(long, value_name = "FILE")]
+    pub pid_file: Option<String>,
+
+    /// Path for the log file that captures the daemon's stdout and stderr.
+    ///
+    /// Only used when --daemon is set.  The file is opened in append mode so
+    /// successive restarts accumulate rather than overwrite.
+    /// Defaults to `p43-ssh-agent.log` next to the key store.
+    #[arg(long, value_name = "FILE")]
+    pub log_file: Option<String>,
 }

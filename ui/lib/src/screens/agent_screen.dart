@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:p43/src/rust/api/simple.dart';
+import '../services/biometric_service.dart';
 import '../services/notification_service.dart';
 import '../services/settings_service.dart';
 import '../services/window_service.dart';
@@ -39,6 +40,17 @@ class _AgentScreenState extends State<AgentScreen> {
   bool _listening = false;
   StreamSubscription<AgentRequest>? _agentSub;
 
+  /// Per-fingerprint credential gate.
+  ///
+  /// Completes (void) once the first sign request for a given key has
+  /// successfully acquired the credential AND it is hot in the Rust cache.
+  /// Subsequent sign requests for the same key await this gate, then call the
+  /// *_cached Rust variant directly — the credential is guaranteed present.
+  ///
+  /// Completes with an error if acquisition was cancelled or failed; all
+  /// waiters then reject their respective requests without showing a dialog.
+  final Map<String, Completer<void>> _fingerprintGate = {};
+
   @override
   void initState() {
     super.initState();
@@ -52,8 +64,6 @@ class _AgentScreenState extends State<AgentScreen> {
     super.dispose();
   }
 
-  /// Load the saved agent room ID so we know where to send responses.
-  /// Does NOT start a Matrix listener — that is owned by the root shell.
   Future<void> _loadAgentRoom() async {
     final room = await mxGetAgentRoom();
     if (!mounted) return;
@@ -62,124 +72,20 @@ class _AgentScreenState extends State<AgentScreen> {
     }
   }
 
-  /// Subscribe once to the root shell's broadcast stream.
+  // ── Stream subscription ───────────────────────────────────────────────────
+
   void _subscribeToStream() {
     final stream = widget.agentStream;
     if (stream == null) return;
     _agentSub = stream.listen(
-      (event) async {
+      (event) {
         if (!mounted) return;
         if (event is AgentRequest_ListKeys) {
-          setState(
-            () => _log.insert(
-              0,
-              RequestEntry(
-                type: 'ssh.list_keys_request',
-                requestId: event.requestId,
-                description: null,
-                fingerprint: null,
-                status: RequestStatus.responding,
-              ),
-            ),
-          );
-          final room0 = _agentRoom;
-          if (room0 != null) _autoRespondListKeys(room0, event.requestId);
+          _handleListKeysEvent(event);
         } else if (event is AgentRequest_Sign) {
-          final fp = event.fingerprint;
-          final autoApprove =
-              SettingsService.instance.settings.autoApproveWhenCached;
-
-          widget.onSignRequest?.call();
-
-          final SshKeyDetails? details = fp.isNotEmpty
-              ? await getSshKeyDetails(fingerprint: fp)
-              : null;
-          if (!mounted) return;
-
-          final bool cached;
-          if (!autoApprove) {
-            cached = false;
-          } else if (details != null && details.cardIdents.isNotEmpty) {
-            cached = await Future.any(
-              details.cardIdents.map((id) => hasCachedCardPin(cardIdent: id)),
-            ).then((v) => v).catchError((_) => false);
-          } else if (fp.isNotEmpty) {
-            cached = await hasCachedPassphrase(fingerprint: fp);
-          } else {
-            cached = false;
-          }
-          if (!mounted) return;
-
-          {
-            final label = keyLabel(
-              details?.name ?? '',
-              details?.cardIdents ?? [],
-            );
-            final algo = details?.algo ?? '';
-            final keyPart = label.isNotEmpty
-                ? (algo.isNotEmpty ? '$label ($algo)' : label)
-                : fp;
-            final srcLabel = event.deviceLabel;
-            final srcId = event.deviceId;
-            final srcPart = srcLabel.isNotEmpty
-                ? srcLabel
-                : (srcId.isNotEmpty ? srcId : null);
-            final body = srcPart != null ? '$keyPart · from $srcPart' : keyPart;
-            NotificationService.instance.show(
-              title: 'Sign request',
-              body: body,
-              stableId: fp,
-              channelId: 'p43_sign_requests',
-              channelName: 'Sign requests',
-              channelDescription:
-                  'Notifications for incoming SSH sign requests',
-            );
-          }
-
-          final isCardKey = details != null && details.cardIdents.isNotEmpty;
-
-          if (cached) {
-            setState(
-              () => _log.insert(
-                0,
-                RequestEntry(
-                  type: 'ssh.sign_request',
-                  requestId: event.requestId,
-                  description: event.description,
-                  fingerprint: fp,
-                  keyName: details?.name,
-                  keyAlgo: details?.algo,
-                  cardIdents: details?.cardIdents ?? const [],
-                  status: RequestStatus.responding,
-                  sourceLabel: event.deviceLabel,
-                  sourceDeviceId: event.deviceId,
-                ),
-              ),
-            );
-            final room1 = _agentRoom;
-            if (room1 != null) {
-              if (isCardKey) {
-                _autoRespondSignCard(room1, event.requestId);
-              } else {
-                _autoRespondSign(room1, event.requestId);
-              }
-            }
-          } else {
-            final newEntry = RequestEntry(
-              type: 'ssh.sign_request',
-              requestId: event.requestId,
-              description: event.description,
-              fingerprint: fp,
-              keyName: details?.name,
-              keyAlgo: details?.algo,
-              cardIdents: details?.cardIdents ?? const [],
-              status: RequestStatus.pending,
-              sourceLabel: event.deviceLabel,
-              sourceDeviceId: event.deviceId,
-            );
-            setState(() => _log.insert(0, newEntry));
-            _approveSign(newEntry);
-          }
+          // Fire-and-forget: sign events are serialised per fingerprint via
+          // _fingerprintGate; different fingerprints process concurrently.
+          _handleSignEvent(event);
         }
         if (_log.length > 50) _log.removeLast();
       },
@@ -189,35 +95,23 @@ class _AgentScreenState extends State<AgentScreen> {
     if (mounted) setState(() => _listening = true);
   }
 
-  Future<void> _autoRespondSign(String roomId, String requestId) async {
-    try {
-      await mxRespondSignCached(roomId: roomId, requestId: requestId);
-      SettingsService.instance.resetCacheTimer();
-      _updateStatus(requestId, RequestStatus.done);
-    } catch (e) {
-      _updateStatusWithError(requestId, e);
-    }
-  }
+  // ── List-keys handling ────────────────────────────────────────────────────
 
-  Future<void> _autoRespondSignCard(String roomId, String requestId) async {
-    try {
-      await mxRespondSignCardCached(roomId: roomId, requestId: requestId);
-      SettingsService.instance.resetCacheTimer();
-      _updateStatus(requestId, RequestStatus.done);
-    } catch (e) {
-      _updateStatus(requestId, RequestStatus.pending);
-      final entry = _log.firstWhere(
-        (e) => e.requestId == requestId,
-        orElse: () => RequestEntry(
-          type: 'ssh.sign_request',
-          requestId: requestId,
+  void _handleListKeysEvent(AgentRequest_ListKeys event) {
+    setState(
+      () => _log.insert(
+        0,
+        RequestEntry(
+          type: 'ssh.list_keys_request',
+          requestId: event.requestId,
           description: null,
           fingerprint: null,
-          status: RequestStatus.pending,
+          status: RequestStatus.responding,
         ),
-      );
-      _approveSign(entry);
-    }
+      ),
+    );
+    final room = _agentRoom;
+    if (room != null) _autoRespondListKeys(room, event.requestId);
   }
 
   Future<void> _autoRespondListKeys(String roomId, String requestId) async {
@@ -228,6 +122,275 @@ class _AgentScreenState extends State<AgentScreen> {
       _updateStatusWithError(requestId, e);
     }
   }
+
+  // ── Sign handling ─────────────────────────────────────────────────────────
+
+  Future<void> _handleSignEvent(AgentRequest_Sign event) async {
+    if (!mounted) return;
+    final fp = event.fingerprint;
+
+    widget.onSignRequest?.call();
+
+    final SshKeyDetails? details = fp.isNotEmpty
+        ? await getSshKeyDetails(fingerprint: fp)
+        : null;
+    if (!mounted) return;
+
+    final bool autoApprove =
+        SettingsService.instance.settings.autoApproveWhenCached;
+
+    // Notification.
+    {
+      final label = keyLabel(details?.name ?? '', details?.cardIdents ?? []);
+      final algo = details?.algo ?? '';
+      final keyPart = label.isNotEmpty
+          ? (algo.isNotEmpty ? '$label ($algo)' : label)
+          : fp;
+      final srcLabel = event.deviceLabel;
+      final srcId = event.deviceId;
+      final srcPart = srcLabel.isNotEmpty
+          ? srcLabel
+          : (srcId.isNotEmpty ? srcId : null);
+      final body = srcPart != null ? '$keyPart · from $srcPart' : keyPart;
+      NotificationService.instance.show(
+        title: 'Sign request',
+        body: body,
+        stableId: fp,
+        channelId: 'p43_sign_requests',
+        channelName: 'Sign requests',
+        channelDescription: 'Notifications for incoming SSH sign requests',
+      );
+    }
+
+    final entry = RequestEntry(
+      type: 'ssh.sign_request',
+      requestId: event.requestId,
+      description: event.description,
+      fingerprint: fp,
+      keyName: details?.name,
+      keyAlgo: details?.algo,
+      cardIdents: details?.cardIdents ?? const [],
+      // autoApprove → show as "responding" immediately; manual → "pending"
+      // so the Approve button appears.
+      status:
+          autoApprove ? RequestStatus.responding : RequestStatus.pending,
+      sourceLabel: event.deviceLabel,
+      sourceDeviceId: event.deviceId,
+    );
+    setState(() => _log.insert(0, entry));
+
+    if (autoApprove) {
+      await _processSignRequest(entry);
+    }
+    // autoApprove=false: stays pending, user taps the Approve button.
+  }
+
+  /// Process a sign request — called from the auto-approve path or user tap.
+  ///
+  /// Gate semantics:
+  ///   • First caller for a fingerprint acquires the credential (cache →
+  ///     biometric → dialog) and completes the gate when the credential is
+  ///     hot in the Rust cache.
+  ///   • Every subsequent caller for the same fingerprint waits on the gate
+  ///     and then calls the *_cached Rust variant directly — no dialog shown.
+  ///   • If acquisition fails or the dialog is cancelled the gate completes
+  ///     with an error and all waiters reject their requests.
+  Future<void> _processSignRequest(RequestEntry entry) async {
+    final roomId = _agentRoom;
+    if (roomId == null) return;
+    final fp = entry.fingerprint ?? '';
+    final isCardKey = entry.cardIdents.isNotEmpty;
+
+    // ── Waiter path ────────────────────────────────────────────────────────
+    final existing = _fingerprintGate[fp];
+    if (existing != null) {
+      try {
+        // Block until the gate holder has credential hot in the Rust cache.
+        await existing.future;
+        _updateStatus(entry.requestId, RequestStatus.responding);
+        await _signCached(roomId, entry.requestId, isCardKey);
+        SettingsService.instance.resetCacheTimer();
+        _updateStatus(entry.requestId, RequestStatus.done);
+      } catch (e) {
+        debugPrint('[p43::agent] waiter error  ${entry.requestId}: $e');
+        // Gate holder was cancelled or failed — reject this request too.
+        try {
+          await mxRejectSign(roomId: roomId, requestId: entry.requestId);
+        } catch (rejectErr) {
+          debugPrint('[p43::agent] reject error ${entry.requestId}: $rejectErr');
+        }
+        _updateStatus(entry.requestId, RequestStatus.error);
+      }
+      return;
+    }
+
+    // ── Gate-holder path ───────────────────────────────────────────────────
+    final gate = Completer<void>();
+    _fingerprintGate[fp] = gate;
+
+    try {
+      await _acquireAndSign(roomId, entry, isCardKey, fp);
+      SettingsService.instance.resetCacheTimer();
+      _updateStatus(entry.requestId, RequestStatus.done);
+      // Signal waiters: credential is now hot in the Rust cache.
+      gate.complete();
+    } catch (e) {
+      debugPrint('[p43::agent] gate-holder error ${entry.requestId}: $e');
+      if (!gate.isCompleted) gate.completeError(e);
+      if (e.toString() == 'cancelled') {
+        _updateStatus(entry.requestId, RequestStatus.error);
+      } else {
+        _updateStatusWithError(entry.requestId, e);
+      }
+    } finally {
+      _fingerprintGate.remove(fp);
+      if (!gate.isCompleted) gate.completeError('disposed');
+    }
+  }
+
+  /// Acquire the signing credential for [fp] and sign [entry]'s request.
+  ///
+  /// Try order:
+  ///   1. Rust credential cache (no Dart string needed).
+  ///   2. Biometric secure store (Face ID / Touch ID / device PIN).
+  ///   3. PIN / passphrase dialog — result auto-saved to biometric store.
+  ///
+  /// Throws the string `'cancelled'` when the user dismisses the dialog.
+  Future<void> _acquireAndSign(
+    String roomId,
+    RequestEntry entry,
+    bool isCardKey,
+    String fp,
+  ) async {
+    final requestId = entry.requestId;
+    final cardIdents = entry.cardIdents;
+
+    debugPrint('[p43::agent] acquire  $requestId  fp=$fp  card=$isCardKey');
+
+    // ── 1. Rust cache hit ─────────────────────────────────────────────────
+    if (isCardKey) {
+      for (final id in cardIdents) {
+        if (await hasCachedCardPin(cardIdent: id)) {
+          debugPrint('[p43::agent] path=rust-cache  $requestId');
+          _updateStatus(requestId, RequestStatus.responding);
+          await mxRespondSignCardCached(
+            roomId: roomId,
+            requestId: requestId,
+          );
+          return; // credential stays hot for waiters
+        }
+      }
+    } else if (fp.isNotEmpty && await hasCachedPassphrase(fingerprint: fp)) {
+      debugPrint('[p43::agent] path=rust-cache  $requestId');
+      _updateStatus(requestId, RequestStatus.responding);
+      await mxRespondSignCached(roomId: roomId, requestId: requestId);
+      return;
+    }
+
+    // ── 2. Biometric secure store ─────────────────────────────────────────
+    if (fp.isNotEmpty && await BiometricService.instance.hasSaved(fp)) {
+      debugPrint('[p43::agent] path=biometric  $requestId');
+      WindowService.instance.bringToFront();
+      final saved = await BiometricService.instance.authenticate(
+        fp,
+        reason: 'Approve SSH sign request',
+      );
+      if (!mounted) throw 'cancelled';
+      if (saved != null) {
+        debugPrint('[p43::agent] biometric ok  $requestId');
+        _updateStatus(requestId, RequestStatus.responding);
+        if (isCardKey) {
+          await mxRespondSignCard(
+            roomId: roomId,
+            requestId: requestId,
+            pin: saved.credential,
+          );
+        } else {
+          await mxRespondSign(
+            roomId: roomId,
+            requestId: requestId,
+            passphrase: saved.credential,
+          );
+        }
+        return; // Rust also caches the credential for waiters
+      }
+      debugPrint('[p43::agent] biometric cancelled/failed  $requestId  → dialog');
+      // Biometric cancelled / failed — fall through to dialog.
+    }
+
+    // ── 3. Dialog ─────────────────────────────────────────────────────────
+    // Gate guarantees only one dialog is open at a time for this fingerprint.
+    debugPrint('[p43::agent] path=dialog  $requestId');
+    _updateStatus(requestId, RequestStatus.pending);
+    WindowService.instance.bringToFront();
+
+    final String? credential = isCardKey
+        ? await _promptPin(entry)
+        : await _promptPassphrase(entry);
+
+    if (credential == null) {
+      debugPrint('[p43::agent] dialog cancelled  $requestId');
+      throw 'cancelled';
+    }
+
+    // Auto-save to biometric store — next request uses Face ID / Touch ID.
+    if (fp.isNotEmpty) {
+      try {
+        await BiometricService.instance.save(
+          fingerprint: fp,
+          isCard: isCardKey,
+          credential: credential,
+        );
+        debugPrint('[p43::agent] biometric saved  $requestId');
+      } catch (e) {
+        debugPrint('[p43::agent] biometric save failed  $requestId: $e');
+        // Saving failed (device has no passcode, etc.) — continue without it.
+      }
+    }
+
+    debugPrint('[p43::agent] signing via dialog credential  $requestId');
+    _updateStatus(requestId, RequestStatus.responding);
+    if (isCardKey) {
+      await mxRespondSignCard(
+        roomId: roomId,
+        requestId: requestId,
+        pin: credential,
+      );
+    } else {
+      await mxRespondSign(
+        roomId: roomId,
+        requestId: requestId,
+        passphrase: credential,
+      );
+    }
+    // Rust caches the credential; waiters call *_cached variants.
+  }
+
+  /// Call the Rust cached-sign variant for a waiter (gate already complete).
+  Future<void> _signCached(
+    String roomId,
+    String requestId,
+    bool isCardKey,
+  ) async {
+    if (isCardKey) {
+      await mxRespondSignCardCached(roomId: roomId, requestId: requestId);
+    } else {
+      await mxRespondSignCached(roomId: roomId, requestId: requestId);
+    }
+  }
+
+  // ── Reject ────────────────────────────────────────────────────────────────
+
+  Future<void> _rejectSign(String requestId) async {
+    final roomId = _agentRoom;
+    if (roomId == null) return;
+    _updateStatus(requestId, RequestStatus.error);
+    try {
+      await mxRejectSign(roomId: roomId, requestId: requestId);
+    } catch (_) {}
+  }
+
+  // ── Status helpers ────────────────────────────────────────────────────────
 
   void _updateStatus(String requestId, RequestStatus status) {
     if (!mounted) return;
@@ -250,111 +413,7 @@ class _AgentScreenState extends State<AgentScreen> {
     });
   }
 
-  // ── Sign approval ─────────────────────────────────────────────────────────
-
-  Future<void> _approveSign(RequestEntry entry) async {
-    final roomId = _agentRoom;
-    if (roomId == null) return;
-
-    if (entry.cardIdents.isNotEmpty) {
-      bool pinCached = false;
-      for (final id in entry.cardIdents) {
-        if (await hasCachedCardPin(cardIdent: id)) {
-          pinCached = true;
-          break;
-        }
-      }
-
-      if (pinCached) {
-        _updateStatus(entry.requestId, RequestStatus.responding);
-        try {
-          await mxRespondSignCardCached(
-            roomId: roomId,
-            requestId: entry.requestId,
-          );
-          SettingsService.instance.resetCacheTimer();
-          _updateStatus(entry.requestId, RequestStatus.done);
-        } catch (_) {
-          pinCached = false;
-        }
-        if (pinCached) return;
-      }
-
-      final pin = await _promptPin(entry);
-      if (pin == null) return;
-      _updateStatus(entry.requestId, RequestStatus.responding);
-      try {
-        await mxRespondSignCard(
-          roomId: roomId,
-          requestId: entry.requestId,
-          pin: pin,
-        );
-        SettingsService.instance.resetCacheTimer();
-        _updateStatus(entry.requestId, RequestStatus.done);
-      } catch (e) {
-        _updateStatusWithError(entry.requestId, e);
-      }
-      return;
-    }
-
-    final fp = entry.fingerprint ?? '';
-    final cached = fp.isNotEmpty && await hasCachedPassphrase(fingerprint: fp);
-
-    if (!cached) {
-      final passphrase = await _promptPassphrase(entry);
-      if (passphrase == null) return;
-
-      _updateStatus(entry.requestId, RequestStatus.responding);
-      try {
-        await mxRespondSign(
-          roomId: roomId,
-          requestId: entry.requestId,
-          passphrase: passphrase,
-        );
-        SettingsService.instance.resetCacheTimer();
-        _updateStatus(entry.requestId, RequestStatus.done);
-      } catch (e) {
-        _updateStatusWithError(entry.requestId, e);
-      }
-      return;
-    }
-
-    _updateStatus(entry.requestId, RequestStatus.responding);
-    try {
-      await mxRespondSignCached(roomId: roomId, requestId: entry.requestId);
-      SettingsService.instance.resetCacheTimer();
-      _updateStatus(entry.requestId, RequestStatus.done);
-    } catch (_) {
-      _updateStatus(entry.requestId, RequestStatus.pending);
-      final passphrase = await _promptPassphrase(entry);
-      if (passphrase == null) {
-        _updateStatus(entry.requestId, RequestStatus.error);
-        return;
-      }
-      _updateStatus(entry.requestId, RequestStatus.responding);
-      try {
-        await mxRespondSign(
-          roomId: roomId,
-          requestId: entry.requestId,
-          passphrase: passphrase,
-        );
-        SettingsService.instance.resetCacheTimer();
-        _updateStatus(entry.requestId, RequestStatus.done);
-      } catch (e2) {
-        _updateStatusWithError(entry.requestId, e2);
-      }
-    }
-  }
-
-  Future<void> _rejectSign(String requestId) async {
-    final roomId = _agentRoom;
-    if (roomId == null) return;
-
-    _updateStatus(requestId, RequestStatus.error);
-    try {
-      await mxRejectSign(roomId: roomId, requestId: requestId);
-    } catch (_) {}
-  }
+  // ── Dialogs ───────────────────────────────────────────────────────────────
 
   Future<String?> _promptPassphrase(RequestEntry entry) async {
     final fp = entry.fingerprint ?? '';
@@ -367,7 +426,6 @@ class _AgentScreenState extends State<AgentScreen> {
         : (fp.isNotEmpty ? await getSshKeyDetails(fingerprint: fp) : null);
 
     if (!mounted) return null;
-    WindowService.instance.bringToFront();
 
     final ctrl = TextEditingController();
     var obscure = true;
@@ -553,8 +611,6 @@ class _AgentScreenState extends State<AgentScreen> {
 
     final details = futures[0] as SshKeyDetails?;
     final pinRetries = futures[1] as int?;
-
-    WindowService.instance.bringToFront();
 
     final ctrl = TextEditingController();
     var obscure = true;
@@ -788,7 +844,6 @@ class _AgentScreenState extends State<AgentScreen> {
         _agentRoom = picked.roomId;
         _log.clear();
       });
-      // Notify the root shell so it restarts mxListenAll with the new room.
       widget.onRoomChanged?.call(picked.roomId);
     } catch (e) {
       if (mounted) {
@@ -798,6 +853,8 @@ class _AgentScreenState extends State<AgentScreen> {
       }
     }
   }
+
+  // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -841,7 +898,7 @@ class _AgentScreenState extends State<AgentScreen> {
                     itemBuilder: (context, i) => AgentLogTile(
                       entry: _log[i],
                       onApprove: _log[i].status == RequestStatus.pending
-                          ? () => _approveSign(_log[i])
+                          ? () => _processSignRequest(_log[i])
                           : null,
                       onReject: _log[i].status == RequestStatus.pending
                           ? () => _rejectSign(_log[i].requestId)

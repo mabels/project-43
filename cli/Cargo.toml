@@ -29,3 +29,5 @@ hex            = "0.4"
 pgp            = "0.19"
 tracing        = { version = "0.1", optional = true }
 hostname       = "0.4"
+chrono         = { version = "0.4", features = ["clock"] }
+libc           = "0.2"

@@ -18,6 +18,9 @@ class AgentSettings {
     this.deviceCertTtlDays = 180,
     this.defaultKeyFingerprint,
     this.messageMaxAgeHours = 8,
+    this.desktopAgentEnabled = false,
+    this.desktopAgentLabel,
+    this.desktopAgentSocketPath,
   });
 
   /// When `true` and credentials for the requested key are cached, sign
@@ -69,6 +72,19 @@ class AgentSettings {
   /// Default: 8 h.  Set to 0 to accept all messages regardless of age.
   final int messageMaxAgeHours;
 
+  /// When `true` (macOS/Linux only), an in-process SSH agent is started
+  /// automatically after the Matrix listener connects.  The agent shares the
+  /// same bus/Matrix session as the app — no separate process needed.
+  final bool desktopAgentEnabled;
+
+  /// Optional label for the in-process agent's device key.
+  /// `null` → use the system hostname (same default as `p43 ssh-agent`).
+  final String? desktopAgentLabel;
+
+  /// Optional UNIX socket path for the in-process agent.
+  /// `null` → use the default path (`<store>/bus/agent.sock`).
+  final String? desktopAgentSocketPath;
+
   AgentSettings copyWith({
     bool? autoApproveWhenCached,
     bool? cacheDecryptedKey,
@@ -78,6 +94,9 @@ class AgentSettings {
     int? deviceCertTtlDays,
     Object? defaultKeyFingerprint = _sentinel,
     int? messageMaxAgeHours,
+    bool? desktopAgentEnabled,
+    Object? desktopAgentLabel = _sentinel,
+    Object? desktopAgentSocketPath = _sentinel,
   }) =>
       AgentSettings(
         autoApproveWhenCached:
@@ -93,6 +112,13 @@ class AgentSettings {
             ? this.defaultKeyFingerprint
             : defaultKeyFingerprint as String?,
         messageMaxAgeHours: messageMaxAgeHours ?? this.messageMaxAgeHours,
+        desktopAgentEnabled: desktopAgentEnabled ?? this.desktopAgentEnabled,
+        desktopAgentLabel: desktopAgentLabel == _sentinel
+            ? this.desktopAgentLabel
+            : desktopAgentLabel as String?,
+        desktopAgentSocketPath: desktopAgentSocketPath == _sentinel
+            ? this.desktopAgentSocketPath
+            : desktopAgentSocketPath as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -104,6 +130,9 @@ class AgentSettings {
         'deviceCertTtlDays': deviceCertTtlDays,
         'defaultKeyFingerprint': defaultKeyFingerprint,
         'messageMaxAgeHours': messageMaxAgeHours,
+        'desktopAgentEnabled': desktopAgentEnabled,
+        'desktopAgentLabel': desktopAgentLabel,
+        'desktopAgentSocketPath': desktopAgentSocketPath,
       };
 
   factory AgentSettings.fromJson(Map<String, dynamic> json) => AgentSettings(
@@ -116,6 +145,9 @@ class AgentSettings {
         deviceCertTtlDays: json['deviceCertTtlDays'] as int? ?? 180,
         defaultKeyFingerprint: json['defaultKeyFingerprint'] as String?,
         messageMaxAgeHours: json['messageMaxAgeHours'] as int? ?? 8,
+        desktopAgentEnabled: json['desktopAgentEnabled'] as bool? ?? false,
+        desktopAgentLabel: json['desktopAgentLabel'] as String?,
+        desktopAgentSocketPath: json['desktopAgentSocketPath'] as String?,
       );
 }
 
@@ -176,6 +208,19 @@ class SettingsService extends ChangeNotifier {
       // Restart the Dart-side timer so the new value takes effect immediately.
       if (_cacheTimer?.isActive == true) {
         resetCacheTimer();
+      }
+    }
+    if (updated.desktopAgentEnabled != prev.desktopAgentEnabled &&
+        (Platform.isMacOS || Platform.isLinux)) {
+      if (updated.desktopAgentEnabled) {
+        unawaited(
+          sshAgentStart(
+            label: updated.desktopAgentLabel,
+            socketPath: updated.desktopAgentSocketPath,
+          ).catchError((_) {}),
+        );
+      } else {
+        unawaited(sshAgentStop().catchError((_) {}));
       }
     }
     await _file?.writeAsString(jsonEncode(_settings.toJson()));

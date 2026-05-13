@@ -142,14 +142,18 @@ class _DevicesScreenState extends State<DevicesScreen>
 
   // ── Session-lock navigation ───────────────────────────────────────────────
 
-  /// When the root shell emits a session-lock signal, animate to the Authority
-  /// tab (index 0) and open the unlock dialog once the animation has settled.
+  /// When the root shell emits a session-lock signal, bring the window to
+  /// front, navigate to the Authority tab, send a notification, and open the
+  /// unlock dialog.  The dialog tries biometric first (Face ID / Touch ID /
+  /// device PIN) and only falls back to a manual PIN entry if biometrics are
+  /// unavailable or fail.
   void _subscribeToSessionLock() {
     final stream = widget.sessionLockStream;
     if (stream == null) return;
     _sessionLockSub = stream.listen(
       (_) {
         if (!mounted) return;
+        WindowService.instance.bringToFront();
         _tabCtrl.animateTo(0);
         NotificationService.instance.show(
           title: 'Session locked',
@@ -161,11 +165,10 @@ class _DevicesScreenState extends State<DevicesScreen>
           channelDescription:
               'Notifications when the authority session must be unlocked',
         );
-        WindowService.instance.bringToFront();
-        // Open the unlock dialog after the tab animation completes and the
-        // SessionUnlockTile is guaranteed to be in the widget tree.
+        // Open the unlock dialog after the tab animation completes.
         // Flutter's default tab animation is 300 ms; 350 ms gives a buffer.
         Future.delayed(const Duration(milliseconds: 350), () {
+          if (!mounted) return;
           _sessionUnlockKey.currentState?.openUnlockDialog();
         });
       },

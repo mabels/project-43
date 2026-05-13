@@ -170,8 +170,24 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  Future<void> _maybeAutoStartAgent() async {
+    if (!Platform.isMacOS && !Platform.isLinux) return;
+    final s = SettingsService.instance.settings;
+    if (!s.desktopAgentEnabled) return;
+    try {
+      final running = await sshAgentIsRunning();
+      if (!running) {
+        await sshAgentStart(
+          label: s.desktopAgentLabel,
+          socketPath: s.desktopAgentSocketPath,
+        );
+      }
+    } catch (_) {}
+  }
+
   void _startAllListening(String roomId) {
     _allSub?.cancel();
+    unawaited(_maybeAutoStartAgent());
     _allSub = mxListenAll(roomId: roomId).listen(
       (msg) {
         if (msg is AppMessage_AgentEvent) {

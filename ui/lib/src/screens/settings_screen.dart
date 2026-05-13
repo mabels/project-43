@@ -163,6 +163,8 @@ class SettingsScreen extends StatelessWidget {
                   style: TextStyle(fontSize: 11, color: Color(0xFF8E8E93)),
                 ),
               ),
+              const SizedBox(height: 8),
+              const DesktopAgentSection(),
 
               // ── Notifications ─────────────────────────────────────────
               const Divider(height: 32),

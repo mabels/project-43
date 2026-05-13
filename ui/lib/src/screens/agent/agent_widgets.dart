@@ -2,6 +2,13 @@ import 'package:flutter/material.dart';
 import '../key_helpers.dart';
 import 'request_model.dart';
 
+String _fmtTime(DateTime t) {
+  final h = t.hour.toString().padLeft(2, '0');
+  final m = t.minute.toString().padLeft(2, '0');
+  final s = t.second.toString().padLeft(2, '0');
+  return '$h:$m:$s';
+}
+
 // ── Room banner ───────────────────────────────────────────────────────────────
 
 class AgentRoomBanner extends StatelessWidget {
@@ -257,7 +264,21 @@ class AgentLogTile extends StatelessWidget {
                     ],
                   ),
                 ),
-                AgentStatusLabel(entry.status),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      _fmtTime(entry.timestamp),
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    AgentStatusLabel(entry.status),
+                  ],
+                ),
                 if (hasErrorDetail) ...[
                   const SizedBox(width: 4),
                   GestureDetector(

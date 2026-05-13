@@ -3327,10 +3327,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "clap",
  "dirs",
  "hex",
  "hostname",
+ "libc",
  "matrix-sdk",
  "p43",
  "pgp",
@@ -4325,13 +4327,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "dirs",
  "flutter_rust_bridge",
  "hex",
  "p43",
  "rpassword",
  "rusqlite",
+ "ssh-agent-lib",
+ "ssh-key",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

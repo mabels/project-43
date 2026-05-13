@@ -51,7 +51,7 @@ dependencies:
   # Biometric / device-PIN authentication (Face ID, Touch ID, fingerprint).
   local_auth: ^3.0.1
   # Encrypted persistent storage (Keychain on iOS/macOS, EncryptedSharedPrefs on Android).
-  flutter_secure_storage: ^10.0.0
+  flutter_secure_storage: ^10.1.0
 
 dev_dependencies:
   flutter_test:

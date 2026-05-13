@@ -67,7 +67,7 @@ typeshare       = "1"
 
 # rPGP — pure-Rust OpenPGP, replaces sequoia-openpgp.
 pgp  = { version = "0.19" }
-rand = "0.8"
+rand = "0.9"
 
 # pcsc feature: openpgp-card + rPGP card stack
 openpgp-card      = { version = "0.6.1", optional = true }

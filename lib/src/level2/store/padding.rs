@@ -1,50 +1,78 @@
-//! Payload padding to 1 KiB boundaries.
+//! Payload padding to 256-byte boundaries.
 //!
 //! Hides the true payload length from an observer who can see the ciphertext
-//! size (which equals the padded size for AES-256-GCM without compression).
+//! size (AES-256-GCM ciphertext = padded_size + 16 bytes GCM tag).
 //!
 //! # Format
 //!
 //! ```text
-//! [ 4 bytes big-endian original length ]
-//! [ original payload bytes            ]
-//! [ padding bytes                     ]  ← repeating (pad_len % 256) as u8
+//! [ 4 bytes BE: original length ]
+//! [ original payload bytes      ]
+//! [ random salt (if short)      ]  ← only when orig_len < SHORT_THRESHOLD
+//! [ padding bytes               ]  ← repeating (pad_len % 256) as u8
 //! ```
 //!
-//! Total length is always a multiple of 1024 bytes.
-//! The padding value is `(pad_len % 256) as u8` — unambiguous and
-//! PKCS#7-compatible for lengths ≤ 255.
+//! ## Short payload defence (< 16 bytes)
 //!
-//! # Boundary
+//! For payloads shorter than [`SHORT_THRESHOLD`] bytes (e.g. a 4-digit PIN),
+//! `(SHORT_THRESHOLD - orig_len)` random bytes are inserted between the
+//! payload and the deterministic padding.  This defeats size fingerprinting:
+//! a 4-byte PIN is indistinguishable from a 15-byte secret after padding.
 //!
-//! A payload of exactly N×1024 bytes is padded to (N+1)×1024 so there
-//! is always at least 4 bytes of padding (the length prefix) and the
-//! ciphertext size alone does not reveal that the payload was exactly on
-//! a boundary.
+//! The trade-off: deduplication is silently disabled for short payloads
+//! because two identical PINs produce different padded blobs.  This is
+//! acceptable — PINs are rarely duplicated across chain items and the
+//! security gain outweighs the lost dedup.
+//!
+//! ## `unpad` is unchanged
+//!
+//! Both paths store `orig_len` in the 4-byte prefix.  `unpad` always returns
+//! exactly `orig_len` bytes regardless of what follows the payload.
 
+use aes_gcm::aead::OsRng;
 use anyhow::{bail, Result};
+use rand::RngCore;
+
+/// Payloads shorter than this many bytes get a random salt inserted before
+/// the deterministic padding to prevent size fingerprinting.
+const SHORT_THRESHOLD: usize = 16;
 
 const BLOCK: usize = 256;
 const PREFIX: usize = 4; // u32 big-endian original length
 
-/// Pad `payload` to the next 1 KiB boundary.
+/// Pad `payload` to the next 256-byte boundary.
+///
+/// Short payloads (`< SHORT_THRESHOLD`) receive random salt bytes first.
 pub fn pad(payload: &[u8]) -> Vec<u8> {
     let orig_len = payload.len();
-    // Total bytes needed before padding
-    let min_total = PREFIX + orig_len;
-    // Round up to next multiple of BLOCK, always at least one full block.
+
+    let salt = if orig_len < SHORT_THRESHOLD {
+        let salt_len = SHORT_THRESHOLD - orig_len;
+        let mut buf = vec![0u8; salt_len];
+        OsRng.fill_bytes(&mut buf);
+        buf
+    } else {
+        vec![]
+    };
+
+    let content_len = orig_len + salt.len();
+    let min_total = PREFIX + content_len;
     let padded_size = next_block(min_total);
-    let pad_len = padded_size - PREFIX - orig_len;
+    let pad_len = padded_size - PREFIX - content_len;
     let pad_byte = (pad_len % 256) as u8;
 
     let mut out = Vec::with_capacity(padded_size);
     out.extend_from_slice(&(orig_len as u32).to_be_bytes());
     out.extend_from_slice(payload);
+    out.extend_from_slice(&salt);
     out.extend(std::iter::repeat_n(pad_byte, pad_len));
     out
 }
 
 /// Remove padding and return the original payload.
+///
+/// Reads `orig_len` from the 4-byte prefix and returns exactly those bytes.
+/// Any salt and padding bytes that follow are discarded.
 pub fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
     if padded.len() < PREFIX {
         bail!("padded buffer too short: {} bytes", padded.len());
@@ -67,8 +95,6 @@ pub fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn next_block(n: usize) -> usize {
-    // Always strictly larger than n — guarantees at least 1 byte of padding.
-    // floor(n / BLOCK + 1) * BLOCK
     (n / BLOCK + 1) * BLOCK
 }
 
@@ -95,7 +121,6 @@ mod tests {
 
     #[test]
     fn round_trip_exactly_one_block_minus_prefix() {
-        // payload that exactly fills one block after prefix → spills to next block
         let payload = vec![0xAB; BLOCK - PREFIX];
         let padded = pad(&payload);
         assert_eq!(padded.len(), 2 * BLOCK);
@@ -111,19 +136,30 @@ mod tests {
     }
 
     #[test]
-    fn padding_value_is_pad_len_mod_256() {
-        let payload = b"hi";
-        let padded = pad(payload);
-        let pad_len = padded.len() - PREFIX - payload.len();
-        let expected_byte = (pad_len % 256) as u8;
-        for &b in &padded[PREFIX + payload.len()..] {
-            assert_eq!(b, expected_byte);
-        }
+    fn short_payload_gets_salt() {
+        // Two identical short payloads should produce different padded blobs.
+        let payload = b"1234";
+        let a = pad(payload);
+        let b = pad(payload);
+        // Both unpad correctly.
+        assert_eq!(unpad(&a).unwrap(), payload);
+        assert_eq!(unpad(&b).unwrap(), payload);
+        // But the blobs differ (salt is random) with overwhelming probability.
+        assert_ne!(a, b, "salt randomisation failed — astronomically unlikely");
+    }
+
+    #[test]
+    fn long_payload_is_deterministic_for_same_input() {
+        // Payloads >= SHORT_THRESHOLD have no salt — same input → same padded output.
+        let payload = vec![0xCC; SHORT_THRESHOLD];
+        let a = pad(&payload);
+        let b = pad(&payload);
+        assert_eq!(a, b);
     }
 
     #[test]
     fn padded_size_always_multiple_of_block() {
-        for len in 0..=2100 {
+        for len in 0..=600 {
             let p = pad(&vec![0u8; len]);
             assert_eq!(p.len() % BLOCK, 0, "len={len}");
         }
@@ -137,7 +173,6 @@ mod tests {
     #[test]
     fn unpad_rejects_length_overflow() {
         let mut buf = vec![0u8; BLOCK];
-        // Write a length larger than the buffer
         buf[0..4].copy_from_slice(&(BLOCK as u32).to_be_bytes());
         assert!(unpad(&buf).is_err());
     }

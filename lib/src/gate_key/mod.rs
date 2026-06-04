@@ -148,10 +148,7 @@ impl GateKeyStore {
     ///
     /// Returns `(unlocked_key, attempts)` where each attempt is
     /// `(key_id, ok_or_err_message)`.
-    pub fn try_unlock_verbose(
-        &self,
-        passphrase: &str,
-    ) -> Result<(GateKey, UnlockAttempts)> {
+    pub fn try_unlock_verbose(&self, passphrase: &str) -> Result<(GateKey, UnlockAttempts)> {
         let files = self.sealed_files()?;
         if files.is_empty() {
             bail!("no gate-keys found in {}", self.dir.display());

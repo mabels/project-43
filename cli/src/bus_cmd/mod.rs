@@ -562,7 +562,7 @@ fn cmd_decrypt(
         bus::decrypt(&recipient_key, &envelope, &authority_sign_pub)?
     };
 
-    let body_display = p43::bus::csr::cbor_to_json_pretty(&payload.body).ok();
+    let body_display = p43::util::cbor_to_json_pretty(&payload.body).ok();
     if body_display.is_none() {
         println!("<{} bytes, not valid CBOR>", payload.body.len());
         hexdump(&payload.body);

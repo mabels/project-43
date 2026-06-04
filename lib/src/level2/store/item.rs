@@ -69,7 +69,7 @@ pub enum KeyRef {
 // ── Item envelope ─────────────────────────────────────────────────────────────
 
 /// On-disk CBOR representation of a single chain node.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemEnvelope {
     pub id: ItemId,
     pub version: u8,

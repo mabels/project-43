@@ -192,7 +192,7 @@ mod item_envelope_tests {
         // Tombstone decrypts to empty payload (zero-length = delete marker).
         assert_eq!(tomb.decrypt(&root_key()).unwrap(), b"");
         // Wrong key fails authentication.
-        assert!(tomb.decrypt(&vec![0u8; 32]).is_err());
+        assert!(tomb.decrypt(&[0u8; 32]).is_err());
     }
 
     #[test]

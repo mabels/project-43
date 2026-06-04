@@ -7,6 +7,30 @@ use std::sync::Arc;
 use super::item::{cid_of, ItemEnvelope, ItemId, KeyRef, ROOT_SALT};
 use super::object_store::ObjectStore;
 
+// ── ChainValidity ─────────────────────────────────────────────────────────────
+
+/// Per-item structural validity result from [`ChainStore::walk_validated`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainValidity {
+    /// All structural checks passed.
+    Ok,
+    /// `item.id` does not match what the hash chain predicts.
+    InvalidId { expected: ItemId, got: ItemId },
+    /// `item.next` does not equal `SHA-1(item.id)`.
+    InvalidNext { expected: ItemId, got: ItemId },
+    /// `item.prev` does not match the previous item's id.
+    InvalidPrev {
+        expected: Option<ItemId>,
+        got: Option<ItemId>,
+    },
+}
+
+/// A single item returned by [`ChainStore::walk_validated`], newest first.
+pub struct ChainItem {
+    pub envelope: ItemEnvelope,
+    pub validity: ChainValidity,
+}
+
 // ── ChainRef ─────────────────────────────────────────────────────────────────
 
 /// An opaque name that identifies a chain in the store.
@@ -175,6 +199,73 @@ impl ChainStore {
             }
         }
         Ok(items)
+    }
+
+    /// Walk the chain from tip to root, validating structural integrity of each
+    /// item.  Returns items newest-first with a [`ChainValidity`] per item.
+    ///
+    /// Checks performed per item:
+    /// - `id` matches the expected SHA-1 (ciphertext for root, SHA-1(prev_id) for successors)
+    /// - `next == SHA-1(id)`
+    /// - `prev` links correctly to the previous item
+    ///
+    /// Does **not** decrypt — structural validation only.
+    pub fn walk_validated(&self, chain: &ChainRef) -> Result<Vec<ChainItem>> {
+        let raw = self.history(chain)?;
+        let mut result = Vec::with_capacity(raw.len());
+
+        for (i, item) in raw.iter().enumerate() {
+            let prev_item = raw.get(i + 1); // history is newest-first; prev_item is older
+
+            // Check prev linkage.
+            let expected_prev = prev_item.map(|p| p.id.clone());
+            let validity_prev = if item.prev != expected_prev {
+                ChainValidity::InvalidPrev {
+                    expected: expected_prev,
+                    got: item.prev.clone(),
+                }
+            } else {
+                ChainValidity::Ok
+            };
+
+            // Check id derivation.
+            let expected_id = match &item.prev {
+                None => ItemId::from_bytes(&item.ciphertext), // root: SHA-1(ciphertext)
+                Some(prev_id) => prev_id.next(),              // successor: SHA-1(prev_id)
+            };
+            let validity_id = if item.id != expected_id {
+                ChainValidity::InvalidId {
+                    expected: expected_id,
+                    got: item.id.clone(),
+                }
+            } else {
+                ChainValidity::Ok
+            };
+
+            // Check next pointer.
+            let expected_next = item.id.next();
+            let validity_next = if item.next != expected_next {
+                ChainValidity::InvalidNext {
+                    expected: expected_next,
+                    got: item.next.clone(),
+                }
+            } else {
+                ChainValidity::Ok
+            };
+
+            // First failure wins; Ok if all pass.
+            let validity = [validity_prev, validity_id, validity_next]
+                .into_iter()
+                .find(|v| *v != ChainValidity::Ok)
+                .unwrap_or(ChainValidity::Ok);
+
+            result.push(ChainItem {
+                envelope: item.clone(),
+                validity,
+            });
+        }
+
+        Ok(result)
     }
 
     /// Remove items not reachable from any meta ref (orphan GC).

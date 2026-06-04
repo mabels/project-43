@@ -119,6 +119,12 @@ pub mod mem {
     /// Thread-safe in-memory object store for tests.
     pub struct MemObjectStore(Mutex<HashMap<String, Vec<u8>>>);
 
+    impl Default for MemObjectStore {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl MemObjectStore {
         pub fn new() -> Self {
             Self(Mutex::new(HashMap::new()))

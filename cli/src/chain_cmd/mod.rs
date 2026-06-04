@@ -3,7 +3,7 @@ pub mod subcmd;
 use crate::util::hexdump;
 use anyhow::Result;
 use p43::gate_key::GateKeyStore;
-use p43::level2::store::{ChainRef, ChainStore, FileObjectStore, KeyRef};
+use p43::level2::store::{ChainRef, ChainStore, ChainValidity, FileObjectStore, KeyRef};
 use p43::util::resolve_secret;
 use serde_bytes::ByteBuf;
 use std::io::Read;
@@ -37,14 +37,21 @@ pub fn run(cmd: ChainCmd, store_dir: &Path) -> Result<()> {
             let root_key = unlock(passphrase, store_dir)?;
 
             if full {
-                let history = chains.history(&chain)?;
-                if history.is_empty() {
+                let items = chains.walk_validated(&chain)?;
+                if items.is_empty() {
                     eprintln!("chain {name} not found");
                     return Ok(());
                 }
-                for (i, item) in history.iter().enumerate() {
+                for (i, chain_item) in items.iter().enumerate() {
+                    let item = &chain_item.envelope;
+                    let valid_marker = if chain_item.validity == ChainValidity::Ok {
+                        "✓".to_owned()
+                    } else {
+                        format!("✗ {:?}", chain_item.validity)
+                    };
                     let marker = if i == 0 { "tip" } else { "   " };
-                    println!("{marker} id      : {}", item.id.as_hex());
+                    println!("{marker} [{valid_marker}]");
+                    println!("    id       : {}", item.id.as_hex());
                     println!("    version  : {}", item.version);
                     println!(
                         "    prev     : {}",
@@ -65,7 +72,7 @@ pub fn run(cmd: ChainCmd, store_dir: &Path) -> Result<()> {
                             Err(e) => println!("    payload  : (decrypt failed: {e})"),
                         }
                     }
-                    if i + 1 < history.len() {
+                    if i + 1 < items.len() {
                         println!();
                     }
                 }

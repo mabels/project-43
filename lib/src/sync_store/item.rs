@@ -254,7 +254,7 @@ pub fn derive_chain_key_from_nonce(
 ) -> Result<Zeroizing<Vec<u8>>> {
     let hk = Hkdf::<Sha256>::new(Some(nonce.as_slice()), root_key);
     let mut out = Zeroizing::new(vec![0u8; 32]);
-    hk.expand(b"p43-level2-item-v1", &mut out)
+    hk.expand(b"sync-store-item-v1", &mut out)
         .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
     Ok(out)
 }

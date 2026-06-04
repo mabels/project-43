@@ -10,7 +10,7 @@ doctest = false
 
 [features]
 # Full desktop feature set — default for the CLI.
-default = ["matrix", "pcsc", "ssh", "e2e-encryption", "bus", "kdbx", "gate_key", "level2"]
+default = ["matrix", "pcsc", "ssh", "e2e-encryption", "bus", "kdbx", "gate_key", "sync_store", "wallet"]
 
 # Legacy feature names from the sequoia era — kept as no-op aliases so
 # dependents (e.g. ui/rust) don't need simultaneous Cargo.toml updates.
@@ -41,8 +41,11 @@ kdbx = ["dep:keepass"]
 # Gate-key: passphrase-sealed random keys that protect Level 2 secrets.
 gate_key = ["dep:argon2", "dep:aes-gcm", "dep:sha2", "dep:zeroize"]
 
-# Level 2 secret store — immutable append-only chains of encrypted items.
-level2 = ["dep:aes-gcm", "dep:sha2", "dep:sha1", "dep:hkdf", "dep:ciborium", "dep:uuid", "dep:zeroize"]
+# Sync store — immutable append-only chains of encrypted items.
+sync_store = ["dep:aes-gcm", "dep:sha2", "dep:sha1", "dep:hkdf", "dep:ciborium", "dep:uuid", "dep:zeroize"]
+
+# Wallet — typed payload layer on top of sync_store.
+wallet = ["sync_store"]
 
 # End-to-end encryption for the Matrix session.
 e2e-encryption = ["matrix-sdk/e2e-encryption", "matrix-sdk/sqlite"]

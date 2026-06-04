@@ -3,7 +3,7 @@ pub mod subcmd;
 use crate::util::hexdump;
 use anyhow::Result;
 use p43::gate_key::GateKeyStore;
-use p43::level2::store::{ChainRef, ChainStore, ChainValidity, FileObjectStore, KeyRef};
+use p43::sync_store::{ChainRef, ChainStore, ChainValidity, FileObjectStore, KeyRef};
 use p43::util::resolve_secret;
 use serde_bytes::ByteBuf;
 use std::io::Read;
@@ -12,20 +12,39 @@ use std::sync::Arc;
 use subcmd::ChainCmd;
 
 pub fn run(cmd: ChainCmd, store_dir: &Path) -> Result<()> {
-    let obj_store = Arc::new(FileObjectStore::open(store_dir.join("level2"))?);
-    let chains = ChainStore::new(obj_store);
+    let obj_store = Arc::new(FileObjectStore::open(store_dir.join("sync-store"))?);
+    let chains = ChainStore::new(obj_store.clone());
 
     match cmd {
-        ChainCmd::List => {
+        ChainCmd::List { format } => {
             let list = chains.list_chains()?;
             if list.is_empty() {
                 eprintln!("(no chains)");
                 return Ok(());
             }
-            for c in &list {
-                println!("{}", c.name);
+            if format.eq_ignore_ascii_case("json") {
+                let items: Vec<serde_json::Value> = list
+                    .iter()
+                    .map(|(c, meta)| {
+                        serde_json::json!({
+                            "name":     c.name,
+                            "chain_id": meta.chain_id_hex(),
+                            "last_id":  hex::encode(&*meta.last_id),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else {
+                for (c, meta) in &list {
+                    println!(
+                        "{}  chain_id={}  last_id={}",
+                        c.name,
+                        meta.chain_id_hex(),
+                        hex::encode(&*meta.last_id)
+                    );
+                }
+                eprintln!("\n{} chain(s)", list.len());
             }
-            eprintln!("\n{} chain(s)", list.len());
         }
 
         ChainCmd::Show {
@@ -37,6 +56,45 @@ pub fn run(cmd: ChainCmd, store_dir: &Path) -> Result<()> {
             let root_key = unlock(passphrase, store_dir)?;
 
             if full {
+                // Show chain_id from meta header first.
+                if let Some(meta) = chains.meta(&chain)? {
+                    println!("chain_id: {}", meta.chain_id_hex());
+                    println!("last_id:  {}", hex::encode(&*meta.last_id));
+                    println!();
+                }
+                // If the named chain doesn't exist as a meta ref, the name
+                // may be any item id — walk prev links back to the root and
+                // resolve the chain from there.
+                let resolved_chain = if chains.meta(&chain)?.is_none() {
+                    use p43::sync_store::item::ItemEnvelope;
+                    use p43::sync_store::ObjectStore;
+                    let mut current_name = name.clone();
+                    loop {
+                        let key = format!("items/{current_name}");
+                        match obj_store.get(&key) {
+                            Ok(data) => match ItemEnvelope::from_cbor(&data) {
+                                Ok(item) => match &item.prev {
+                                    None => {
+                                        // Found root — chain_id = root.id
+                                        break ChainRef::new(item.id.as_hex());
+                                    }
+                                    Some(prev) => current_name = prev.as_hex(),
+                                },
+                                Err(_) => {
+                                    eprintln!("cannot parse item {current_name}");
+                                    return Ok(());
+                                }
+                            },
+                            Err(_) => {
+                                eprintln!("item {current_name} not found");
+                                return Ok(());
+                            }
+                        }
+                    }
+                } else {
+                    chain
+                };
+                let chain = resolved_chain;
                 let items = chains.walk_validated(&chain)?;
                 if items.is_empty() {
                     eprintln!("chain {name} not found");
@@ -78,8 +136,31 @@ pub fn run(cmd: ChainCmd, store_dir: &Path) -> Result<()> {
                 }
             } else {
                 match chains.read(&chain, &root_key)? {
-                    None => eprintln!("chain {name} not found or deleted"),
                     Some(payload) => hexdump(&payload),
+                    None => {
+                        // Meta not found — try loading the item directly by id.
+                        use p43::sync_store::item::ItemEnvelope;
+                        use p43::sync_store::ObjectStore;
+                        let item_key = format!("items/{name}");
+                        match obj_store.get(&item_key) {
+                            Ok(data) => match ItemEnvelope::from_cbor(&data) {
+                                Ok(item) => {
+                                    eprintln!(
+                                        "item  id={} prev={} next={}",
+                                        item.id.as_hex(),
+                                        item.prev.as_ref().map_or("none".into(), |p| p.as_hex()),
+                                        item.next.as_hex()
+                                    );
+                                    match item.decrypt(&root_key) {
+                                        Ok(payload) => hexdump(&payload),
+                                        Err(e) => eprintln!("decrypt failed: {e}"),
+                                    }
+                                }
+                                Err(e) => eprintln!("cannot parse item: {e}"),
+                            },
+                            Err(_) => eprintln!("not found: {name}"),
+                        }
+                    }
                 }
             }
         }
@@ -115,17 +196,26 @@ pub fn run(cmd: ChainCmd, store_dir: &Path) -> Result<()> {
         }
 
         ChainCmd::Append {
-            name,
             payload,
+            id,
             passphrase,
             creator_id,
         } => {
-            let chain = ChainRef::new(&name);
             let root_key = unlock(passphrase, store_dir)?;
             let payload_bytes = read_payload(&payload)?;
             let key_ref = direct_key_ref(store_dir)?;
-            let item_id = chains.append(&chain, &root_key, key_ref, &creator_id, &payload_bytes)?;
-            println!("appended {}", item_id.as_hex());
+            match id {
+                None => {
+                    // New chain: chain_id = root.next (SHA-1 of root item's id).
+                    let chain_id =
+                        chains.create(&root_key, key_ref, &creator_id, &payload_bytes)?;
+                    println!("{}", chain_id.as_hex());
+                }
+                Some(chain_name) => {
+                    let chain = ChainRef::new(&chain_name);
+                    chains.append(&chain, &root_key, key_ref, &creator_id, &payload_bytes)?;
+                }
+            }
         }
 
         ChainCmd::Delete {

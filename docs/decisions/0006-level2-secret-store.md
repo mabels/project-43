@@ -124,7 +124,7 @@ The **chain key** is always derived, never stored:
 chain_key = HKDF-SHA256(
   ikm  = <root_key>,           // depends on key_ref type
   salt = item.id,              // 20 bytes SHA-1 — unique per item
-  info = "p43-level2-item-v1"
+  info = "sync-store-item-v1"
 ) → 32 bytes
 ```
 
@@ -156,7 +156,7 @@ key_ref: { type: "chain_share", shared_key: bytes(32) }
 ```
 `root_key = shared_key`
 
-Chain-share token: `shared_key = HKDF(ikm=gate_key.random, salt=chain_root_id, info="p43-chain-share-v1")`
+Chain-share token: `shared_key = HKDF(ikm=gate_key.random, salt=chain_root_id, info="chain-share-v1")`
 
 ### Meta ref
 

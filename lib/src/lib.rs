@@ -23,8 +23,11 @@ pub mod ssh_agent;
 #[cfg(feature = "gate_key")]
 pub mod gate_key;
 
-#[cfg(feature = "level2")]
-pub mod level2;
+#[cfg(feature = "sync_store")]
+pub mod sync_store;
+
+#[cfg(feature = "wallet")]
+pub mod wallet;
 
 #[cfg(feature = "kdbx")]
 pub mod kdbx;

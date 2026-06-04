@@ -7,6 +7,7 @@ mod matrix_cmd;
 mod pgp;
 mod ssh_agent_cmd;
 mod util;
+mod wallet_cmd;
 
 use anyhow::Result;
 use bus_cmd::subcmd::BusCmd;
@@ -20,6 +21,7 @@ use p43::key_store::store::KeyStore;
 use pgp::subcmd::PgpCmd;
 use ssh_agent_cmd::subcmd::SshAgentArgs;
 use std::path::PathBuf;
+use wallet_cmd::subcmd::WalletCmd;
 
 #[derive(Parser)]
 #[command(
@@ -87,6 +89,10 @@ enum Command {
     /// Chain — manage Level 2 encrypted append-only chains
     #[command(subcommand)]
     Chain(ChainCmd),
+
+    /// Wallet — manage typed credentials (card PINs, YubiKey refs, SSH keys)
+    #[command(subcommand)]
+    Wallet(WalletCmd),
 }
 
 fn main() -> Result<()> {
@@ -157,6 +163,10 @@ fn main() -> Result<()> {
         Command::Chain(cmd) => {
             p43::telemetry::init("")?;
             chain_cmd::run(cmd, &store_dir)
+        }
+        Command::Wallet(cmd) => {
+            p43::telemetry::init("")?;
+            wallet_cmd::run(cmd, &store_dir)
         }
     }
 }

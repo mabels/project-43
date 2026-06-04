@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod object_store_tests {
-    use crate::level2::store::object_store::{mem::MemObjectStore, ObjectStore};
+    use crate::sync_store::object_store::{mem::MemObjectStore, ObjectStore};
 
     fn store() -> MemObjectStore {
         MemObjectStore::new()
@@ -66,7 +66,7 @@ mod object_store_tests {
 
 #[cfg(test)]
 mod item_id_tests {
-    use crate::level2::store::item::ItemId;
+    use crate::sync_store::item::ItemId;
 
     #[test]
     fn from_bytes_is_deterministic() {
@@ -109,7 +109,7 @@ mod item_id_tests {
 
 #[cfg(test)]
 mod item_envelope_tests {
-    use crate::level2::store::item::{ItemEnvelope, ItemId, KeyRef};
+    use crate::sync_store::item::{ItemEnvelope, ItemId, KeyRef};
     use serde_bytes::ByteBuf;
 
     fn direct_key_ref() -> KeyRef {
@@ -208,7 +208,7 @@ mod item_envelope_tests {
 
 #[cfg(test)]
 mod chain_store_tests {
-    use crate::level2::store::{
+    use crate::sync_store::{
         chain_store::{ChainRef, ChainStore},
         item::KeyRef,
         object_store::mem::MemObjectStore,
@@ -313,7 +313,7 @@ mod chain_store_tests {
             .list_chains()
             .unwrap()
             .iter()
-            .map(|c| c.name.clone())
+            .map(|(c, _)| c.name.clone())
             .collect();
         names.sort();
         assert_eq!(

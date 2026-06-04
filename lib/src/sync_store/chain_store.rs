@@ -1,11 +1,55 @@
 //! Chain store — manages named chains over an ObjectStore.
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use std::sync::Arc;
 
 use super::item::{cid_of, ItemEnvelope, ItemId, KeyRef, ROOT_SALT};
 use super::object_store::ObjectStore;
+
+// ── MetaRef ───────────────────────────────────────────────────────────────────
+
+/// Contents of a meta `.ref` file.
+///
+/// `chain_id` is a random stable identifier generated once at chain creation —
+/// it never changes and is the canonical ID for this chain.
+/// `last_id` is the SHA-1 id of the current tip item, updated on every append.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaRef {
+    pub chain_id: ByteBuf, // random bytes(20), stable
+    pub last_id: ByteBuf,  // SHA-1 of tip item, mutable
+}
+
+impl MetaRef {
+    /// Create a MetaRef for a brand-new chain from its root item.
+    ///
+    /// `chain_id = root.id` — the content hash of the first item.
+    /// Meta filename = `meta/<chain_id>.ref` = `meta/<root.id>.ref`.
+    /// Item filename = `items/<root.id>` = same hex → consistent naming.
+    /// `last_id = root.id` initially; advances on each append.
+    fn new_chain(root: &ItemEnvelope) -> Self {
+        Self {
+            chain_id: root.id.0.clone(), // chain_id = root.id (content hash)
+            last_id: root.id.0.clone(),  // tip initially = root
+        }
+    }
+
+    fn with_new_tip(&self, last_id: &ItemId) -> Self {
+        Self {
+            chain_id: self.chain_id.clone(),
+            last_id: last_id.0.clone(),
+        }
+    }
+
+    pub fn chain_id_hex(&self) -> String {
+        hex::encode(&*self.chain_id)
+    }
+
+    pub fn last_item_id(&self) -> ItemId {
+        ItemId(self.last_id.clone())
+    }
+}
 
 // ── ChainValidity ─────────────────────────────────────────────────────────────
 
@@ -69,14 +113,23 @@ impl ChainStore {
 
     // ── Read ──────────────────────────────────────────────────────────────────
 
+    /// Return the meta ref for `chain`, or `None` if the chain does not exist.
+    pub fn meta(&self, chain: &ChainRef) -> Result<Option<MetaRef>> {
+        let ref_id = chain.ref_id();
+        if !self.objects.exists(&ref_id) {
+            return Ok(None);
+        }
+        Ok(Some(self.read_meta(&ref_id)?))
+    }
+
     /// Return the tip item of `chain`, or `None` if the chain does not exist.
     pub fn tip(&self, chain: &ChainRef) -> Result<Option<ItemEnvelope>> {
         let ref_id = chain.ref_id();
         if !self.objects.exists(&ref_id) {
             return Ok(None);
         }
-        let tip_id = self.read_ref(&ref_id)?;
-        let item = self.load_item(&tip_id)?;
+        let meta = self.read_meta(&ref_id)?;
+        let item = self.load_item(&meta.last_item_id())?;
         Ok(Some(item))
     }
 
@@ -100,27 +153,59 @@ impl ChainStore {
         }
     }
 
-    /// List all chain names in the meta namespace.
-    pub fn list_chains(&self) -> Result<Vec<ChainRef>> {
+    /// List all chains with their stable chain_id.
+    pub fn list_chains(&self) -> Result<Vec<(ChainRef, MetaRef)>> {
         let all = self.objects.list()?;
-        let chains = all
-            .into_iter()
-            .filter_map(|id| {
-                id.strip_prefix("meta/")
-                    .and_then(|s| s.strip_suffix(".ref"))
-                    .map(ChainRef::new)
-            })
-            .collect();
+        let mut chains = Vec::new();
+        for id in all {
+            if let Some(name) = id
+                .strip_prefix("meta/")
+                .and_then(|s| s.strip_suffix(".ref"))
+            {
+                let chain = ChainRef::new(name);
+                let meta = self.read_meta(&id)?;
+                chains.push((chain, meta));
+            }
+        }
         Ok(chains)
     }
 
     // ── Write ─────────────────────────────────────────────────────────────────
 
-    /// Append a new item to `chain` with `payload` bytes.
+    /// Create a brand-new chain with `payload` as its root item.
     ///
-    /// Creates the chain if it does not exist (root item).
-    /// `key_ref` and `root_key` must be consistent — the caller resolves the
-    /// root key from the gate-key or other source before calling.
+    /// Returns the **chain_id** = `root.next` = SHA-1(root.id).
+    /// This is the meta filename and the id callers pass to [`append`].
+    ///
+    /// Design: `chain_id = root.next` so the meta file is named after the
+    /// value that the first real successor item will use as its own id.
+    /// The meta initially holds `{ chain_id: root.next, last_id: root.id }`.
+    pub fn create(
+        &self,
+        root_key: &[u8],
+        key_ref: KeyRef,
+        creator_id: &str,
+        payload: &[u8],
+    ) -> Result<ItemId> {
+        let item = ItemEnvelope::new_root(root_key, key_ref, creator_id, payload)?;
+        let meta = MetaRef::new_chain(&item); // chain_id = item.next, last_id = item.id
+        let chain_id = ItemId(meta.chain_id.clone());
+        let ref_id = format!("meta/{}.ref", chain_id.as_hex());
+        anyhow::ensure!(
+            !self.objects.exists(&ref_id),
+            "chain {} already exists",
+            chain_id.as_hex()
+        );
+        self.store_item(&item)?;
+        self.write_meta(&ref_id, &meta)?;
+        Ok(chain_id)
+    }
+
+    /// Append a new item to `chain`, creating it if it does not exist.
+    ///
+    /// When creating: the meta is written under `chain.ref_id()` (the caller's
+    /// chosen name) with `chain_id = root.next`.
+    /// When updating: the existing chain_id is preserved; only `last_id` changes.
     pub fn append(
         &self,
         chain: &ChainRef,
@@ -131,14 +216,14 @@ impl ChainStore {
     ) -> Result<ItemId> {
         let ref_id = chain.ref_id();
 
-        let item = if !self.objects.exists(&ref_id) {
-            ItemEnvelope::new_root(root_key, key_ref, creator_id, payload)?
+        let (item, meta) = if !self.objects.exists(&ref_id) {
+            let item = ItemEnvelope::new_root(root_key, key_ref, creator_id, payload)?;
+            let meta = MetaRef::new_chain(&item); // chain_id = root.next
+            (item, meta)
         } else {
-            let tip_id = self.read_ref(&ref_id)?;
+            let existing_meta = self.read_meta(&ref_id)?;
+            let tip_id = existing_meta.last_item_id();
             let tip = self.load_item(&tip_id)?;
-            // Deduplication: re-derive the CID using the SAME salt the tip used
-            // (tip.prev or ROOT_SALT for the root).  If it matches the tip's
-            // stored CID the payload is identical — skip writing a new item.
             let tip_salt = tip
                 .prev
                 .as_ref()
@@ -148,12 +233,15 @@ impl ChainStore {
             if !tip.deleted && tip.cid == recomputed {
                 return Ok(tip_id);
             }
-            ItemEnvelope::new_successor(&tip_id, root_key, key_ref, creator_id, payload)?
+            let item =
+                ItemEnvelope::new_successor(&tip_id, root_key, key_ref, creator_id, payload)?;
+            let meta = existing_meta.with_new_tip(&item.id);
+            (item, meta)
         };
 
         let item_id = item.id.clone();
         self.store_item(&item)?;
-        self.write_ref(&ref_id, &item_id)?;
+        self.write_meta(&ref_id, &meta)?;
         Ok(item_id)
     }
 
@@ -172,10 +260,15 @@ impl ChainStore {
         if !self.objects.exists(&ref_id) {
             bail!("chain {} does not exist", chain.name);
         }
-        let tip_id = self.read_ref(&ref_id)?;
-        let tombstone = ItemEnvelope::new_tombstone(&tip_id, root_key, key_ref, creator_id)?;
+        let existing_meta = self.read_meta(&ref_id)?;
+        let tombstone = ItemEnvelope::new_tombstone(
+            &existing_meta.last_item_id(),
+            root_key,
+            key_ref,
+            creator_id,
+        )?;
         self.store_item(&tombstone)?;
-        self.write_ref(&ref_id, &tombstone.id)?;
+        self.write_meta(&ref_id, &existing_meta.with_new_tip(&tombstone.id))?;
         Ok(())
     }
 
@@ -188,7 +281,7 @@ impl ChainStore {
         if !self.objects.exists(&ref_id) {
             return Ok(items);
         }
-        let mut current_id = self.read_ref(&ref_id)?;
+        let mut current_id = self.read_meta(&ref_id)?.last_item_id();
         loop {
             let item = self.load_item(&current_id)?;
             let prev = item.prev.clone();
@@ -276,11 +369,11 @@ impl ChainStore {
     pub fn gc(&self) -> Result<usize> {
         // Collect all item ids reachable from any chain.
         let mut reachable = std::collections::HashSet::new();
-        for chain in self.list_chains()? {
+        for (chain, _meta) in self.list_chains()? {
             let ref_id = chain.ref_id();
             reachable.insert(ref_id.clone());
             if self.objects.exists(&ref_id) {
-                let mut id = self.read_ref(&ref_id)?;
+                let mut id = self.read_meta(&ref_id)?.last_item_id();
                 loop {
                     let item_key = format!("items/{}", id.as_hex());
                     reachable.insert(item_key);
@@ -308,15 +401,14 @@ impl ChainStore {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    fn read_ref(&self, ref_id: &str) -> Result<ItemId> {
+    fn read_meta(&self, ref_id: &str) -> Result<MetaRef> {
         let data = self.objects.get(ref_id)?;
-        let id_buf: ByteBuf = ciborium::from_reader(data.as_slice()).context("invalid ref CBOR")?;
-        Ok(ItemId(id_buf))
+        ciborium::from_reader(data.as_slice()).context("invalid meta ref CBOR")
     }
 
-    fn write_ref(&self, ref_id: &str, id: &ItemId) -> Result<()> {
+    fn write_meta(&self, ref_id: &str, meta: &MetaRef) -> Result<()> {
         let mut buf = Vec::new();
-        ciborium::into_writer(&id.0, &mut buf).context("ref CBOR serialise")?;
+        ciborium::into_writer(meta, &mut buf).context("meta ref CBOR serialise")?;
         // Meta refs are mutable (last-write-wins) — use update, not put.
         self.objects.update(ref_id, &buf)
     }

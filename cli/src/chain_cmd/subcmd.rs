@@ -3,12 +3,16 @@ use clap::Subcommand;
 #[derive(Subcommand)]
 pub enum ChainCmd {
     /// List all chains in the store
-    List,
+    List {
+        /// Output format: "text" (default) or "json"
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
+    },
 
     /// Show the current tip item of a chain (hex-dumps decrypted payload).
     /// With --full, shows every item in history with metadata.
     Show {
-        /// Chain name (opaque string, e.g. "0006_17684870-card_pin")
+        /// Chain id (from `chain append` or `chain list`)
         #[arg(value_name = "NAME")]
         name: String,
 
@@ -23,7 +27,7 @@ pub enum ChainCmd {
 
     /// Walk and display the full history of a chain (newest first)
     History {
-        /// Chain name
+        /// Chain id
         #[arg(value_name = "NAME")]
         name: String,
 
@@ -32,15 +36,19 @@ pub enum ChainCmd {
         passphrase: Option<String>,
     },
 
-    /// Append a new item to a chain (creates the chain if it does not exist)
+    /// Append data to a chain.
+    ///
+    /// Without --id, creates a new chain and prints its id to stdout.
+    /// With --id <chain_id>, appends to that existing chain.
     Append {
-        /// Chain name
-        #[arg(value_name = "NAME")]
-        name: String,
-
         /// Payload bytes as hex (pass "-" to read from stdin)
         #[arg(value_name = "HEX_OR_DASH")]
         payload: String,
+
+        /// Chain id to append to (from a previous append or list).
+        /// Omit to create a new chain.
+        #[arg(long, value_name = "CHAIN_ID")]
+        id: Option<String>,
 
         /// Gate-key passphrase [env: P43_GATE_PASSPHRASE]
         #[arg(short, long, env = "P43_GATE_PASSPHRASE")]
@@ -55,7 +63,7 @@ pub enum ChainCmd {
     /// Requires the gate-key passphrase — the tombstone is cryptographically
     /// authenticated, preventing deletion by anyone without the key.
     Delete {
-        /// Chain name
+        /// Chain id
         #[arg(value_name = "NAME")]
         name: String,
 

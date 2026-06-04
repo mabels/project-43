@@ -13,5 +13,37 @@ resolver = "2"
 # We vendor a copy with the limit raised to 256 until an upstream release
 # fixes it.  Tracking: https://github.com/matrix-org/matrix-rust-sdk/issues/6254
 # Full rationale: docs/decisions/0003-vendored-matrix-sdk.md.
+# Optimize crypto-heavy crates even in dev builds so Argon2/HMAC runs at
+# roughly the same speed as release.  Everything else stays unoptimized for
+# fast incremental compile + debuggability.
+[profile.dev.package.keepass]
+opt-level = 3
+
+[profile.dev.package.challenge_response]
+opt-level = 3
+
+[profile.dev.package.rust-argon2]
+opt-level = 3
+
+[profile.dev.package.hmac]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.chacha20]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
 [patch.crates-io]
 matrix-sdk = { path = "vendor/matrix-sdk" }
+# challenge_response-0.5.46 calls nusb::DeviceInfo::busnum() which is
+# Linux-only; the vendored copy replaces it with a platform-conditional
+# helper so the crate compiles on macOS.  Only the YubikeyChallenge HID
+# path is affected — LocalChallenge (pure-software HMAC) is unchanged.
+challenge_response = { path = "vendor/challenge_response" }

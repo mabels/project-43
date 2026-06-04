@@ -561,8 +561,33 @@ fn cmd_decrypt(
         bus::decrypt(&recipient_key, &envelope, &authority_sign_pub)?
     };
 
-    let body_display = p43::bus::csr::cbor_to_json_pretty(&payload.body)
-        .unwrap_or_else(|_| format!("<{} bytes, not valid CBOR>", payload.body.len()));
+    let body_display = p43::bus::csr::cbor_to_json_pretty(&payload.body).unwrap_or_else(|_| {
+        let hex_lines: Vec<String> = payload
+            .body
+            .chunks(16)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
+                let ascii: String = chunk
+                    .iter()
+                    .map(|&b| {
+                        if b.is_ascii_graphic() || b == b' ' {
+                            b as char
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect();
+                let hex_str = format!("{:<47}", hex.join(" "));
+                format!("  {:08x}  {}  |{}|", i * 16, hex_str, ascii)
+            })
+            .collect();
+        format!(
+            "<{} bytes, not valid CBOR>\n{}",
+            payload.body.len(),
+            hex_lines.join("\n")
+        )
+    });
 
     println!("Decrypted message:");
     println!("  msg_id   : {}", payload.msg_id);

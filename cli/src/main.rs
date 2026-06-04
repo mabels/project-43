@@ -1,4 +1,6 @@
 mod bus_cmd;
+mod gate_key_cmd;
+mod kdbx_cmd;
 mod key_mgmt;
 mod matrix_cmd;
 mod pgp;
@@ -7,6 +9,8 @@ mod ssh_agent_cmd;
 use anyhow::Result;
 use bus_cmd::subcmd::BusCmd;
 use clap::{Parser, Subcommand};
+use gate_key_cmd::subcmd::GateKeyCmd;
+use kdbx_cmd::subcmd::KdbxCmd;
 use key_mgmt::subcmd::KeyCmd;
 use matrix_cmd::subcmd::MatrixCmd;
 use p43::key_store::store::KeyStore;
@@ -68,6 +72,14 @@ enum Command {
     /// Matrix — login, send messages, listen for messages
     #[command(subcommand)]
     Matrix(MatrixCmd),
+
+    /// KeePass — open, list, and read entries from a .kdbx database
+    #[command(subcommand)]
+    Kdbx(KdbxCmd),
+
+    /// Gate-key — manage passphrase-sealed unlock keys
+    #[command(subcommand)]
+    GateKey(GateKeyCmd),
 }
 
 fn main() -> Result<()> {
@@ -126,6 +138,14 @@ fn main() -> Result<()> {
                 .build()?;
             rt.block_on(async { p43::telemetry::init(&cli.otel_endpoint) })?;
             matrix_cmd::run(cmd, &store_dir, &rt)
+        }
+        Command::Kdbx(cmd) => {
+            p43::telemetry::init("")?;
+            kdbx_cmd::run(cmd)
+        }
+        Command::GateKey(cmd) => {
+            p43::telemetry::init("")?;
+            gate_key_cmd::run(cmd, &store_dir)
         }
     }
 }

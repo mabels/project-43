@@ -23,6 +23,9 @@ pub mod ssh_agent;
 #[cfg(feature = "gate_key")]
 pub mod gate_key;
 
+#[cfg(feature = "level2")]
+pub mod level2;
+
 #[cfg(feature = "kdbx")]
 pub mod kdbx;
 

@@ -1,13 +1,16 @@
 mod bus_cmd;
+mod chain_cmd;
 mod gate_key_cmd;
 mod kdbx_cmd;
 mod key_mgmt;
 mod matrix_cmd;
 mod pgp;
 mod ssh_agent_cmd;
+mod util;
 
 use anyhow::Result;
 use bus_cmd::subcmd::BusCmd;
+use chain_cmd::subcmd::ChainCmd;
 use clap::{Parser, Subcommand};
 use gate_key_cmd::subcmd::GateKeyCmd;
 use kdbx_cmd::subcmd::KdbxCmd;
@@ -80,6 +83,10 @@ enum Command {
     /// Gate-key — manage passphrase-sealed unlock keys
     #[command(subcommand)]
     GateKey(GateKeyCmd),
+
+    /// Chain — manage Level 2 encrypted append-only chains
+    #[command(subcommand)]
+    Chain(ChainCmd),
 }
 
 fn main() -> Result<()> {
@@ -146,6 +153,10 @@ fn main() -> Result<()> {
         Command::GateKey(cmd) => {
             p43::telemetry::init("")?;
             gate_key_cmd::run(cmd, &store_dir)
+        }
+        Command::Chain(cmd) => {
+            p43::telemetry::init("")?;
+            chain_cmd::run(cmd, &store_dir)
         }
     }
 }

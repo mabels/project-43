@@ -3530,6 +3530,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "sha1 0.10.6",
  "sha2",
  "signature",
  "smallvec",
@@ -3540,6 +3541,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "typeshare",
+ "uuid",
  "x25519-dalek",
  "zeroize",
 ]
@@ -3560,6 +3562,7 @@ dependencies = [
  "p43",
  "pgp",
  "rpassword",
+ "serde_bytes",
  "serde_json",
  "signature",
  "ssh-agent-lib",

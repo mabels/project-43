@@ -102,6 +102,47 @@ pub struct AuthorityKey {
 }
 
 impl AuthorityKey {
+    /// Generate a fresh keypair.
+    pub fn generate() -> Self {
+        use rand::rngs::OsRng;
+        let signing = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let ecdh = StaticSecret::random_from_rng(OsRng);
+        Self { signing, ecdh }
+    }
+
+    /// Reconstruct from raw scalars (e.g. loaded from the wallet).
+    pub fn from_scalars(ed25519_scalar: &[u8], x25519_scalar: &[u8]) -> Result<Self> {
+        let ed: [u8; 32] = ed25519_scalar
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("ed25519 scalar must be 32 bytes"))?;
+        let x: [u8; 32] = x25519_scalar
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("x25519 scalar must be 32 bytes"))?;
+        Ok(Self {
+            signing: ed25519_dalek::SigningKey::from_bytes(&ed),
+            ecdh: StaticSecret::from(x),
+        })
+    }
+
+    /// Export both private scalars as raw bytes.
+    pub fn to_scalars(&self) -> ([u8; 32], [u8; 32]) {
+        (self.signing.to_bytes(), self.ecdh.to_bytes())
+    }
+
+    /// Clone the key.
+    ///
+    /// `ed25519_dalek::SigningKey` and `StaticSecret` don't derive `Clone`
+    /// because they are secret material.  This method clones via the raw
+    /// scalars so the session store can hand out a copy without holding the
+    /// lock guard across an `await`.
+    pub fn clone_key(&self) -> Self {
+        let (ed, x) = self.to_scalars();
+        Self {
+            signing: ed25519_dalek::SigningKey::from_bytes(&ed),
+            ecdh: StaticSecret::from(x),
+        }
+    }
+
     /// Public key bundle derived from this key (no secrets).
     pub fn authority_pub(&self) -> AuthorityPub {
         AuthorityPub {

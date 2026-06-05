@@ -1,37 +1,26 @@
 import 'package:flutter/material.dart';
-import 'package:p43/src/rust/api/simple.dart';
-import '../services/settings_service.dart';
-import 'generate_key_screen.dart';
-import 'keys/card_import_sheet.dart';
-import 'keys/key_card.dart';
-import 'keys/key_detail_sheet.dart';
+import 'keys/add_credential_sheet.dart';
+import 'keys/credentials_tab.dart';
 import 'keys/key_import_sheet.dart';
 
-// ── Key list screen ───────────────────────────────────────────────────────────
-
+/// Keys page — wallet credentials displayed with the same structure as the
+/// old key-store page (section header + action buttons + credential cards).
 class KeyListScreen extends StatefulWidget {
-  const KeyListScreen({super.key});
+  final String? walletMasterHex;
+  const KeyListScreen({super.key, this.walletMasterHex});
 
   @override
   State<KeyListScreen> createState() => _KeyListScreenState();
 }
 
 class _KeyListScreenState extends State<KeyListScreen> {
-  late Future<List<KeyInfo>> _keysFuture;
+  final _credKey = GlobalKey<_CredentialsTabWrapperState>();
 
-  @override
-  void initState() {
-    super.initState();
-    _reload();
-  }
+  void _reload() => _credKey.currentState?.reload();
 
-  void _reload() {
-    setState(() {
-      _keysFuture = listKeys();
-    });
-  }
+  // ── action buttons ──────────────────────────────────────────────────────────
 
-  void _showKeyDetail(BuildContext context, KeyInfo info) {
+  void _addYubiKey() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -39,19 +28,16 @@ class _KeyListScreenState extends State<KeyListScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (_) => KeyDetailSheet(info: info, onDeleted: _reload),
+      builder: (_) => AddCredentialSheet(
+        walletMasterHex: widget.walletMasterHex!,
+        parentContext: context,
+        onAdded: _reload,
+        initialKind: AddCredentialKind.yubikey,
+      ),
     );
   }
 
-  Future<void> _openGenerate() async {
-    final didGenerate = await Navigator.push<bool>(
-      context,
-      MaterialPageRoute(builder: (_) => const GenerateKeyScreen()),
-    );
-    if (didGenerate == true) _reload();
-  }
-
-  void _openCardImport() {
+  void _openImportSheet() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -59,141 +45,76 @@ class _KeyListScreenState extends State<KeyListScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (_) => CardImportSheet(onImported: _reload),
+      builder: (_) => KeyImportSheet(
+        walletMasterHex: widget.walletMasterHex!,
+        onImported: _reload,
+      ),
     );
   }
 
-  void _openImport() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF1C1C1E),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (_) => KeyImportSheet(onImported: _reload),
-    );
-  }
+  // ── build ────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final unlocked = widget.walletMasterHex != null;
 
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF1C1C1E),
-        title: Row(
-          children: [
-            Text(
-              'p43',
-              style: TextStyle(
-                fontWeight: FontWeight.w700,
-                fontSize: 17,
-                color: cs.onSurface,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              'Key Store',
-              style: TextStyle(
-                fontWeight: FontWeight.w400,
-                fontSize: 14,
-                color: cs.onSurface.withValues(alpha: 0.5),
-              ),
-            ),
-          ],
+        title: const Text(
+          'Keys',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.contactless_outlined),
-            tooltip: 'Import from card',
-            onPressed: _openCardImport,
-          ),
-          IconButton(
-            icon: const Icon(Icons.download_outlined),
-            tooltip: 'Import SSH / OpenPGP key',
-            onPressed: _openImport,
-          ),
-          IconButton(
-            icon: const Icon(Icons.add),
-            tooltip: 'Generate key',
-            onPressed: _openGenerate,
-          ),
-        ],
       ),
-      body: FutureBuilder<List<KeyInfo>>(
-        future: _keysFuture,
-        builder: (context, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snap.hasError) {
-            return _ErrorView(message: snap.error.toString());
-          }
-          final keys = snap.data!;
-          if (keys.isEmpty) {
-            return _EmptyView(onGenerate: _openGenerate);
-          }
-          final defaultFp =
-              SettingsService.instance.settings.defaultKeyFingerprint;
-          return ListView.separated(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            itemCount: keys.length,
-            separatorBuilder: (context, _) => const SizedBox(height: 8),
-            itemBuilder: (context, i) => KeyCard(
-              key: ValueKey(keys[i].fingerprint),
-              info: keys[i],
-              isDefault: keys[i].fingerprint == defaultFp,
-              onSetDefault: () async {
-                await SettingsService.instance.save(
-                  SettingsService.instance.settings.copyWith(
-                    defaultKeyFingerprint: keys[i].fingerprint,
-                  ),
-                );
-                setState(() {}); // rebuild to update star
-              },
-              onTap: () => _showKeyDetail(context, keys[i]),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-// ── Empty state ───────────────────────────────────────────────────────────────
-
-class _EmptyView extends StatelessWidget {
-  const _EmptyView({required this.onGenerate});
-  final VoidCallback onGenerate;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text('🔑', style: TextStyle(fontSize: 40)),
-          const SizedBox(height: 12),
-          const Text(
-            'No keys in store.',
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Generate your first key to get started.',
-            style: TextStyle(
-              fontSize: 13,
-              color: Theme.of(
-                context,
-              ).colorScheme.onSurface.withValues(alpha: 0.5),
+          // ── section header — mirrors "p43 Key Store" row ──────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 8, 0),
+            child: Row(
+              children: [
+                const Text(
+                  'p43',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF0A84FF),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                const Text(
+                  'Wallet',
+                  style: TextStyle(fontSize: 13, color: Color(0xFF8E8E93)),
+                ),
+                const Spacer(),
+                if (unlocked) ...[
+                  // Add YubiKey reference
+                  IconButton(
+                    icon: const Icon(Icons.credit_card_outlined, size: 20),
+                    tooltip: 'Add YubiKey reference',
+                    onPressed: _addYubiKey,
+                    color: const Color(0xFF8E8E93),
+                  ),
+                  // Import SSH or OpenPGP key
+                  IconButton(
+                    icon: const Icon(Icons.download_outlined, size: 20),
+                    tooltip: 'Import SSH / OpenPGP key',
+                    onPressed: _openImportSheet,
+                    color: const Color(0xFF8E8E93),
+                  ),
+                ],
+              ],
             ),
           ),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: onGenerate,
-            icon: const Icon(Icons.add, size: 16),
-            label: const Text('Generate Key'),
+
+          // ── credential list ───────────────────────────────────────────────
+          Expanded(
+            child: _CredentialsTabWrapper(
+              key: _credKey,
+              walletMasterHex: widget.walletMasterHex,
+              onReload: _reload,
+            ),
           ),
         ],
       ),
@@ -201,23 +122,32 @@ class _EmptyView extends StatelessWidget {
   }
 }
 
-// ── Error state ───────────────────────────────────────────────────────────────
+// ── wrapper that exposes reload() ─────────────────────────────────────────────
 
-class _ErrorView extends StatelessWidget {
-  const _ErrorView({required this.message});
-  final String message;
+class _CredentialsTabWrapper extends StatefulWidget {
+  final String? walletMasterHex;
+  final VoidCallback onReload;
+  const _CredentialsTabWrapper({
+    super.key,
+    this.walletMasterHex,
+    required this.onReload,
+  });
+
+  @override
+  State<_CredentialsTabWrapper> createState() =>
+      _CredentialsTabWrapperState();
+}
+
+class _CredentialsTabWrapperState extends State<_CredentialsTabWrapper> {
+  int _epoch = 0;
+
+  void reload() => setState(() => _epoch++);
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Text(
-          message,
-          style: const TextStyle(color: Color(0xFFFF453A), fontSize: 13),
-          textAlign: TextAlign.center,
-        ),
-      ),
+    return CredentialsTab(
+      key: ValueKey(_epoch),
+      walletMasterHex: widget.walletMasterHex,
     );
   }
 }

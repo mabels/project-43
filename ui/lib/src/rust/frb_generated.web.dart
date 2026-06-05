@@ -74,6 +74,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ConnectedCardInfo dco_decode_connected_card_info(dynamic raw);
 
   @protected
+  GateKeyCreated dco_decode_gate_key_created(dynamic raw);
+
+  @protected
   PlatformInt64 dco_decode_i_64(dynamic raw);
 
   @protected
@@ -119,6 +122,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SubkeyInfo> dco_decode_list_subkey_info(dynamic raw);
 
   @protected
+  List<WalletEntry> dco_decode_list_wallet_entry(dynamic raw);
+
+  @protected
   MxDeviceInfo dco_decode_mx_device_info(dynamic raw);
 
   @protected
@@ -156,6 +162,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void dco_decode_unit(dynamic raw);
+
+  @protected
+  WalletCredentialDetail dco_decode_wallet_credential_detail(dynamic raw);
+
+  @protected
+  WalletEntry dco_decode_wallet_entry(dynamic raw);
+
+  @protected
+  WalletPgpKeyInfo dco_decode_wallet_pgp_key_info(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -225,6 +240,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  GateKeyCreated sse_decode_gate_key_created(SseDeserializer deserializer);
+
+  @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
 
   @protected
@@ -278,6 +296,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SubkeyInfo> sse_decode_list_subkey_info(SseDeserializer deserializer);
 
   @protected
+  List<WalletEntry> sse_decode_list_wallet_entry(SseDeserializer deserializer);
+
+  @protected
   MxDeviceInfo sse_decode_mx_device_info(SseDeserializer deserializer);
 
   @protected
@@ -317,6 +338,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  WalletCredentialDetail sse_decode_wallet_credential_detail(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WalletEntry sse_decode_wallet_entry(SseDeserializer deserializer);
+
+  @protected
+  WalletPgpKeyInfo sse_decode_wallet_pgp_key_info(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -403,6 +435,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_gate_key_created(
+    GateKeyCreated self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
 
   @protected
@@ -472,6 +510,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_wallet_entry(
+    List<WalletEntry> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_mx_device_info(MxDeviceInfo self, SseSerializer serializer);
 
   @protected
@@ -515,6 +559,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_wallet_credential_detail(
+    WalletCredentialDetail self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_wallet_entry(WalletEntry self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_wallet_pgp_key_info(
+    WalletPgpKeyInfo self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);

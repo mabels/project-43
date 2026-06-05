@@ -155,6 +155,23 @@ impl DeviceCert {
         Ok(())
     }
 
+    /// Parse a cert directly from raw COSE bytes (e.g. base64-decoded from the
+    /// wire or from the wallet).
+    pub fn load_from_bytes(cose_bytes: impl Into<Vec<u8>>) -> Result<Self> {
+        let cose_bytes = cose_bytes.into();
+        let cose = coset::CoseSign1::from_tagged_slice(&cose_bytes)
+            .map_err(|e| anyhow::anyhow!("parse cert COSE_Sign1: {:?}", e))?;
+        let payload_bytes = cose
+            .payload
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("cert has no payload"))?;
+        let payload: CertPayload = cbor_decode(payload_bytes)?;
+        Ok(Self {
+            payload,
+            cose_bytes,
+        })
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let cose_bytes =
             std::fs::read(path).with_context(|| format!("read cert {}", path.display()))?;

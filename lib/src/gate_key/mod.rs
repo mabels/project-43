@@ -117,7 +117,7 @@ impl GateKeyStore {
             random.len() == 32,
             "--from-secret must be exactly 32 bytes (64 hex chars)"
         );
-        let key_id = derive_key_id(&random);
+        let key_id = derive_key_id(&random, &kdf.salt);
         let sealed = SealedGateKey::seal(&key_id, &random, passphrase, kdf)?;
         sealed.save(&self.dir)?;
         Ok(GateKey {
@@ -351,9 +351,16 @@ fn argon2_derive(passphrase: &str, kdf: &KdfParams) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn derive_key_id(random: &[u8]) -> String {
-    let hash = Sha256::digest(random);
-    format!("gate-{}", hex::encode(&hash[..6]))
+/// Derive a unique key_id from both the random AND the KDF salt.
+///
+/// Using only the random would give the same key_id for every seal of the
+/// same master secret, causing files to overwrite each other.  Including the
+/// salt (which is freshly generated per seal) makes each key_id unique.
+fn derive_key_id(random: &[u8], salt: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(random);
+    hasher.update(salt.as_bytes());
+    format!("gate-{}", hex::encode(&hasher.finalize()[..6]))
 }
 
 /// Generate a random base64url-encoded salt for use in [`KdfParams`].
@@ -394,7 +401,9 @@ mod tests {
         };
         let passphrase = "test-passphrase";
         let random = random_bytes(32);
-        let key_id = derive_key_id(&random);
+        let salt = base64url_encode(&random_bytes(16));
+        let key_id = derive_key_id(&random, &salt);
+        let kdf = KdfParams { salt, ..kdf };
 
         let sealed = SealedGateKey::seal(&key_id, &random, passphrase, kdf).unwrap();
         let unlocked = sealed.unseal(passphrase).unwrap();
@@ -413,7 +422,7 @@ mod tests {
             p_cost: 1,
         };
         let random = random_bytes(32);
-        let key_id = derive_key_id(&random);
+        let key_id = derive_key_id(&random, &kdf.salt);
         let sealed = SealedGateKey::seal(&key_id, &random, "correct", kdf).unwrap();
         assert!(sealed.unseal("wrong").is_err());
     }

@@ -7,7 +7,7 @@ use p43::util::resolve_secret;
 use p43::wallet::KeyCredential;
 use p43::wallet::{SshKey, Wallet, WalletPayload, YubikeyRef};
 use serde_bytes::ByteBuf;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use subcmd::WalletCmd;
 
 pub fn run(cmd: WalletCmd, store_dir: &Path) -> Result<()> {
@@ -128,18 +128,17 @@ pub fn run(cmd: WalletCmd, store_dir: &Path) -> Result<()> {
         }
 
         WalletCmd::AddSshKey {
-            private_key,
+            key_file,
             comment,
             passphrase,
             creator_id,
         } => {
             let root_key = unlock(passphrase, store_dir)?;
-            let priv_bytes = std::fs::read(&private_key)?;
+            let priv_bytes = read_key_bytes(key_file)?;
             let mut sk = ssh_key::PrivateKey::from_openssh(&priv_bytes)
                 .map_err(|e| anyhow::anyhow!("cannot parse SSH private key: {e}"))?;
 
-            // If key is passphrase-protected, decrypt it so it can be
-            // stored plaintext inside the wallet's AES-GCM envelope.
+            // Decrypt if passphrase-protected — wallet AES-GCM is the outer protection.
             if sk.is_encrypted() {
                 let ssh_pass = rpassword::prompt_password("SSH key passphrase: ")?;
                 sk = sk
@@ -149,8 +148,6 @@ pub fn run(cmd: WalletCmd, store_dir: &Path) -> Result<()> {
 
             let fingerprint = sk.public_key().fingerprint(Default::default()).to_string();
             let resolved_comment = comment.unwrap_or_else(|| sk.comment().to_owned());
-
-            // Store the decrypted key — the wallet's AES-GCM is the outer protection.
             let decrypted_bytes = sk
                 .to_openssh(ssh_key::LineEnding::LF)
                 .map_err(|e| anyhow::anyhow!("re-encode key: {e}"))?;
@@ -169,6 +166,74 @@ pub fn run(cmd: WalletCmd, store_dir: &Path) -> Result<()> {
                 &creator_id,
             )?;
             println!("stored ssh-key  {fingerprint}");
+        }
+
+        WalletCmd::AddPgpKey {
+            key_file,
+            key_passphrase,
+            label,
+            passphrase,
+            creator_id,
+        } => {
+            use p43::wallet::FilePgpKey;
+
+            let root_key = unlock(passphrase, store_dir)?;
+            let key_bytes = read_key_bytes(key_file)?;
+
+            // Parse to validate and extract the label from the primary UID.
+            let tsk = p43::pgp_ops::load_secret_cert_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("cannot parse OpenPGP key: {e}"))?;
+
+            // Resolve passphrase: check whether the primary secret key is encrypted.
+            let needs_passphrase = tsk.primary_key.secret_params().is_encrypted();
+            let resolved_passphrase = if needs_passphrase {
+                match key_passphrase {
+                    Some(p) => p,
+                    None => rpassword::prompt_password("PGP key passphrase: ")?,
+                }
+            } else {
+                key_passphrase.unwrap_or_default()
+            };
+
+            // Verify the passphrase before storing.
+            p43::pgp_ops::verify_passphrase(&tsk, &resolved_passphrase).map_err(|e| {
+                anyhow::anyhow!("{e}\n\nIf the key is encrypted, supply --key-passphrase.")
+            })?;
+
+            let resolved_label = label.unwrap_or_else(|| {
+                tsk.details
+                    .users
+                    .first()
+                    .map(|u| String::from_utf8_lossy(u.id.id()).into_owned())
+                    .unwrap_or_else(|| "pgp-key".to_string())
+            });
+
+            let fp: String = resolved_label
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+
+            let payload = WalletPayload::PgpKey(FilePgpKey {
+                version: 1,
+                key_bytes: ByteBuf::from(key_bytes),
+                passphrase: resolved_passphrase,
+                label: resolved_label.clone(),
+            });
+            wallet.put(
+                &fp,
+                "pgp-key",
+                &payload,
+                &root_key,
+                direct_key_ref(store_dir)?,
+                &creator_id,
+            )?;
+            println!("stored pgp-key  {resolved_label}");
         }
 
         WalletCmd::Delete {
@@ -270,6 +335,40 @@ fn payload_to_json(payload: &WalletPayload, show_secrets: bool) -> serde_json::V
             }
             obj
         }
+        WalletPayload::PgpKey(k) => {
+            let pubkey = p43::pgp_ops::load_secret_cert_from_bytes(&k.key_bytes)
+                .and_then(|key| p43::pgp_ops::pubkey_armored(&key))
+                .unwrap_or_else(|e| format!("(error: {e})"));
+            serde_json::json!({
+                "kind":       "pgp-key",
+                "label":      k.label,
+                "public_key": pubkey,
+            })
+        }
+        WalletPayload::AuthorityKey(a) => {
+            let ed_pub_hex = p43::bus::authority::AuthorityKey::from_scalars(
+                &a.ed25519_scalar,
+                &a.x25519_scalar,
+            )
+            .map(|k| hex::encode(k.authority_pub().ed25519_pub))
+            .unwrap_or_else(|e| format!("(error: {e})"));
+            serde_json::json!({
+                "kind":         "authority-key",
+                "ed25519_pub":  ed_pub_hex,
+                "cert_bytes":   if show_secrets { hex::encode(&*a.cert_bytes) } else { "(omitted)".into() },
+            })
+        }
+        WalletPayload::DeviceId(d) => serde_json::json!({
+            "kind":      "device-id",
+            "label":     d.label,
+            "device_id": d.device_id,
+        }),
+        WalletPayload::CertifiedDeviceId(d) => serde_json::json!({
+            "kind":      "certified-device-id",
+            "label":     d.label,
+            "device_id": d.device_id,
+            "cert_bytes": if show_secrets { hex::encode(&*d.cert_bytes) } else { "(omitted)".into() },
+        }),
     }
 }
 
@@ -299,6 +398,71 @@ fn print_payload(payload: &WalletPayload, show_secrets: bool) {
                     k.private_key.len()
                 );
             }
+        }
+        WalletPayload::PgpKey(k) => {
+            println!("kind:              pgp-key");
+            println!("label:             {}", k.label);
+            match p43::pgp_ops::load_secret_cert_from_bytes(&k.key_bytes)
+                .and_then(|key| p43::pgp_ops::pubkey_armored(&key))
+            {
+                Ok(pub_armor) => println!("public_key:\n{}", pub_armor),
+                Err(e) => println!("public_key:        (derive failed: {e})"),
+            }
+        }
+        WalletPayload::DeviceId(d) => {
+            println!("kind:              device-id");
+            println!("label:             {}", d.label);
+            println!("device_id:         {}", d.device_id);
+        }
+        WalletPayload::CertifiedDeviceId(d) => {
+            println!("kind:              certified-device-id");
+            println!("label:             {}", d.label);
+            println!("device_id:         {}", d.device_id);
+            if show_secrets {
+                println!("cert_bytes:        {}", hex::encode(&*d.cert_bytes));
+            } else {
+                println!(
+                    "cert_bytes:        ({} bytes, use --show-secrets)",
+                    d.cert_bytes.len()
+                );
+            }
+        }
+        WalletPayload::AuthorityKey(a) => {
+            println!("kind:              authority-key");
+            match p43::bus::authority::AuthorityKey::from_scalars(
+                &a.ed25519_scalar,
+                &a.x25519_scalar,
+            ) {
+                Ok(k) => println!(
+                    "ed25519_pub:       {}",
+                    hex::encode(k.authority_pub().ed25519_pub)
+                ),
+                Err(e) => println!("ed25519_pub:       (derive failed: {e})"),
+            }
+            if show_secrets {
+                println!("cert_bytes:        {}", hex::encode(&*a.cert_bytes));
+            } else {
+                println!(
+                    "cert_bytes:        ({} bytes, use --show-secrets)",
+                    a.cert_bytes.len()
+                );
+            }
+        }
+    }
+}
+
+/// Read key material from a file path or from stdin when no path is given.
+fn read_key_bytes(key_file: Option<PathBuf>) -> Result<Vec<u8>> {
+    use std::io::Read;
+    match key_file {
+        Some(path) => {
+            std::fs::read(&path).map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))
+        }
+        None => {
+            eprintln!("Paste key material and press Ctrl-D when done:");
+            let mut buf = Vec::new();
+            std::io::stdin().read_to_end(&mut buf)?;
+            Ok(buf)
         }
     }
 }

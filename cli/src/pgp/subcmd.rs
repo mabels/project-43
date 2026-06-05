@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum PgpCmd {
-    /// List card content (YubiKey only)
-    List,
+    /// Print the armored public key from the wallet credential
+    Pubkey,
     /// Sign a message — produces an armored detached signature
     Sign {
         #[arg(short, long)]

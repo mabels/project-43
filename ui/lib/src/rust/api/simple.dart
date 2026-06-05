@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'simple.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `agent_state`, `authority_session`, `credential_cache`, `default_store_dir`, `ensure_registered_inprocess`, `external_tx_cell`, `forward`, `listener_stop_cell`, `locked_msg_queue`, `mx_store_dir`, `mx_verify_slot`, `open_store`, `outbound_tx_cell`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `run_in_process_agent`, `send_via_bridge`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`
+// These functions are ignored because they are not marked as `pub`: `agent_state`, `authority_session`, `credential_cache`, `default_store_dir`, `ensure_registered_inprocess`, `external_tx_cell`, `forward`, `gate_key_dir`, `listener_stop_cell`, `locked_msg_queue`, `master_key`, `mx_store_dir`, `mx_verify_slot`, `open_gate_key_store`, `open_store`, `open_wallet`, `outbound_tx_cell`, `pending_list_keys`, `pending_signs`, `resolve_secret`, `run_in_process_agent`, `send_via_bridge`, `signing_key_cache`, `subkeys_for`, `to_key_info`, `tokio_rt`, `unlock_authority`, `wallet_ssh_public_keys`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InProcessAgentState`, `InProcessSession`, `PendingListKeys`, `PendingSign`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `request_identities`, `sign`
 
@@ -268,13 +268,35 @@ Future<String?> mxGetAgentRoom() =>
 Future<void> mxSetAgentRoom({required String roomId}) =>
     RustLib.instance.api.crateApiSimpleMxSetAgentRoom(roomId: roomId);
 
-/// Respond to an `ssh.list_keys_request` with the keys held in the local store.
+/// Respond to an `ssh.list_keys_request` with wallet credentials.
+///
+/// Pass `master_hex` (the unlocked wallet master secret) to list keys from the
+/// wallet (YubiKey auth-slot keys + stored SSH keys).  Pass `None` to fall back
+/// to the legacy key store for backwards compatibility.
 Future<void> mxRespondListKeys({
   required String roomId,
   required String requestId,
+  String? masterHex,
 }) => RustLib.instance.api.crateApiSimpleMxRespondListKeys(
   roomId: roomId,
   requestId: requestId,
+  masterHex: masterHex,
+);
+
+/// Approve an `ssh.sign_request` using wallet credentials.
+///
+/// - `SshKey`    : in-memory sign, no dialog needed (private bytes already
+///   decrypted by the wallet AES-GCM layer).
+/// - `YubikeyRef`: opens the card, verifies the stored PIN, signs via the AUTH
+///   slot — no PIN dialog needed.
+Future<void> mxRespondSignWallet({
+  required String roomId,
+  required String requestId,
+  required String masterHex,
+}) => RustLib.instance.api.crateApiSimpleMxRespondSignWallet(
+  roomId: roomId,
+  requestId: requestId,
+  masterHex: masterHex,
 );
 
 /// Subscribe to **all** p43 protocol messages in `room_id` with a single
@@ -297,6 +319,22 @@ Stream<AppMessage> mxListenAll({required String roomId}) =>
     RustLib.instance.api.crateApiSimpleMxListenAll(roomId: roomId);
 
 /// Approve a device registration: verify the CSR, sign a cert with the
+/// Approve a device CSR using the authority key already in `authority_session`.
+///
+/// Called when the wallet is unlocked — no credential prompt needed because
+/// `wallet_unlock_session` already seated the authority key in memory.
+Future<void> mxRespondCsrFromSession({
+  required String roomId,
+  required String requestId,
+  required String csrB64,
+  PlatformInt64? ttlSecs,
+}) => RustLib.instance.api.crateApiSimpleMxRespondCsrFromSession(
+  roomId: roomId,
+  requestId: requestId,
+  csrB64: csrB64,
+  ttlSecs: ttlSecs,
+);
+
 /// authority key, and send `bus.cert_response` back into the room.
 ///
 /// The authority key is unlocked using the card PIN (YubiKey) or passphrase
@@ -340,6 +378,33 @@ Future<bool> busHasAuthority() =>
 /// currently-imported OpenPGP keys (card keys and soft keys alike).
 ///
 /// This is a public-key-only operation — no passphrase or PIN is required.
+/// Generate a new bus authority keypair and store it in the wallet.
+///
+/// Replaces `bus_init_authority` — no key-store recipients, no OpenPGP
+/// encryption.  The gate-key AES-GCM is the sole protection layer.
+///
+/// Also writes `authority.pub.cbor` + `authority.cert.cbor` to disk so
+/// running bus operations can still find them.
+///
+/// Returns the authority-pub CBOR as a hex string (used for the QR code).
+Future<String> walletInitAuthority({required String masterHex}) => RustLib
+    .instance
+    .api
+    .crateApiSimpleWalletInitAuthority(masterHex: masterHex);
+
+/// Load the authority keypair from the wallet into the in-memory session.
+///
+/// Equivalent to `bus_unlock_session` but uses the wallet.
+/// Call this whenever the wallet unlocks.
+Future<void> walletUnlockSession({required String masterHex}) => RustLib
+    .instance
+    .api
+    .crateApiSimpleWalletUnlockSession(masterHex: masterHex);
+
+/// Check whether an authority key exists in the wallet.
+Future<bool> walletHasAuthority({required String masterHex}) =>
+    RustLib.instance.api.crateApiSimpleWalletHasAuthority(masterHex: masterHex);
+
 /// Each imported key's `.pub.asc` file is used as a recipient.
 ///
 /// Also writes `authority.pub.cbor` and a self-issued `authority.cert.cbor`.
@@ -703,6 +768,154 @@ Future<bool> sshAgentIsRunning() =>
 Future<String?> sshAgentSocketPath() =>
     RustLib.instance.api.crateApiSimpleSshAgentSocketPath();
 
+/// List all gate-key ids present on disk.
+Future<List<String>> gateKeyList() =>
+    RustLib.instance.api.crateApiSimpleGateKeyList();
+
+/// Create a new gate-key sealed with [passphrase].
+///
+/// Returns both the [key_id] (for future revocation) and the [master_hex]
+/// so the caller can optionally store it in the OS secure enclave for
+/// biometric unlock.  The passphrase-sealed file is always written.
+Future<GateKeyCreated> gateKeyCreate({required String passphrase}) =>
+    RustLib.instance.api.crateApiSimpleGateKeyCreate(passphrase: passphrase);
+
+/// Add an additional passphrase lock for an existing master secret.
+///
+/// Call this when the user already unlocked the wallet (via any method)
+/// and wants to add a new passphrase — e.g. adding a backup pin after
+/// biometric setup.
+Future<String> gateKeySealPassphrase({
+  required String masterHex,
+  required String passphrase,
+}) => RustLib.instance.api.crateApiSimpleGateKeySealPassphrase(
+  masterHex: masterHex,
+  passphrase: passphrase,
+);
+
+/// Verify [passphrase] and return the level1_key as a hex string.
+///
+/// The biometric path stores this hex string in the OS secure enclave so
+/// Touch ID can unlock the wallet without re-prompting the passphrase.
+Future<String> gateKeyVerify({required String passphrase}) =>
+    RustLib.instance.api.crateApiSimpleGateKeyVerify(passphrase: passphrase);
+
+/// Change the passphrase for the gate-key that [old_passphrase] unlocks.
+/// Returns the key_id.
+Future<String> gateKeyChangePassphrase({
+  required String oldPassphrase,
+  required String newPassphrase,
+}) => RustLib.instance.api.crateApiSimpleGateKeyChangePassphrase(
+  oldPassphrase: oldPassphrase,
+  newPassphrase: newPassphrase,
+);
+
+/// Revoke (delete) a gate-key by [key_id].
+Future<void> gateKeyRevoke({required String keyId}) =>
+    RustLib.instance.api.crateApiSimpleGateKeyRevoke(keyId: keyId);
+
+/// Returns true if at least one gate-key is configured.
+Future<bool> gateKeyIsConfigured() =>
+    RustLib.instance.api.crateApiSimpleGateKeyIsConfigured();
+
+/// List all wallet credentials.  Requires the master secret (from gate-key unlock).
+Future<List<WalletEntry>> walletListWithIds({required String masterHex}) =>
+    RustLib.instance.api.crateApiSimpleWalletListWithIds(masterHex: masterHex);
+
+/// Add a YubiKey reference to the wallet.
+///
+/// Reads the card fingerprint from the connected card, stores
+/// {label, pin} in the wallet encrypted with [master_hex].
+/// If [card_ident] is None, uses the first connected card.
+Future<void> walletAddYubikeyRef({
+  required String masterHex,
+  required String label,
+  required String pin,
+  String? cardIdent,
+}) => RustLib.instance.api.crateApiSimpleWalletAddYubikeyRef(
+  masterHex: masterHex,
+  label: label,
+  pin: pin,
+  cardIdent: cardIdent,
+);
+
+/// Add an SSH private key to the wallet.
+///
+/// [private_key_bytes] is the raw OpenSSH private key file content.
+/// If the key is passphrase-protected, provide [ssh_passphrase].
+/// The key is decrypted before storage — the wallet AES-GCM is the outer protection.
+Future<String> walletAddSshKey({
+  required String masterHex,
+  required List<int> privateKeyBytes,
+  String? sshPassphrase,
+  String? comment,
+}) => RustLib.instance.api.crateApiSimpleWalletAddSshKey(
+  masterHex: masterHex,
+  privateKeyBytes: privateKeyBytes,
+  sshPassphrase: sshPassphrase,
+  comment: comment,
+);
+
+/// Read the full detail for a single wallet entry identified by its chain name.
+Future<WalletCredentialDetail> walletGetCredential({
+  required String masterHex,
+  required String chainName,
+}) => RustLib.instance.api.crateApiSimpleWalletGetCredential(
+  masterHex: masterHex,
+  chainName: chainName,
+);
+
+/// Tombstone a wallet entry by chain name (irreversible on the append-only store).
+/// Import an armored OpenPGP secret key into the wallet.
+///
+/// The key is stored **unencrypted** — the gate-key AES-GCM is the outer
+/// protection.  If the key on disk is passphrase-protected, supply
+/// `passphrase` to decrypt it before storage (so no passphrase is ever needed
+/// at use time).
+Future<void> walletAddPgpKey({
+  required String masterHex,
+  required String keyArmored,
+  String? passphrase,
+  String? label,
+}) => RustLib.instance.api.crateApiSimpleWalletAddPgpKey(
+  masterHex: masterHex,
+  keyArmored: keyArmored,
+  passphrase: passphrase,
+  label: label,
+);
+
+/// Load PGP key metadata from a wallet `pgp-key` chain for the detail sheet.
+Future<WalletPgpKeyInfo> walletGetPgpKeyInfo({
+  required String masterHex,
+  required String chainName,
+}) => RustLib.instance.api.crateApiSimpleWalletGetPgpKeyInfo(
+  masterHex: masterHex,
+  chainName: chainName,
+);
+
+/// Read all three card slots for a `yubikey-ref` wallet entry and return them
+/// in the same [`WalletPgpKeyInfo`] shape used by PGP keys.
+///
+/// Each slot becomes a [`SubkeyInfo`] with its SSH public key (where the card
+/// algorithm has an SSH equivalent).  The card must be connected; slots that
+/// cannot be read are silently omitted rather than failing the whole call.
+Future<WalletPgpKeyInfo> walletGetYubikeyInfo({
+  required String masterHex,
+  required String chainName,
+}) => RustLib.instance.api.crateApiSimpleWalletGetYubikeyInfo(
+  masterHex: masterHex,
+  chainName: chainName,
+);
+
+/// Tombstone a wallet entry by chain name (irreversible on the append-only store).
+Future<void> walletRemoveEntry({
+  required String masterHex,
+  required String chainName,
+}) => RustLib.instance.api.crateApiSimpleWalletRemoveEntry(
+  masterHex: masterHex,
+  chainName: chainName,
+);
+
 @freezed
 sealed class AgentRequest with _$AgentRequest {
   const AgentRequest._();
@@ -901,6 +1114,29 @@ class ConnectedCardInfo {
           cardholderName == other.cardholderName &&
           sigFingerprint == other.sigFingerprint &&
           authFingerprint == other.authFingerprint;
+}
+
+/// A gate-key created from a passphrase.
+///
+/// The passphrase is always required for first-time setup.
+/// [master_hex] is the 32-byte level1_key as hex — store it in the OS
+/// secure enclave if biometric unlock is also desired.
+class GateKeyCreated {
+  final String keyId;
+  final String masterHex;
+
+  const GateKeyCreated({required this.keyId, required this.masterHex});
+
+  @override
+  int get hashCode => keyId.hashCode ^ masterHex.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GateKeyCreated &&
+          runtimeType == other.runtimeType &&
+          keyId == other.keyId &&
+          masterHex == other.masterHex;
 }
 
 /// A key entry returned to Dart — mirrors p43::key_store::store::KeyEntry.
@@ -1143,4 +1379,113 @@ class SubkeyInfo {
           role == other.role &&
           algo == other.algo &&
           opensshKey == other.opensshKey;
+}
+
+/// Detail view of a single wallet credential.
+class WalletCredentialDetail {
+  /// `"yubikey-ref"` or `"ssh-key"`.
+  final String kind;
+
+  /// Human-readable label / comment.
+  final String label;
+
+  /// Card AID (yubikey-ref) or `SHA256:…` fingerprint (ssh-key).
+  final String displayId;
+
+  /// Full OpenSSH `authorized_keys` line.
+  final String? pubkeyText;
+
+  /// Armored OpenPGP public key packet (derived from the SSH key bytes).
+  final String? pgpArmored;
+
+  const WalletCredentialDetail({
+    required this.kind,
+    required this.label,
+    required this.displayId,
+    this.pubkeyText,
+    this.pgpArmored,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^
+      label.hashCode ^
+      displayId.hashCode ^
+      pubkeyText.hashCode ^
+      pgpArmored.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WalletCredentialDetail &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          label == other.label &&
+          displayId == other.displayId &&
+          pubkeyText == other.pubkeyText &&
+          pgpArmored == other.pgpArmored;
+}
+
+/// A wallet credential entry for display.
+class WalletEntry {
+  final String chainName;
+  final String kind;
+  final String chainId;
+
+  const WalletEntry({
+    required this.chainName,
+    required this.kind,
+    required this.chainId,
+  });
+
+  @override
+  int get hashCode => chainName.hashCode ^ kind.hashCode ^ chainId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WalletEntry &&
+          runtimeType == other.runtimeType &&
+          chainName == other.chainName &&
+          kind == other.kind &&
+          chainId == other.chainId;
+}
+
+/// Full detail for a wallet PGP key — UID, algorithm, subkeys, armored pubkey.
+///
+/// Reuses [`SubkeyInfo`] so the Dart detail sheet can render the same
+/// subkey UI without needing new generated types.
+class WalletPgpKeyInfo {
+  final String uid;
+  final String algo;
+  final String fingerprint;
+  final List<SubkeyInfo> subkeys;
+  final String pubkeyArmored;
+
+  const WalletPgpKeyInfo({
+    required this.uid,
+    required this.algo,
+    required this.fingerprint,
+    required this.subkeys,
+    required this.pubkeyArmored,
+  });
+
+  @override
+  int get hashCode =>
+      uid.hashCode ^
+      algo.hashCode ^
+      fingerprint.hashCode ^
+      subkeys.hashCode ^
+      pubkeyArmored.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WalletPgpKeyInfo &&
+          runtimeType == other.runtimeType &&
+          uid == other.uid &&
+          algo == other.algo &&
+          fingerprint == other.fingerprint &&
+          subkeys == other.subkeys &&
+          pubkeyArmored == other.pubkeyArmored;
 }

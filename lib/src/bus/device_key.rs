@@ -76,6 +76,32 @@ impl DeviceKey {
         self.ecdh.diffie_hellman(&peer).to_bytes()
     }
 
+    // ── Wallet helpers ────────────────────────────────────────────────────────
+
+    /// Reconstruct a `DeviceKey` from stored scalars (e.g. from a wallet entry).
+    pub fn from_scalars(
+        label: impl Into<String>,
+        ed25519_scalar: &[u8],
+        x25519_scalar: &[u8],
+    ) -> anyhow::Result<Self> {
+        let ed: [u8; 32] = ed25519_scalar
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("ed25519 scalar must be 32 bytes"))?;
+        let x: [u8; 32] = x25519_scalar
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("x25519 scalar must be 32 bytes"))?;
+        Ok(Self {
+            label: label.into(),
+            sign: SigningKey::from_bytes(&ed),
+            ecdh: StaticSecret::from(x),
+        })
+    }
+
+    /// Export raw scalar bytes for wallet storage.
+    pub fn to_scalars(&self) -> ([u8; 32], [u8; 32]) {
+        (self.sign.to_bytes(), self.ecdh.to_bytes())
+    }
+
     // ── Persistence ───────────────────────────────────────────────────────────
 
     pub fn save(&self, path: &Path) -> Result<()> {

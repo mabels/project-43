@@ -488,6 +488,81 @@ pub fn sign_with_card_key(
     Ok(wire)
 }
 
+/// Sign `data` using the card identified by `card_ident` directly.
+///
+/// This is the wallet-aware counterpart of [`sign_with_card_key`]: the card AID
+/// and PIN come from the [`crate::wallet::YubikeyRef`] stored in the wallet,
+/// so no key-store lookup is needed.  The key algorithm is detected live from
+/// the card's Auth-slot public key.
+///
+/// `flags` carries the SSH agent sign-request flags (RSA hash variant etc.);
+/// pass `0` for Ed25519 keys (the common case).
+#[cfg(feature = "pcsc")]
+pub fn sign_with_card_ident(
+    card_ident: &str,
+    pin: &str,
+    data: &[u8],
+    flags: u32,
+) -> anyhow::Result<Vec<u8>> {
+    // ── 1. Open card ──────────────────────────────────────────────────────────
+    let mut card =
+        open_card(Some(card_ident)).with_context(|| format!("cannot open card {card_ident}"))?;
+    let mut tx = card.transaction().context("card transaction")?;
+
+    // ── 2. Detect algorithm from the auth-slot public key (no PIN needed) ─────
+    let is_rsa = {
+        let probe = CardSlot::init_from_card(&mut tx, KeyType::Authentication, &|| {})
+            .context("read auth-slot public key for algorithm detection")?;
+        use pgp::types::KeyDetails as _;
+        matches!(probe.public_key().public_params(), PublicParams::RSA(_))
+    };
+
+    // ── 3. Verify User PIN ────────────────────────────────────────────────────
+    tx.verify_user_pin(pin_to_secret(pin))
+        .context("Card User PIN verification failed — wrong PIN?")?;
+
+    let touch = || eprintln!("Touch YubiKey now…");
+
+    // ── 4. Init auth slot and sign ────────────────────────────────────────────
+    let slot = CardSlot::init_from_card(&mut tx, KeyType::Authentication, &touch)
+        .context("failed to init card auth slot for signing")?;
+
+    let (sig_bytes_raw, algo) = if is_rsa {
+        let use_sha512 = flags & RSA_SHA2_512_FLAG != 0;
+        let (hash_algo, ssh_hash) = if use_sha512 {
+            (HashAlgorithm::Sha512, HashAlg::Sha512)
+        } else {
+            (HashAlgorithm::Sha256, HashAlg::Sha256)
+        };
+        let digest = host_hash(hash_algo, data)?;
+        let sig_bytes = slot
+            .sign(&pgp::types::Password::empty(), hash_algo, &digest)
+            .map_err(|e| anyhow::anyhow!("card RSA auth-slot sign failed: {e}"))?;
+        (
+            mpi_sig_bytes_rsa(sig_bytes)?,
+            ssh_key::Algorithm::Rsa {
+                hash: Some(ssh_hash),
+            },
+        )
+    } else {
+        let sig_bytes = slot
+            .sign(&pgp::types::Password::empty(), HashAlgorithm::Sha256, data)
+            .map_err(|e| anyhow::anyhow!("card Ed25519 auth-slot sign failed: {e}"))?;
+        (
+            mpi_sig_bytes_ed25519(sig_bytes)?,
+            ssh_key::Algorithm::Ed25519,
+        )
+    };
+
+    // ── 5. Encode as SSH wire format ──────────────────────────────────────────
+    let ssh_sig = ssh_key::Signature::new(algo, sig_bytes_raw)
+        .map_err(|e| anyhow::anyhow!("SSH signature encoding failed: {e}"))?;
+    let wire: Vec<u8> = ssh_sig
+        .try_into()
+        .map_err(|e: ssh_key::Error| anyhow::anyhow!("SSH wire encoding failed: {e}"))?;
+    Ok(wire)
+}
+
 /// Sign `data` using the soft key whose SSH fingerprint matches `ssh_fingerprint`.
 #[cfg_attr(
     feature = "telemetry",
@@ -1044,6 +1119,27 @@ pub fn pub_params_ed25519_raw(params: &PublicParams) -> Result<[u8; 32]> {
         },
         PublicParams::Ed25519(p) => Ok(p.key.to_bytes()),
         _ => bail!("key is not Ed25519"),
+    }
+}
+
+/// Format rPGP `PublicParams` as a clean algorithm name string.
+///
+/// Returns "RSA", "Ed25519", "ECDSA/NistP256", etc. rather than the raw Rust
+/// Debug output from `ssh_key::Algorithm`.
+pub fn pub_params_algo_string(params: &PublicParams) -> String {
+    match pub_params_to_ssh_keydata(params) {
+        Ok(key_data) => {
+            let algo = ssh_key::PublicKey::new(key_data, "").algorithm();
+            match algo {
+                ssh_key::Algorithm::Rsa { .. } => "RSA".to_string(),
+                ssh_key::Algorithm::Ed25519 => "Ed25519".to_string(),
+                ssh_key::Algorithm::Ecdsa { curve } => format!("ECDSA/{curve:?}"),
+                ssh_key::Algorithm::SkEd25519 => "SK/Ed25519".to_string(),
+                ssh_key::Algorithm::SkEcdsaSha2NistP256 => "SK/ECDSA".to_string(),
+                other => format!("{other}"),
+            }
+        }
+        Err(_) => "unknown".to_string(),
     }
 }
 

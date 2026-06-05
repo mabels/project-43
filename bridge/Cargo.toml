@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "p43-bridge"
 version = "0.1.0"

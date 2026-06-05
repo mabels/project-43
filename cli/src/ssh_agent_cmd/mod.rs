@@ -825,16 +825,43 @@ fn run_matrix(
             });
         }
 
-        // 5. Ensure this device is registered with the bus authority.
+        // 5. Load the device identity.
+        //
+        // Wallet path (preferred): unlock the gate-key, load the certified
+        // device identity.  Prompts for the passphrase if not set via flag/env.
+        //
+        // File-based fallback: only used when no gate-keys are configured
+        // (pre-wallet deployments or CI environments).
         let bus_dir = bus::bus_dir(&store_dir);
-        let (device_label, device_key) =
-            ensure_registered(&bus_dir, args.device.as_deref(), &room_id, &pending).await?;
+        let (_device_label, device_key, cert_bytes_raw) = {
+            let gate_keys_dir = store_dir.join("gate-keys");
+            let has_gate_keys = p43::gate_key::GateKeyStore::open(&gate_keys_dir)
+                .and_then(|s| s.list())
+                .map(|ids| !ids.is_empty())
+                .unwrap_or(false);
 
-        // Load the device cert and authority pub for sealing outgoing messages.
-        let cert_bytes = Arc::new(
-            std::fs::read(bus::device_cert_path(&bus_dir, &device_label))
-                .context("read device cert after registration")?,
-        );
+            if has_gate_keys {
+                // Wallet path: resolve passphrase then load from wallet.
+                let wp = p43::util::resolve_secret(
+                    args.wallet_passphrase.clone(),
+                    "P43_GATE_PASSPHRASE",
+                    "Gate-key passphrase: ",
+                )?;
+                let (label, key, cert) =
+                    load_device_from_wallet(&store_dir, &wp, args.device.as_deref())?;
+                (label, key, cert)
+            } else {
+                // Legacy file-based path.
+                let (label, key) =
+                    ensure_registered(&bus_dir, args.device.as_deref(), &room_id, &pending).await?;
+                let cert = std::fs::read(bus::device_cert_path(&bus_dir, &label))
+                    .context("read device cert after registration")?;
+                (label, key, cert)
+            }
+        };
+
+        // Use the cert bytes already resolved above (wallet or disk).
+        let cert_bytes = Arc::new(cert_bytes_raw);
         let authority_pub = AuthorityPub::load(&bus::authority_pub_path(&bus_dir))
             .context("read authority.pub.cbor after registration")?;
         let authority_sign_pub = authority_pub
@@ -1008,4 +1035,92 @@ async fn ensure_registered(
     );
 
     Ok((label, key))
+}
+
+// ── Wallet-gated device identity ──────────────────────────────────────────────
+
+/// Load a certified device identity from the wallet.
+///
+/// Unlocks the wallet with `passphrase`, finds the first (or named)
+/// `certified-device-id` entry, verifies the cert is not expired, and
+/// returns `(label, DeviceKey, cert_bytes)`.
+///
+/// If the cert is expired or no certified entry exists, the function bails
+/// with a helpful message directing the user to run `p43 device-id register`.
+fn load_device_from_wallet(
+    store_dir: &Path,
+    passphrase: &str,
+    device_hint: Option<&str>,
+) -> anyhow::Result<(String, DeviceKey, Vec<u8>)> {
+    use p43::gate_key::GateKeyStore;
+    use p43::wallet::{Wallet, WalletPayload};
+
+    // Unlock wallet.
+    let gate_store = GateKeyStore::open(&store_dir.join("gate-keys"))?;
+    let gate_key = gate_store.try_unlock(passphrase)?;
+    let root_key = gate_key.as_bytes().to_vec();
+    let wallet = Wallet::open(store_dir)?;
+
+    // Find the right certified-device-id entry.
+    let entries = wallet.list_with_ids(&root_key)?;
+    let certs: Vec<_> = entries
+        .iter()
+        .filter(|(cn, _)| cn.kind == "certified-device-id")
+        .collect();
+
+    if certs.is_empty() {
+        anyhow::bail!(
+            "No certified device identity found in wallet.\n\
+             Run `p43 device-id create --label <name>` then \
+             `p43 device-id register` first."
+        );
+    }
+
+    // Select by hint (label prefix or device_id prefix) or auto-select if one.
+    let (cn, _) = if let Some(hint) = device_hint {
+        certs
+            .iter()
+            .find(|(cn, _)| cn.fingerprint.starts_with(hint))
+            .ok_or_else(|| anyhow::anyhow!("no certified-device-id matching '{hint}'"))?
+    } else if certs.len() == 1 {
+        certs[0]
+    } else {
+        let ids: Vec<_> = certs.iter().map(|(cn, _)| &cn.fingerprint).collect();
+        anyhow::bail!(
+            "Multiple certified device identities — specify --device:\n  {}",
+            ids.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+    };
+
+    let payload = wallet
+        .get(&cn.fingerprint, "certified-device-id", &root_key)?
+        .ok_or_else(|| anyhow::anyhow!("wallet entry disappeared"))?;
+
+    let d = match payload {
+        WalletPayload::CertifiedDeviceId(d) => d,
+        _ => anyhow::bail!("unexpected payload kind"),
+    };
+
+    // Check cert expiry.
+    let cert = p43::bus::DeviceCert::load_from_bytes(d.cert_bytes.to_vec())?;
+    let now = p43::bus::unix_now()?;
+    if let Some(exp) = cert.payload.exp {
+        anyhow::ensure!(
+            now <= exp,
+            "Device cert for '{}' expired — run `p43 device-id register` to renew.",
+            d.label
+        );
+    }
+
+    let key = DeviceKey::from_scalars(&d.label, &d.ed25519_scalar, &d.x25519_scalar)?;
+
+    eprintln!(
+        "[p43::bus] wallet device '{}' ({}) loaded from wallet.",
+        d.label, d.device_id
+    );
+
+    Ok((d.label.clone(), key, d.cert_bytes.to_vec()))
 }

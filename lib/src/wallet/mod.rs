@@ -13,7 +13,11 @@ mod tests;
 
 pub use chain::{ChainName, KNOWN_KINDS};
 pub use credential::KeyCredential;
-pub use entry::{KeySlot, SshKey, WalletPayload, YubikeyRef};
+pub use credential::PgpCredential;
+pub use entry::{
+    AuthorityKeyPayload, CertifiedDeviceIdPayload, DeviceIdPayload, FilePgpKey, KeySlot, SshKey,
+    WalletPayload, YubikeyRef,
+};
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -205,6 +209,28 @@ fn chain_name_for(payload: &WalletPayload) -> String {
                 let hash = Sha256::digest(&*k.private_key);
                 format!("{}-ssh-key", hex::encode(&hash[..10]))
             }
+        }
+        WalletPayload::PgpKey(k) => {
+            // Use a sanitised label as the fingerprint component.
+            let safe: String = k
+                .label
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            format!("{safe}-pgp-key")
+        }
+        // Authority key: there is exactly one per wallet; use a stable name.
+        WalletPayload::AuthorityKey(_) => "authority-authority-key".to_owned(),
+        // Device IDs use the device_id hex as the fingerprint component.
+        WalletPayload::DeviceId(d) => format!("{}-device-id", d.device_id),
+        WalletPayload::CertifiedDeviceId(d) => {
+            format!("{}-certified-device-id", d.device_id)
         }
     }
 }

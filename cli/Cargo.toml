@@ -11,6 +11,7 @@ path = "src/main.rs"
 default = ["e2e-encryption"]
 e2e-encryption = ["p43/e2e-encryption"]
 telemetry     = ["p43/telemetry", "dep:tracing"]
+pcsc          = ["p43/pcsc"]
 
 [dependencies]
 p43            = { path = "../lib" }

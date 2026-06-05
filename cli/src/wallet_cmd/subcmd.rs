@@ -68,16 +68,48 @@ pub enum WalletCmd {
         creator_id: String,
     },
 
-    /// Add an SSH private key entry.
-    /// The fingerprint (chain identifier) is derived from the key automatically.
+    /// Import an OpenSSH private key into the wallet.
+    ///
+    /// Reads from FILE if given, otherwise reads from stdin (paste and press
+    /// Ctrl-D).  If the key is passphrase-protected you will be prompted.
+    /// The key is stored decrypted — the wallet gate-key is the outer protection.
     AddSshKey {
-        /// Private key file path (OpenSSH format)
+        /// Private key file (OpenSSH format). Omit to read from stdin.
         #[arg(long, value_name = "FILE")]
-        private_key: PathBuf,
+        key_file: Option<PathBuf>,
 
-        /// Comment e.g. "meno@macbook" (defaults to comment embedded in the key file)
+        /// Comment e.g. "meno@macbook" (defaults to the embedded key comment)
         #[arg(long)]
         comment: Option<String>,
+
+        /// Gate-key passphrase [env: P43_GATE_PASSPHRASE]
+        #[arg(short, long, env = "P43_GATE_PASSPHRASE")]
+        passphrase: Option<String>,
+
+        /// Creator id [env: P43_CREATOR_ID]
+        #[arg(long, env = "P43_CREATOR_ID", default_value = "cli")]
+        creator_id: String,
+    },
+
+    /// Import an armored OpenPGP secret key into the wallet.
+    ///
+    /// Reads from FILE if given, otherwise reads from stdin (paste and press
+    /// Ctrl-D).  If the key is passphrase-protected, supply --key-passphrase
+    /// or you will be prompted.  Both the key and its passphrase are stored
+    /// in the wallet — the gate-key AES-GCM is the outer protection.
+    AddPgpKey {
+        /// Armored TSK file (.asc). Omit to read from stdin.
+        #[arg(long, value_name = "FILE")]
+        key_file: Option<PathBuf>,
+
+        /// Passphrase protecting the key (leave empty or omit if unencrypted).
+        /// Prompted interactively if the key is encrypted and this is not set.
+        #[arg(long)]
+        key_passphrase: Option<String>,
+
+        /// Human-readable label (defaults to the primary UID in the key).
+        #[arg(long)]
+        label: Option<String>,
 
         /// Gate-key passphrase [env: P43_GATE_PASSPHRASE]
         #[arg(short, long, env = "P43_GATE_PASSPHRASE")]
@@ -94,7 +126,7 @@ pub enum WalletCmd {
         #[arg(value_name = "FINGERPRINT")]
         fingerprint: String,
 
-        /// Kind: yubikey-ref, ssh-key
+        /// Kind: yubikey-ref, ssh-key, pgp-key, authority-key
         #[arg(value_name = "KIND")]
         kind: String,
 

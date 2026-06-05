@@ -13,7 +13,10 @@ import '../../services/window_service.dart';
 // ── Authority status / init tile ──────────────────────────────────────────────
 
 class AuthorityStatusTile extends StatefulWidget {
-  const AuthorityStatusTile({super.key});
+  const AuthorityStatusTile({super.key, this.walletMasterHex});
+
+  /// Wallet master secret — when non-null the tile checks / inits via wallet.
+  final String? walletMasterHex;
 
   @override
   State<AuthorityStatusTile> createState() => _AuthorityStatusTileState();
@@ -30,9 +33,18 @@ class _AuthorityStatusTileState extends State<AuthorityStatusTile> {
     _check();
   }
 
+  @override
+  void didUpdateWidget(AuthorityStatusTile old) {
+    super.didUpdateWidget(old);
+    if (widget.walletMasterHex != old.walletMasterHex) _check();
+  }
+
   Future<void> _check() async {
+    final master = widget.walletMasterHex;
     try {
-      final has = await rust.busHasAuthority();
+      final has = master != null
+          ? await rust.walletHasAuthority(masterHex: master)
+          : await rust.busHasAuthority();
       if (mounted) setState(() => _hasAuthority = has);
     } catch (_) {
       if (mounted) setState(() => _hasAuthority = false);
@@ -40,29 +52,22 @@ class _AuthorityStatusTileState extends State<AuthorityStatusTile> {
   }
 
   Future<void> _init() async {
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
+    final master = widget.walletMasterHex;
+    setState(() { _busy = true; _error = null; });
     try {
-      await rust.busInitAuthority();
-      if (mounted) {
-        setState(() {
-          _hasAuthority = true;
-          _busy = false;
-        });
+      if (master != null) {
+        await rust.walletInitAuthority(masterHex: master);
+      } else {
+        await rust.busInitAuthority();
       }
+      if (mounted) setState(() { _hasAuthority = true; _busy = false; });
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = e.toString();
-          _busy = false;
-        });
-      }
+      if (mounted) setState(() { _error = e.toString(); _busy = false; });
     }
   }
 
   void _showInitConfirm() {
+    final walletBased = widget.walletMasterHex != null;
     showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -71,12 +76,17 @@ class _AuthorityStatusTileState extends State<AuthorityStatusTile> {
           'Initialise Bus Authority',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
         ),
-        content: const Text(
-          'A new Ed25519 + X25519 authority keypair will be generated and '
-          'encrypted to all currently imported keys.\n\n'
-          'Any device that already trusts the old authority will need to be '
-          're-registered.',
-          style: TextStyle(fontSize: 13),
+        content: Text(
+          walletBased
+              ? 'A new Ed25519 + X25519 authority keypair will be generated '
+                'and sealed inside the wallet.\n\n'
+                'Any device that already trusts the old authority will need '
+                'to be re-registered.'
+              : 'A new Ed25519 + X25519 authority keypair will be generated '
+                'and encrypted to all currently imported keys.\n\n'
+                'Any device that already trusts the old authority will need '
+                'to be re-registered.',
+          style: const TextStyle(fontSize: 13),
         ),
         actions: [
           TextButton(
@@ -86,8 +96,7 @@ class _AuthorityStatusTileState extends State<AuthorityStatusTile> {
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF0A84FF),
-            ),
+                backgroundColor: const Color(0xFF0A84FF)),
             child: const Text('Initialise'),
           ),
         ],
@@ -2193,6 +2202,106 @@ class SessionUnlockTileState extends State<SessionUnlockTile> {
             )
           : const Icon(Icons.chevron_right, size: 18, color: Color(0xFF8E8E93)),
       onTap: _unlocked ? null : _showUnlockDialog,
+    );
+  }
+}
+
+// ── Wallet-gated session tile ─────────────────────────────────────────────────
+//
+// Replaces SessionUnlockTile for the wallet-gated authority flow.
+// The session lock state mirrors the wallet: if the wallet is unlocked
+// (master_hex != null) the authority session is unlocked too.
+// Locking redirects to the root AppBar lock button (same as all other
+// wallet-gated state).
+
+class WalletSessionTile extends StatefulWidget {
+  const WalletSessionTile({
+    super.key,
+    this.walletMasterHex,
+    this.onUnlocked,
+    this.externalLockStream,
+  });
+
+  final String? walletMasterHex;
+  final VoidCallback? onUnlocked;
+  final Stream<void>? externalLockStream;
+
+  @override
+  State<WalletSessionTile> createState() => WalletSessionTileState();
+}
+
+// Public state so DevicesScreen can hold a GlobalKey and call openUnlockDialog.
+class WalletSessionTileState extends State<WalletSessionTile> {
+  StreamSubscription<void>? _lockSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSessionIfNeeded();
+    _subscribeLockStream();
+  }
+
+  @override
+  void didUpdateWidget(WalletSessionTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.walletMasterHex != oldWidget.walletMasterHex) {
+      _loadSessionIfNeeded();
+    }
+    if (widget.externalLockStream != oldWidget.externalLockStream) {
+      _lockSub?.cancel();
+      _subscribeLockStream();
+    }
+  }
+
+  void _subscribeLockStream() {
+    _lockSub = widget.externalLockStream?.listen((_) => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _lockSub?.cancel();
+    super.dispose();
+  }
+
+  /// Called when the root shell navigates here after a lock event.
+  /// For wallet-gated flow, there is nothing interactive to do here —
+  /// the wallet unlock happens via the global AppBar lock icon.
+  Future<void> openUnlockDialog() async {
+    // Intentionally a no-op: unlocking is via the AppBar lock button.
+  }
+
+  Future<void> _loadSessionIfNeeded() async {
+    final master = widget.walletMasterHex;
+    if (master == null) return;
+    try {
+      await rust.walletUnlockSession(masterHex: master);
+      widget.onUnlocked?.call();
+    } catch (_) {
+      // Authority key not yet in wallet — status tile will show init prompt.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final unlocked = widget.walletMasterHex != null;
+    return ListTile(
+      tileColor: const Color(0xFF2C2C2E),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      leading: Icon(
+        unlocked ? Icons.lock_open_outlined : Icons.lock_outlined,
+        color: unlocked ? const Color(0xFF30D158) : const Color(0xFF8E8E93),
+        size: 20,
+      ),
+      title: Text(
+        unlocked ? 'Session unlocked' : 'Session locked',
+        style: const TextStyle(fontSize: 15),
+      ),
+      subtitle: Text(
+        unlocked
+            ? 'Authority session active — ready to sign device certificates.'
+            : 'Unlock the wallet (lock icon) to activate the authority session.',
+        style: const TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
+      ),
     );
   }
 }

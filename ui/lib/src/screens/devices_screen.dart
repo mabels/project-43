@@ -17,6 +17,8 @@ class DevicesScreen extends StatefulWidget {
     this.externalLockStream,
     this.onSessionUnlocked,
     this.sessionUnlockKey,
+    this.walletMasterHex,
+    this.onWalletUnlock,
   });
 
   /// Called when an incoming CSR arrives so the shell can switch to this tab.
@@ -50,6 +52,14 @@ class DevicesScreen extends StatefulWidget {
   /// shell so it can imperatively call [SessionUnlockTileState.openUnlockDialog]
   /// from the global AppBar lock button.
   final GlobalKey<SessionUnlockTileState>? sessionUnlockKey;
+
+  /// Wallet master secret — non-null means the wallet (and therefore the
+  /// authority session) is unlocked.
+  final String? walletMasterHex;
+
+  /// Called when the screen needs the wallet unlocked.
+  /// Returns the master hex on success, null if the user cancelled.
+  final Future<String?> Function()? onWalletUnlock;
 
   @override
   State<DevicesScreen> createState() => _DevicesScreenState();
@@ -223,8 +233,6 @@ class _DevicesScreenState extends State<DevicesScreen>
   }
 
   Future<void> _showApprovalDialog(rust.BusCsrEvent event) async {
-    // Re-fetch the room each time — the user may have configured it after the
-    // widget was first built (e.g. via the Agent tab → pick room).
     final roomId = await _loadAgentRoom();
     if (roomId == null) {
       if (mounted) {
@@ -242,49 +250,98 @@ class _DevicesScreenState extends State<DevicesScreen>
       return;
     }
 
-    List<rust.KeySealStatus> sealedKeys;
-    try {
-      sealedKeys = await rust.busAuthorityKeySealStatus();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to load authority keys: $e')),
-        );
+    final ttlDays = SettingsService.instance.settings.deviceCertTtlDays;
+    final ttlSecs = ttlDays > 0 ? ttlDays * 24 * 60 * 60 : null;
+
+    final deviceLabel = event.deviceLabel.isNotEmpty
+        ? event.deviceLabel
+        : event.deviceId;
+
+    // ── Wallet locked: trigger the same unlock flow as the AppBar lock icon ────
+    String? masterHex = widget.walletMasterHex;
+    if (masterHex == null) {
+      if (!mounted) { _approvalInFlight = false; return; }
+      masterHex = await widget.onWalletUnlock?.call();
+      if (masterHex == null) {
+        // User cancelled unlock — drop the request.
+        _approvalInFlight = false;
+        _drainQueue();
+        return;
       }
-      _approvalInFlight = false;
-      _drainQueue();
-      return;
-    }
-    if (!mounted) {
-      _approvalInFlight = false;
-      return;
     }
 
-    final approved = await showDialog<bool>(
+    // ── Approve / reject ──────────────────────────────────────────────────────
+    if (!mounted) { _approvalInFlight = false; return; }
+    final confirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => _CsrApprovalDialog(
-        event: event,
-        sealedKeys: sealedKeys,
-        onConfirm: (useCard, fp, pin, passphrase) async {
-          final ttlDays = SettingsService.instance.settings.deviceCertTtlDays;
-          final ttlSecs = ttlDays > 0 ? ttlDays * 24 * 60 * 60 : null;
-          await rust.mxRespondCsr(
-            roomId: roomId,
-            requestId: event.requestId,
-            csrB64: event.csrB64,
-            ttlSecs: ttlSecs,
-            useCard: useCard,
-            fingerprint: fp,
-            pin: pin,
-            passphrase: passphrase,
-          );
-        },
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2C2C2E),
+        title: const Text('Approve device'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.computer_outlined,
+                    size: 18, color: Color(0xFF0A84FF)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    deviceLabel,
+                    style: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              event.deviceId,
+              style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  color: Color(0xFF8E8E93)),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'The authority session is active — no passphrase needed.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Reject'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Approve'),
+          ),
+        ],
       ),
     );
 
+    if (confirmed == true) {
+      try {
+        await rust.mxRespondCsrFromSession(
+          roomId: roomId,
+          requestId: event.requestId,
+          csrB64: event.csrB64,
+          ttlSecs: ttlSecs,
+        );
+        if (mounted) _loadPeers();
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Approval failed: $e')),
+          );
+        }
+      }
+    }
     _approvalInFlight = false;
-    if (approved == true && mounted) _loadPeers();
     _drainQueue();
   }
 
@@ -367,11 +424,7 @@ class _DevicesScreenState extends State<DevicesScreen>
       body: TabBarView(
         controller: _tabCtrl,
         children: [
-          _AuthorityTab(
-            sessionUnlockKey: _sessionUnlockKey,
-            onSessionUnlocked: widget.onSessionUnlocked,
-            externalLockStream: widget.externalLockStream,
-          ),
+          _AuthorityTab(walletMasterHex: widget.walletMasterHex),
           _DevicesTab(
             peers: _peers,
             loading: _loadingPeers,
@@ -387,35 +440,17 @@ class _DevicesScreenState extends State<DevicesScreen>
 // ── Authority tab ─────────────────────────────────────────────────────────────
 
 class _AuthorityTab extends StatelessWidget {
-  const _AuthorityTab({
-    this.sessionUnlockKey,
-    this.onSessionUnlocked,
-    this.externalLockStream,
-  });
+  const _AuthorityTab({this.walletMasterHex});
 
-  final GlobalKey<SessionUnlockTileState>? sessionUnlockKey;
-  final VoidCallback? onSessionUnlocked;
-  final Stream<void>? externalLockStream;
+  final String? walletMasterHex;
 
   @override
   Widget build(BuildContext context) {
     return ListView(
       children: [
-        const AuthorityStatusTile(),
-        const SizedBox(height: 1),
-        SessionUnlockTile(
-          key: sessionUnlockKey,
-          onUnlocked: onSessionUnlocked,
-          externalLockStream: externalLockStream,
-        ),
+        AuthorityStatusTile(walletMasterHex: walletMasterHex),
         const SizedBox(height: 1),
         const AuthorityQrTile(),
-        const SizedBox(height: 1),
-        const AuthorityResealTile(),
-        const SizedBox(height: 1),
-        const AuthorityExportTile(),
-        const SizedBox(height: 1),
-        const AuthorityImportTile(),
         const SizedBox(height: 32),
       ],
     );

@@ -7,8 +7,10 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'src/screens/agent_screen.dart';
 import 'src/screens/devices_screen.dart';
+import 'src/screens/gate_key_setup_screen.dart';
 import 'src/screens/key_list_screen.dart';
 import 'src/screens/settings_screen.dart';
+import 'src/services/gate_key_service.dart';
 import 'src/services/notification_service.dart';
 import 'src/services/settings_service.dart';
 import 'src/services/telemetry_service.dart';
@@ -51,13 +53,35 @@ Future<void> main() async {
   await WindowService.instance.init();
   // Attempt to restore a previously saved Matrix session.
   final loggedIn = await mxRestore();
-  runApp(P43App(initiallyLoggedIn: loggedIn));
+  final gateKeyConfigured = await GateKeyService.instance.isConfigured();
+  runApp(P43App(
+    initiallyLoggedIn: loggedIn,
+    gateKeyConfigured: gateKeyConfigured,
+  ));
 }
 
-class P43App extends StatelessWidget {
-  const P43App({super.key, required this.initiallyLoggedIn});
+class P43App extends StatefulWidget {
+  const P43App({
+    super.key,
+    required this.initiallyLoggedIn,
+    required this.gateKeyConfigured,
+  });
 
   final bool initiallyLoggedIn;
+  final bool gateKeyConfigured;
+
+  @override
+  State<P43App> createState() => _P43AppState();
+}
+
+class _P43AppState extends State<P43App> {
+  late bool _gateKeyConfigured;
+
+  @override
+  void initState() {
+    super.initState();
+    _gateKeyConfigured = widget.gateKeyConfigured;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -75,7 +99,11 @@ class P43App extends StatelessWidget {
         dividerColor: const Color(0xFF3A3A3C),
         fontFamily: '.AppleSystemUIFont',
       ),
-      home: _RootShell(initiallyLoggedIn: initiallyLoggedIn),
+      home: _gateKeyConfigured
+          ? _RootShell(initiallyLoggedIn: widget.initiallyLoggedIn)
+          : GateKeySetupScreen(
+              onSetupComplete: () => setState(() => _gateKeyConfigured = true),
+            ),
     );
   }
 }
@@ -92,7 +120,8 @@ class _RootShell extends StatefulWidget {
 class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   int _tabIndex = 0;
   late bool _loggedIn;
-  bool _sessionUnlocked = false;
+  bool _sessionUnlocked = false;   // bus/authority session
+  String? _walletMasterHex;        // wallet master secret (null = locked)
 
   static const _tabTitles = ['Keys', 'Agent', 'Devices', 'Settings'];
 
@@ -152,15 +181,73 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   void _lockAll() {
     lockAll();
     SettingsService.instance.invalidateCache();
+    GateKeyService.instance.clearCache();
     _externalLockCtrl.add(null);
-    setState(() => _sessionUnlocked = false);
+    setState(() {
+      _sessionUnlocked = false;
+      _walletMasterHex = null;
+    });
   }
 
-  /// Switches to the Devices tab and emits on [_unlockRequestCtrl] so
-  /// [DevicesScreen] can animate to the Authority sub-tab and open the dialog.
-  void _openUnlockDialog() {
-    if (_tabIndex != 2) setState(() => _tabIndex = 2);
-    _unlockRequestCtrl.add(null);
+  /// Unlock the wallet: try biometric first, fall back to passphrase prompt.
+  /// On success, also triggers the bus session unlock flow.
+  /// Returns the master hex on success, null on cancel / error.
+  Future<String?> _openUnlockDialog() async {
+    try {
+      final masterHex = await GateKeyService.instance.unlock(
+        passphraseProvider: () => _promptWalletPassphrase(),
+      );
+      if (mounted) {
+        setState(() {
+          _walletMasterHex = masterHex;
+          _sessionUnlocked = true;
+        });
+        // Auto-unlock the authority session from the wallet.
+        walletUnlockSession(masterHex: masterHex).catchError((_) {});
+      }
+      return masterHex;
+    } catch (e) {
+      // User cancelled or wrong passphrase — also surface bus unlock on Devices tab.
+      if (mounted) {
+        if (_tabIndex != 2) setState(() => _tabIndex = 2);
+        _unlockRequestCtrl.add(null);
+      }
+      return null;
+    }
+  }
+
+  /// Show a passphrase input dialog and return the entered value.
+  Future<String?> _promptWalletPassphrase() {
+    final ctrl = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2C2C2E),
+        title: const Text('Wallet passphrase',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+        content: TextField(
+          controller: ctrl,
+          obscureText: true,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Enter passphrase',
+            filled: true,
+            fillColor: Color(0xFF3A3A3C),
+          ),
+          onSubmitted: (_) => Navigator.pop(ctx, ctrl.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            child: const Text('Unlock'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _initListener() async {
@@ -266,14 +353,19 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
         ),
         actions: [
           IconButton(
-            tooltip: _sessionUnlocked ? 'Lock session' : 'Unlock session',
+            tooltip: _walletMasterHex != null
+                ? 'Lock wallet${_sessionUnlocked ? ' + session' : ''}'
+                : 'Unlock wallet',
             icon: Icon(
-              _sessionUnlocked ? Icons.lock_open_outlined : Icons.lock_outlined,
+              _walletMasterHex != null
+                  ? Icons.lock_open_outlined
+                  : Icons.lock_outlined,
             ),
-            color: _sessionUnlocked
-                ? const Color(0xFFFF9F0A) // amber — something to lock
+            color: _walletMasterHex != null
+                ? const Color(0xFF30D158) // green — wallet open
                 : Colors.grey,
-            onPressed: _sessionUnlocked ? _lockAll : _openUnlockDialog,
+            onPressed:
+                _walletMasterHex != null ? _lockAll : _openUnlockDialog,
           ),
           const SizedBox(width: 4),
         ],
@@ -281,13 +373,14 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
       body: IndexedStack(
         index: _tabIndex,
         children: [
-          const KeyListScreen(),
+          KeyListScreen(walletMasterHex: _walletMasterHex),
           AgentScreen(
             agentStream: _agentCtrl.stream,
             onSignRequest: () {
               if (_tabIndex != 1) setState(() => _tabIndex = 1);
             },
             onRoomChanged: _onAgentRoomChanged,
+            walletMasterHex: _walletMasterHex,
           ),
           DevicesScreen(
             busStream: _busCtrl.stream,
@@ -298,6 +391,8 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
               if (_tabIndex != 2) setState(() => _tabIndex = 2);
             },
             onSessionUnlocked: _refreshLockState,
+            walletMasterHex: _walletMasterHex,
+            onWalletUnlock: _openUnlockDialog,
           ),
           SettingsScreen(
             loggedIn: _loggedIn,

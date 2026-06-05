@@ -15,6 +15,7 @@ class AgentScreen extends StatefulWidget {
     this.onSignRequest,
     this.agentStream,
     this.onRoomChanged,
+    this.walletMasterHex,
   });
 
   /// Called when an `ssh.sign_request` arrives so the shell can switch to
@@ -29,6 +30,10 @@ class AgentScreen extends StatefulWidget {
   /// Called when the user picks a different agent room, so the root shell
   /// can restart the unified [mxListenAll] listener with the new room.
   final void Function(String roomId)? onRoomChanged;
+
+  /// Wallet master secret (non-null = unlocked).  When set, list-keys and
+  /// sign requests are satisfied from the wallet without any dialogs.
+  final String? walletMasterHex;
 
   @override
   State<AgentScreen> createState() => _AgentScreenState();
@@ -116,7 +121,11 @@ class _AgentScreenState extends State<AgentScreen> {
 
   Future<void> _autoRespondListKeys(String roomId, String requestId) async {
     try {
-      await mxRespondListKeys(roomId: roomId, requestId: requestId);
+      await mxRespondListKeys(
+        roomId: roomId,
+        requestId: requestId,
+        masterHex: widget.walletMasterHex,
+      );
       _updateStatus(requestId, RequestStatus.done);
     } catch (e) {
       _updateStatusWithError(requestId, e);
@@ -251,6 +260,7 @@ class _AgentScreenState extends State<AgentScreen> {
   /// Acquire the signing credential for [fp] and sign [entry]'s request.
   ///
   /// Try order:
+  ///   0. Wallet (PIN / private key stored in the sealed wallet — no dialog).
   ///   1. Rust credential cache (no Dart string needed).
   ///   2. Biometric secure store (Face ID / Touch ID / device PIN).
   ///   3. PIN / passphrase dialog — result auto-saved to biometric store.
@@ -263,6 +273,28 @@ class _AgentScreenState extends State<AgentScreen> {
     String fp,
   ) async {
     final requestId = entry.requestId;
+
+    // ── 0. Wallet path (preferred) ────────────────────────────────────────
+    // The wallet holds the PIN (YubiKey) or plaintext private key (SSH).
+    // No dialog, no biometric prompt — just unlock the wallet and sign.
+    final masterHex = widget.walletMasterHex;
+    if (masterHex != null) {
+      try {
+        debugPrint('[p43::agent] path=wallet  $requestId');
+        _updateStatus(requestId, RequestStatus.responding);
+        await mxRespondSignWallet(
+          roomId: roomId,
+          requestId: requestId,
+          masterHex: masterHex,
+        );
+        return;
+      } catch (e) {
+        // Key not in wallet (e.g. key imported only into old key store) —
+        // fall through to the credential-cache / dialog paths.
+        debugPrint('[p43::agent] wallet miss for $fp, falling through: $e');
+        _updateStatus(requestId, RequestStatus.pending);
+      }
+    }
     final cardIdents = entry.cardIdents;
 
     debugPrint('[p43::agent] acquire  $requestId  fp=$fp  card=$isCardKey');

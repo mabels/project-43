@@ -9,7 +9,17 @@ use crate::sync_store::ChainRef;
 /// The known payload kinds the wallet understands.
 /// Chains in the store whose name ends with one of these suffixes are wallet entries.
 /// All other chains (e.g. raw SHA-1 hex names from `p43 chain`) are skipped.
-pub const KNOWN_KINDS: &[&str] = &["yubikey-ref", "ssh-key"];
+// NOTE: longer kinds that are suffixes of shorter ones MUST come first so
+// `from_chain_name` matches greedily (e.g. "certified-device-id" before
+// "device-id", otherwise "…-certified-device-id" is mis-parsed).
+pub const KNOWN_KINDS: &[&str] = &[
+    "yubikey-ref",
+    "ssh-key",
+    "pgp-key",
+    "authority-key",
+    "certified-device-id",
+    "device-id",
+];
 
 /// Wallet-level chain identifier: a (fingerprint, kind) pair.
 #[derive(Debug, Clone, PartialEq, Eq)]

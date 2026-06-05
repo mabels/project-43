@@ -779,13 +779,21 @@ pub async fn mx_set_agent_room(room_id: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Respond to an `ssh.list_keys_request` with the keys held in the local store.
+/// Respond to an `ssh.list_keys_request` with wallet credentials.
+///
+/// Pass `master_hex` (the unlocked wallet master secret) to list keys from the
+/// wallet (YubiKey auth-slot keys + stored SSH keys).  Pass `None` to fall back
+/// to the legacy key store for backwards compatibility.
 #[frb]
 #[cfg_attr(
     feature = "telemetry",
     tracing::instrument(fields(request_id, room_id))
 )]
-pub async fn mx_respond_list_keys(room_id: String, request_id: String) -> anyhow::Result<()> {
+pub async fn mx_respond_list_keys(
+    room_id: String,
+    request_id: String,
+    master_hex: Option<String>,
+) -> anyhow::Result<()> {
     // Consume the sender cert so the response can be sealed if available.
     let pending_lk = pending_list_keys()
         .lock()
@@ -801,14 +809,152 @@ pub async fn mx_respond_list_keys(room_id: String, request_id: String) -> anyhow
     }
     let sender_cert = pending_lk.and_then(|p| p.sender_cert);
 
-    let store_dir = default_store_dir();
-    let keys = p43::ssh_agent::list_ssh_public_keys(&store_dir);
+    // List keys from the wallet (wallet-gated: YubiKey refs + SSH keys).
+    // Falls back to the legacy key store when no master_hex is supplied so
+    // existing key-store-only deployments keep working.
+    let keys = if let Some(ref hex) = master_hex {
+        wallet_ssh_public_keys(hex).unwrap_or_default()
+    } else {
+        let store_dir = default_store_dir();
+        p43::ssh_agent::list_ssh_public_keys(&store_dir)
+    };
     let response =
         p43::protocol::Message::SshListKeysResponse(p43::protocol::SshListKeysResponse {
             request_id,
             keys,
         });
     send_via_bridge(&room_id, response, sender_cert).await
+}
+
+// ── Wallet SSH helpers ────────────────────────────────────────────────────────
+
+/// Build the SSH public-key list from wallet credentials.
+///
+/// - `SshKey`    : uses stored private key bytes — no card needed.
+/// - `YubikeyRef`: reads the auth-slot public key live; silently skipped when
+///   the card is absent (same policy as the legacy agent).
+fn wallet_ssh_public_keys(master_hex: &str) -> anyhow::Result<Vec<p43::protocol::SshKeyInfo>> {
+    use p43::wallet::{KeyCredential, KeySlot, WalletPayload};
+
+    let wallet = open_wallet()?;
+    let root_key = master_key(master_hex)?;
+    let mut keys = Vec::new();
+
+    // Use the public Wallet API — list_with_ids gives (ChainName, chain_id),
+    // then get() decrypts the tip payload.
+    for (cn, _chain_id) in wallet.list_with_ids(&root_key)? {
+        let payload = match wallet.get(&cn.fingerprint, &cn.kind, &root_key)? {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let (pub_wire, comment) = match &payload {
+            WalletPayload::SshKey(k) => match k.pubkey_bytes(KeySlot::Auth) {
+                Ok(b) => (b, k.comment().to_owned()),
+                Err(_) => continue,
+            },
+            WalletPayload::YubikeyRef(r) => {
+                #[cfg(not(any(target_os = "ios", target_os = "android")))]
+                match r.pubkey_bytes(KeySlot::Auth) {
+                    Ok(b) => (b, r.comment().to_owned()),
+                    Err(_) => continue, // card absent — skip silently
+                }
+                #[cfg(any(target_os = "ios", target_os = "android"))]
+                {
+                    continue;
+                }
+            }
+            WalletPayload::PgpKey(_)
+            | WalletPayload::AuthorityKey(_)
+            | WalletPayload::DeviceId(_)
+            | WalletPayload::CertifiedDeviceId(_) => continue,
+        };
+
+        let fingerprint = ssh_key::PublicKey::from_bytes(&pub_wire)
+            .map(|pk| pk.fingerprint(Default::default()).to_string())
+            .unwrap_or_default();
+
+        keys.push(p43::protocol::SshKeyInfo {
+            public_key: pub_wire,
+            fingerprint,
+            comment,
+        });
+    }
+    Ok(keys)
+}
+
+/// Approve an `ssh.sign_request` using wallet credentials.
+///
+/// - `SshKey`    : in-memory sign, no dialog needed (private bytes already
+///   decrypted by the wallet AES-GCM layer).
+/// - `YubikeyRef`: opens the card, verifies the stored PIN, signs via the AUTH
+///   slot — no PIN dialog needed.
+#[frb]
+pub async fn mx_respond_sign_wallet(
+    room_id: String,
+    request_id: String,
+    master_hex: String,
+) -> anyhow::Result<()> {
+    use p43::wallet::{KeyCredential, KeySlot, WalletPayload};
+
+    let pending = pending_signs()
+        .lock()
+        .map_err(|e| anyhow::anyhow!("pending-sign lock: {e}"))?
+        .remove(&request_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown request_id {request_id}"))?;
+
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+    let target_fp = pending.fingerprint.clone();
+    let mut sig: Option<Vec<u8>> = None;
+
+    'outer: for (cn, _chain_id) in wallet.list_with_ids(&root_key)? {
+        let payload = match wallet.get(&cn.fingerprint, &cn.kind, &root_key)? {
+            Some(p) => p,
+            None => continue,
+        };
+
+        match &payload {
+            WalletPayload::SshKey(k) => {
+                if let Ok(raw) = k.pubkey_bytes(KeySlot::Auth) {
+                    if let Ok(pk) = ssh_key::PublicKey::from_bytes(&raw) {
+                        if pk.fingerprint(Default::default()).to_string() == target_fp {
+                            sig = Some(k.sign_with_flags(&pending.data, pending.flags)?);
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            WalletPayload::YubikeyRef(r) => {
+                #[cfg(not(any(target_os = "ios", target_os = "android")))]
+                {
+                    if let Ok(raw) = r.pubkey_bytes(KeySlot::Auth) {
+                        if let Ok(pk) = ssh_key::PublicKey::from_bytes(&raw) {
+                            if pk.fingerprint(Default::default()).to_string() == target_fp {
+                                sig = Some(r.sign_with_flags(&pending.data, pending.flags)?);
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+                #[cfg(any(target_os = "ios", target_os = "android"))]
+                let _ = r;
+            }
+            WalletPayload::PgpKey(_)
+            | WalletPayload::AuthorityKey(_)
+            | WalletPayload::DeviceId(_)
+            | WalletPayload::CertifiedDeviceId(_) => {}
+        }
+    }
+
+    let sig =
+        sig.ok_or_else(|| anyhow::anyhow!("no wallet entry found for fingerprint {target_fp}"))?;
+
+    let response = p43::protocol::Message::SshSignResponse(p43::protocol::SshSignResponse {
+        request_id,
+        signature: sig,
+    });
+    send_via_bridge(&room_id, response, pending.sender_cert).await
 }
 
 // ── Bus registration (authority side) ────────────────────────────────────────
@@ -1142,6 +1288,57 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
 }
 
 /// Approve a device registration: verify the CSR, sign a cert with the
+/// Approve a device CSR using the authority key already in `authority_session`.
+///
+/// Called when the wallet is unlocked — no credential prompt needed because
+/// `wallet_unlock_session` already seated the authority key in memory.
+#[frb]
+pub async fn mx_respond_csr_from_session(
+    room_id: String,
+    request_id: String,
+    csr_b64: String,
+    ttl_secs: Option<i64>,
+) -> anyhow::Result<()> {
+    use base64::Engine as _;
+    use p43::bus::{self, DeviceCert, DeviceCsr};
+
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+
+    let csr_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&csr_b64)
+        .context("decode CSR base64")?;
+    let csr_payload = DeviceCsr::verify(&csr_bytes)?;
+
+    // Use the authority key already in the session (set by wallet_unlock_session).
+    let (authority_key, _) = authority_session()
+        .lock()
+        .map_err(|e| anyhow::anyhow!("authority session lock: {e}"))?
+        .as_ref()
+        .map(|(k, c)| (k.clone_key(), c.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("authority session not unlocked — unlock the wallet first")
+        })?;
+
+    let cert = DeviceCert::issue(&csr_payload, &authority_key, ttl_secs)?;
+    let authority_pub = authority_key.authority_pub();
+    let authority_pub_cbor = authority_pub.to_cbor_bytes()?;
+
+    let msg = p43::protocol::Message::BusCertResponse(p43::protocol::BusCertResponse {
+        request_id,
+        device_id: cert.payload.device_id.clone(),
+        cert_b64: base64::engine::general_purpose::STANDARD.encode(&cert.cose_bytes),
+        authority_pub_b64: base64::engine::general_purpose::STANDARD.encode(&authority_pub_cbor),
+    });
+    p43::matrix::global::send_message(&room_id, &msg.to_json()?).await?;
+
+    authority_pub.save(&bus::authority_pub_path(&bus_dir))?;
+    let peer_path = bus::peer_cert_path(&bus_dir, &cert.payload.device_id);
+    cert.save(&peer_path)?;
+
+    Ok(())
+}
+
 /// authority key, and send `bus.cert_response` back into the room.
 ///
 /// The authority key is unlocked using the card PIN (YubiKey) or passphrase
@@ -1250,6 +1447,143 @@ pub fn bus_has_authority() -> bool {
 /// currently-imported OpenPGP keys (card keys and soft keys alike).
 ///
 /// This is a public-key-only operation — no passphrase or PIN is required.
+// ── Wallet-gated authority ────────────────────────────────────────────────────
+
+/// Generate a new bus authority keypair and store it in the wallet.
+///
+/// Replaces `bus_init_authority` — no key-store recipients, no OpenPGP
+/// encryption.  The gate-key AES-GCM is the sole protection layer.
+///
+/// Also writes `authority.pub.cbor` + `authority.cert.cbor` to disk so
+/// running bus operations can still find them.
+///
+/// Returns the authority-pub CBOR as a hex string (used for the QR code).
+#[frb]
+pub fn wallet_init_authority(master_hex: String) -> anyhow::Result<String> {
+    use p43::bus::{self, authority::AuthorityKey, CsrPayload, DeviceCert};
+    use p43::sync_store::KeyRef;
+    use p43::wallet::{AuthorityKeyPayload, WalletPayload};
+    use serde_bytes::ByteBuf;
+
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+
+    // Generate fresh keypair using the lib helper (no external crate imports).
+    let authority_key = AuthorityKey::generate();
+    let authority_pub = authority_key.authority_pub();
+
+    // Self-issue authority.cert.cbor.
+    let csr_payload = CsrPayload {
+        version: 1,
+        label: "authority".to_string(),
+        sign_pubkey: authority_pub.ed25519_pub.clone(),
+        ecdh_pubkey: authority_pub.x25519_pub.clone(),
+        nonce: vec![0u8; 16],
+        timestamp: p43::bus::unix_now()?,
+    };
+    let cert = DeviceCert::issue(&csr_payload, &authority_key, None)?;
+
+    // Persist public material to disk.
+    authority_pub.save(&bus::authority_pub_path(&bus_dir))?;
+    cert.save(&bus::authority_cert_path(&bus_dir))?;
+
+    // Store private scalars in the wallet (encrypted by the gate-key).
+    let (ed_scalar, x_scalar) = authority_key.to_scalars();
+    let payload = WalletPayload::AuthorityKey(AuthorityKeyPayload {
+        version: 1,
+        ed25519_scalar: ByteBuf::from(ed_scalar.to_vec()),
+        x25519_scalar: ByteBuf::from(x_scalar.to_vec()),
+        cert_bytes: ByteBuf::from(cert.cose_bytes.clone()),
+    });
+
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+    let gate_store = open_gate_key_store()?;
+    let ids = gate_store.list()?;
+    anyhow::ensure!(!ids.is_empty(), "no gate-key configured");
+    let id_bytes = hex::decode(ids[0].trim_start_matches("gate-"))?;
+    let key_ref = KeyRef::Direct {
+        gate_key_id: ByteBuf::from(id_bytes),
+    };
+    wallet.put(
+        "authority",
+        "authority-key",
+        &payload,
+        &root_key,
+        key_ref,
+        "ui",
+    )?;
+
+    Ok(hex::encode(authority_pub.to_cbor_bytes()?))
+}
+
+/// Load the authority keypair from the wallet into the in-memory session.
+///
+/// Equivalent to `bus_unlock_session` but uses the wallet.
+/// Call this whenever the wallet unlocks.
+#[frb]
+pub fn wallet_unlock_session(master_hex: String) -> anyhow::Result<()> {
+    use p43::bus::{self, authority::AuthorityKey};
+    use p43::wallet::WalletPayload;
+
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+
+    let payload = wallet
+        .get("authority", "authority-key", &root_key)?
+        .ok_or_else(|| {
+            anyhow::anyhow!("no authority key in wallet — run wallet_init_authority first")
+        })?;
+
+    let ak = match payload {
+        WalletPayload::AuthorityKey(a) => a,
+        _ => anyhow::bail!("unexpected payload kind for authority-key chain"),
+    };
+
+    // Reconstruct AuthorityKey using the lib helper.
+    let authority_key = AuthorityKey::from_scalars(&ak.ed25519_scalar, &ak.x25519_scalar)?;
+
+    // cert_bytes are raw COSE bytes — write to disk so running ops still see them.
+    let store_dir = default_store_dir();
+    let bus_dir = bus::bus_dir(&store_dir);
+    authority_key
+        .authority_pub()
+        .save(&bus::authority_pub_path(&bus_dir))?;
+    std::fs::write(bus::authority_cert_path(&bus_dir), &*ak.cert_bytes)?;
+
+    // Seat in the authority session.
+    if let Ok(mut guard) = authority_session().lock() {
+        *guard = Some((authority_key, ak.cert_bytes.to_vec()));
+    }
+
+    // Replay any BusSecure messages buffered while the session was locked.
+    let buffered: Vec<p43::bus::ExternalBusMessage> = locked_msg_queue()
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default();
+    if !buffered.is_empty() {
+        if let Ok(guard) = external_tx_cell().lock() {
+            if let Some(ref tx) = *guard {
+                for msg in buffered {
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check whether an authority key exists in the wallet.
+#[frb]
+pub fn wallet_has_authority(master_hex: String) -> anyhow::Result<bool> {
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+    Ok(wallet
+        .get("authority", "authority-key", &root_key)?
+        .is_some())
+}
+
 /// Each imported key's `.pub.asc` file is used as a recipient.
 ///
 /// Also writes `authority.pub.cbor` and a self-issued `authority.cert.cbor`.
@@ -2945,4 +3279,579 @@ async fn ensure_registered_inprocess(
     );
 
     Ok((label, key))
+}
+
+// ── Gate-key bridge ───────────────────────────────────────────────────────────
+
+fn gate_key_dir() -> std::path::PathBuf {
+    default_store_dir().join("gate-keys")
+}
+
+fn open_gate_key_store() -> anyhow::Result<p43::gate_key::GateKeyStore> {
+    p43::gate_key::GateKeyStore::open(&gate_key_dir())
+}
+
+/// List all gate-key ids present on disk.
+#[frb]
+pub fn gate_key_list() -> anyhow::Result<Vec<String>> {
+    open_gate_key_store()?.list()
+}
+
+/// A gate-key created from a passphrase.
+///
+/// The passphrase is always required for first-time setup.
+/// [master_hex] is the 32-byte level1_key as hex — store it in the OS
+/// secure enclave if biometric unlock is also desired.
+pub struct GateKeyCreated {
+    pub key_id: String,
+    pub master_hex: String,
+}
+
+/// Create a new gate-key sealed with [passphrase].
+///
+/// Returns both the [key_id] (for future revocation) and the [master_hex]
+/// so the caller can optionally store it in the OS secure enclave for
+/// biometric unlock.  The passphrase-sealed file is always written.
+#[frb]
+pub fn gate_key_create(passphrase: String) -> anyhow::Result<GateKeyCreated> {
+    let store = open_gate_key_store()?;
+    let kdf = p43::gate_key::KdfParams::default_params();
+    let key = store.create(&passphrase, kdf, None)?;
+    let master_hex = hex::encode(key.as_bytes());
+    Ok(GateKeyCreated {
+        key_id: key.key_id,
+        master_hex,
+    })
+}
+
+/// Add an additional passphrase lock for an existing master secret.
+///
+/// Call this when the user already unlocked the wallet (via any method)
+/// and wants to add a new passphrase — e.g. adding a backup pin after
+/// biometric setup.
+#[frb]
+pub fn gate_key_seal_passphrase(master_hex: String, passphrase: String) -> anyhow::Result<String> {
+    let master =
+        hex::decode(&master_hex).map_err(|e| anyhow::anyhow!("invalid master_hex: {e}"))?;
+    anyhow::ensure!(
+        master.len() == 32,
+        "master_hex must be 32 bytes (64 hex chars)"
+    );
+    let store = open_gate_key_store()?;
+    let kdf = p43::gate_key::KdfParams::default_params();
+    let key = store.create(&passphrase, kdf, Some(&master_hex))?;
+    Ok(key.key_id)
+}
+
+/// Verify [passphrase] and return the level1_key as a hex string.
+///
+/// The biometric path stores this hex string in the OS secure enclave so
+/// Touch ID can unlock the wallet without re-prompting the passphrase.
+#[frb]
+pub fn gate_key_verify(passphrase: String) -> anyhow::Result<String> {
+    let store = open_gate_key_store()?;
+    let key = store.try_unlock(&passphrase)?;
+    Ok(hex::encode(key.as_bytes()))
+}
+
+/// Change the passphrase for the gate-key that [old_passphrase] unlocks.
+/// Returns the key_id.
+#[frb]
+pub fn gate_key_change_passphrase(
+    old_passphrase: String,
+    new_passphrase: String,
+) -> anyhow::Result<String> {
+    let store = open_gate_key_store()?;
+    let kdf = p43::gate_key::KdfParams::default_params();
+    store.change_passphrase(&old_passphrase, &new_passphrase, kdf)
+}
+
+/// Revoke (delete) a gate-key by [key_id].
+#[frb]
+pub fn gate_key_revoke(key_id: String) -> anyhow::Result<()> {
+    open_gate_key_store()?.revoke(&key_id)
+}
+
+/// Returns true if at least one gate-key is configured.
+#[frb]
+pub fn gate_key_is_configured() -> anyhow::Result<bool> {
+    Ok(!open_gate_key_store()?.list()?.is_empty())
+}
+
+// ── Wallet bridge ─────────────────────────────────────────────────────────────
+
+fn open_wallet() -> anyhow::Result<p43::wallet::Wallet> {
+    p43::wallet::Wallet::open(&default_store_dir())
+}
+
+fn master_key(master_hex: &str) -> anyhow::Result<Vec<u8>> {
+    hex::decode(master_hex).map_err(|e| anyhow::anyhow!("invalid master_hex: {e}"))
+}
+
+/// A wallet credential entry for display.
+pub struct WalletEntry {
+    pub chain_name: String,
+    pub kind: String,
+    pub chain_id: String,
+}
+
+/// List all wallet credentials.  Requires the master secret (from gate-key unlock).
+#[frb]
+pub fn wallet_list_with_ids(master_hex: String) -> anyhow::Result<Vec<WalletEntry>> {
+    let wallet = open_wallet()?;
+    let key = master_key(&master_hex)?;
+    let entries = wallet.list_with_ids(&key)?;
+    Ok(entries
+        .into_iter()
+        .map(|(name, chain_id)| WalletEntry {
+            chain_name: format!("{}-{}", name.fingerprint, name.kind),
+            kind: name.kind,
+            chain_id,
+        })
+        .collect())
+}
+
+/// Add a YubiKey reference to the wallet.
+///
+/// Reads the card fingerprint from the connected card, stores
+/// {label, pin} in the wallet encrypted with [master_hex].
+/// If [card_ident] is None, uses the first connected card.
+#[frb]
+pub fn wallet_add_yubikey_ref(
+    master_hex: String,
+    label: String,
+    pin: String,
+    card_ident: Option<String>,
+) -> anyhow::Result<()> {
+    use p43::sync_store::KeyRef;
+    use p43::wallet::{WalletPayload, YubikeyRef};
+    use serde_bytes::ByteBuf;
+
+    // Select card and get its AID.
+    let cards = p43::pkcs11::card::list_connected_cards()?;
+    anyhow::ensure!(!cards.is_empty(), "no OpenPGP card connected");
+    let card = if let Some(ident) = card_ident {
+        cards
+            .into_iter()
+            .find(|c| c.ident == ident)
+            .ok_or_else(|| anyhow::anyhow!("card not found"))?
+    } else {
+        cards.into_iter().next().unwrap()
+    };
+
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+    let payload = WalletPayload::YubikeyRef(YubikeyRef {
+        version: 1,
+        card_fingerprint: card.ident.clone(),
+        label,
+        pin,
+    });
+    // Use card ident as fingerprint, direct key_ref from gate-key store.
+    let store = open_gate_key_store()?;
+    let ids = store.list()?;
+    anyhow::ensure!(!ids.is_empty(), "no gate-key configured");
+    let id_bytes = hex::decode(ids[0].trim_start_matches("gate-"))?;
+    let key_ref = KeyRef::Direct {
+        gate_key_id: ByteBuf::from(id_bytes),
+    };
+    wallet.put(
+        &card.ident,
+        "yubikey-ref",
+        &payload,
+        &root_key,
+        key_ref,
+        "ui",
+    )
+}
+
+/// Add an SSH private key to the wallet.
+///
+/// [private_key_bytes] is the raw OpenSSH private key file content.
+/// If the key is passphrase-protected, provide [ssh_passphrase].
+/// The key is decrypted before storage — the wallet AES-GCM is the outer protection.
+#[frb]
+pub fn wallet_add_ssh_key(
+    master_hex: String,
+    private_key_bytes: Vec<u8>,
+    ssh_passphrase: Option<String>,
+    comment: Option<String>,
+) -> anyhow::Result<String> {
+    use p43::sync_store::KeyRef;
+    use p43::wallet::{SshKey, WalletPayload};
+    use serde_bytes::ByteBuf;
+
+    let mut sk = ssh_key::PrivateKey::from_openssh(&private_key_bytes)
+        .map_err(|e| anyhow::anyhow!("cannot parse SSH key: {e}"))?;
+
+    if sk.is_encrypted() {
+        let pass = ssh_passphrase.ok_or_else(|| anyhow::anyhow!("key is passphrase-protected"))?;
+        sk = sk
+            .decrypt(pass.as_bytes())
+            .map_err(|e| anyhow::anyhow!("SSH key decryption failed: {e}"))?;
+    }
+
+    let fingerprint = sk.public_key().fingerprint(Default::default()).to_string();
+    let resolved_comment = comment.unwrap_or_else(|| sk.comment().to_owned());
+    let decrypted = sk
+        .to_openssh(ssh_key::LineEnding::LF)
+        .map_err(|e| anyhow::anyhow!("re-encode: {e}"))?;
+
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+    let payload = WalletPayload::SshKey(SshKey {
+        version: 1,
+        private_key: ByteBuf::from(decrypted.as_bytes()),
+        comment: resolved_comment,
+    });
+    let store = open_gate_key_store()?;
+    let ids = store.list()?;
+    anyhow::ensure!(!ids.is_empty(), "no gate-key configured");
+    let id_bytes = hex::decode(ids[0].trim_start_matches("gate-"))?;
+    let key_ref = KeyRef::Direct {
+        gate_key_id: ByteBuf::from(id_bytes),
+    };
+    wallet.put(&fingerprint, "ssh-key", &payload, &root_key, key_ref, "ui")?;
+    Ok(fingerprint)
+}
+
+// ── Wallet credential detail + remove ─────────────────────────────────────────
+
+/// Detail view of a single wallet credential.
+pub struct WalletCredentialDetail {
+    /// `"yubikey-ref"` or `"ssh-key"`.
+    pub kind: String,
+    /// Human-readable label / comment.
+    pub label: String,
+    /// Card AID (yubikey-ref) or `SHA256:…` fingerprint (ssh-key).
+    pub display_id: String,
+    /// Full OpenSSH `authorized_keys` line.
+    pub pubkey_text: Option<String>,
+    /// Armored OpenPGP public key packet (derived from the SSH key bytes).
+    pub pgp_armored: Option<String>,
+}
+
+/// Read the full detail for a single wallet entry identified by its chain name.
+#[frb]
+pub fn wallet_get_credential(
+    master_hex: String,
+    chain_name: String,
+) -> anyhow::Result<WalletCredentialDetail> {
+    use p43::wallet::{ChainName, KeyCredential, KeySlot, WalletPayload};
+
+    let cn = ChainName::from_chain_name(&chain_name)
+        .ok_or_else(|| anyhow::anyhow!("invalid chain name: {chain_name}"))?;
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+
+    let payload = wallet
+        .get(&cn.fingerprint, &cn.kind, &root_key)?
+        .ok_or_else(|| anyhow::anyhow!("wallet entry not found: {chain_name}"))?;
+
+    match payload {
+        WalletPayload::YubikeyRef(r) => {
+            // Try to read the auth-slot public key live from the card.
+            // Gracefully degrade to None when the card is absent.
+            #[cfg(not(any(target_os = "ios", target_os = "android")))]
+            let pubkey_text = r.pubkey_openssh_string(KeySlot::Auth).ok();
+            #[cfg(any(target_os = "ios", target_os = "android"))]
+            let pubkey_text: Option<String> = None;
+
+            Ok(WalletCredentialDetail {
+                kind: "yubikey-ref".into(),
+                label: r.label.clone(),
+                display_id: r.card_fingerprint.clone(),
+                pubkey_text,
+                pgp_armored: None, // card PGP key shown via wallet_get_yubikey_info
+            })
+        }
+        WalletPayload::SshKey(k) => {
+            // pubkey_openssh_string uses the KeyCredential trait — no
+            // duplicate key-parsing logic here.
+            let pubkey_text = k.pubkey_openssh_string(KeySlot::Auth)?;
+            // Derive the SHA-256 fingerprint from the same public key bytes.
+            let raw = k.pubkey_bytes(KeySlot::Auth)?;
+            let pk = ssh_key::PublicKey::from_bytes(&raw)
+                .map_err(|e| anyhow::anyhow!("deserialize pubkey: {e}"))?;
+            let fp = pk.fingerprint(Default::default()).to_string();
+            let comment = if k.comment.is_empty() {
+                pk.comment().to_owned()
+            } else {
+                k.comment.clone()
+            };
+            Ok(WalletCredentialDetail {
+                kind: "ssh-key".into(),
+                label: comment,
+                display_id: fp,
+                pubkey_text: Some(pubkey_text),
+                pgp_armored: None, // SSH keys don't have a native OpenPGP representation
+            })
+        }
+        WalletPayload::PgpKey(k) => {
+            let pubkey_text = p43::pgp_ops::load_secret_cert_from_bytes(&k.key_bytes)
+                .and_then(|key| p43::pgp_ops::pubkey_armored(&key))
+                .ok();
+            Ok(WalletCredentialDetail {
+                kind: "pgp-key".into(),
+                label: k.label.clone(),
+                display_id: k.label.clone(),
+                pubkey_text,
+                pgp_armored: None, // pgp-key detail is handled by wallet_get_pgp_key_info
+            })
+        }
+        WalletPayload::AuthorityKey(a) => {
+            let ed_pub = p43::bus::authority::AuthorityKey::from_scalars(
+                &a.ed25519_scalar,
+                &a.x25519_scalar,
+            )
+            .map(|k| hex::encode(k.authority_pub().ed25519_pub))
+            .unwrap_or_default();
+            Ok(WalletCredentialDetail {
+                kind: "authority-key".into(),
+                label: "Bus authority".into(),
+                display_id: ed_pub,
+                pubkey_text: None,
+                pgp_armored: None,
+            })
+        }
+        WalletPayload::DeviceId(d) => Ok(WalletCredentialDetail {
+            kind: "device-id".into(),
+            label: d.label.clone(),
+            display_id: d.device_id.clone(),
+            pubkey_text: None,
+            pgp_armored: None,
+        }),
+        WalletPayload::CertifiedDeviceId(d) => Ok(WalletCredentialDetail {
+            kind: "certified-device-id".into(),
+            label: d.label.clone(),
+            display_id: d.device_id.clone(),
+            pubkey_text: None,
+            pgp_armored: None,
+        }),
+    }
+}
+
+/// Tombstone a wallet entry by chain name (irreversible on the append-only store).
+#[frb]
+/// Import an armored OpenPGP secret key into the wallet.
+///
+/// The key is stored **unencrypted** — the gate-key AES-GCM is the outer
+/// protection.  If the key on disk is passphrase-protected, supply
+/// `passphrase` to decrypt it before storage (so no passphrase is ever needed
+/// at use time).
+#[frb]
+pub fn wallet_add_pgp_key(
+    master_hex: String,
+    key_armored: String,
+    passphrase: Option<String>,
+    label: Option<String>,
+) -> anyhow::Result<()> {
+    use p43::sync_store::KeyRef;
+    use p43::wallet::{FilePgpKey, WalletPayload};
+    use serde_bytes::ByteBuf;
+
+    // Parse the key and derive the label.
+    let tsk = p43::pgp_ops::load_secret_cert_from_bytes(key_armored.as_bytes())?;
+
+    let resolved_passphrase = passphrase.unwrap_or_default();
+
+    // Verify the passphrase works before storing — a wrong or missing passphrase
+    // would silently persist and only fail at sign/decrypt time otherwise.
+    p43::pgp_ops::verify_passphrase(&tsk, &resolved_passphrase)
+        .map_err(|e| anyhow::anyhow!("{e}\n\nIf the key is encrypted, supply its passphrase."))?;
+
+    let resolved_label = label.unwrap_or_else(|| {
+        tsk.details
+            .users
+            .first()
+            .map(|u| String::from_utf8_lossy(u.id.id()).into_owned())
+            .unwrap_or_else(|| "pgp-key".to_string())
+    });
+
+    let payload = WalletPayload::PgpKey(FilePgpKey {
+        version: 1,
+        key_bytes: ByteBuf::from(key_armored.as_bytes().to_vec()),
+        passphrase: resolved_passphrase,
+        label: resolved_label.clone(),
+    });
+
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+    let store = open_gate_key_store()?;
+    let ids = store.list()?;
+    anyhow::ensure!(!ids.is_empty(), "no gate-key configured");
+    let id_bytes = hex::decode(ids[0].trim_start_matches("gate-"))?;
+    let key_ref = KeyRef::Direct {
+        gate_key_id: ByteBuf::from(id_bytes),
+    };
+
+    // Sanitise label for use as chain fingerprint component.
+    let fp: String = resolved_label
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    wallet.put(&fp, "pgp-key", &payload, &root_key, key_ref, "ui")
+}
+
+/// Full detail for a wallet PGP key — UID, algorithm, subkeys, armored pubkey.
+///
+/// Reuses [`SubkeyInfo`] so the Dart detail sheet can render the same
+/// subkey UI without needing new generated types.
+pub struct WalletPgpKeyInfo {
+    pub uid: String,
+    pub algo: String,
+    pub fingerprint: String,
+    pub subkeys: Vec<SubkeyInfo>,
+    pub pubkey_armored: String,
+}
+
+/// Load PGP key metadata from a wallet `pgp-key` chain for the detail sheet.
+#[frb]
+pub fn wallet_get_pgp_key_info(
+    master_hex: String,
+    chain_name: String,
+) -> anyhow::Result<WalletPgpKeyInfo> {
+    use p43::wallet::{ChainName, WalletPayload};
+
+    let cn = ChainName::from_chain_name(&chain_name)
+        .ok_or_else(|| anyhow::anyhow!("invalid chain name: {chain_name}"))?;
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+
+    let payload = wallet
+        .get(&cn.fingerprint, &cn.kind, &root_key)?
+        .ok_or_else(|| anyhow::anyhow!("wallet entry not found: {chain_name}"))?;
+
+    let key_bytes = match payload {
+        WalletPayload::PgpKey(k) => k.key_bytes.clone(),
+        other => anyhow::bail!("expected pgp-key, got {}", other.kind()),
+    };
+
+    let tsk = p43::pgp_ops::load_secret_cert_from_bytes(&key_bytes)?;
+
+    let uid = tsk
+        .details
+        .users
+        .first()
+        .map(|u| String::from_utf8_lossy(u.id.id()).into_owned())
+        .unwrap_or_default();
+
+    let algo = p43::pgp_ops::key_algo_string(&tsk);
+    let fp = p43::pgp_ops::key_fingerprint_hex(&tsk);
+
+    let subkeys = p43::pgp_ops::extract_subkey_meta(&tsk, &uid)
+        .into_iter()
+        .map(|m| SubkeyInfo {
+            role: m.role,
+            algo: m.algo,
+            openssh_key: m.openssh_key,
+        })
+        .collect();
+
+    let pubkey_armored = p43::pgp_ops::pubkey_armored(&tsk)?;
+    Ok(WalletPgpKeyInfo {
+        uid,
+        algo,
+        fingerprint: fp,
+        subkeys,
+        pubkey_armored,
+    })
+}
+
+/// Read all three card slots for a `yubikey-ref` wallet entry and return them
+/// in the same [`WalletPgpKeyInfo`] shape used by PGP keys.
+///
+/// Each slot becomes a [`SubkeyInfo`] with its SSH public key (where the card
+/// algorithm has an SSH equivalent).  The card must be connected; slots that
+/// cannot be read are silently omitted rather than failing the whole call.
+#[frb]
+pub fn wallet_get_yubikey_info(
+    master_hex: String,
+    chain_name: String,
+) -> anyhow::Result<WalletPgpKeyInfo> {
+    use p43::wallet::{ChainName, WalletPayload};
+
+    let cn = ChainName::from_chain_name(&chain_name)
+        .ok_or_else(|| anyhow::anyhow!("invalid chain name: {chain_name}"))?;
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+
+    let payload = wallet
+        .get(&cn.fingerprint, &cn.kind, &root_key)?
+        .ok_or_else(|| anyhow::anyhow!("wallet entry not found: {chain_name}"))?;
+
+    let r = match payload {
+        WalletPayload::YubikeyRef(r) => r,
+        other => anyhow::bail!("expected yubikey-ref, got {}", other.kind()),
+    };
+
+    // Try to read each slot; skip silently when the card is absent.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let slots = p43::pkcs11::ops::read_card_slot_info(&r.card_fingerprint, &r.label)?;
+
+        if slots.is_empty() {
+            anyhow::bail!(
+                "No key slots found on card {} — is any key loaded?",
+                r.card_fingerprint
+            );
+        }
+
+        // Use the sign slot's PGP-armored public key as the "pubkey_armored"
+        // (single raw packet — not a full cert, but useful for sharing).
+        let sign_armored = slots
+            .iter()
+            .find(|s| s.role == "sign")
+            .and_then(|s| s.pgp_armored.clone())
+            .or_else(|| slots.first().and_then(|s| s.pgp_armored.clone()))
+            .unwrap_or_default();
+
+        let subkeys: Vec<SubkeyInfo> = slots
+            .into_iter()
+            .map(|s| SubkeyInfo {
+                role: s.role,
+                algo: s.algo,
+                openssh_key: s.openssh_key,
+            })
+            .collect();
+
+        let primary_algo = subkeys.first().map(|s| s.algo.clone()).unwrap_or_default();
+        Ok(WalletPgpKeyInfo {
+            uid: r.label.clone(),
+            algo: primary_algo,
+            fingerprint: r.card_fingerprint.clone(),
+            subkeys,
+            pubkey_armored: sign_armored,
+        })
+    }
+
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    anyhow::bail!("YubiKey card access is not available on this platform")
+}
+
+/// Tombstone a wallet entry by chain name (irreversible on the append-only store).
+#[frb]
+pub fn wallet_remove_entry(master_hex: String, chain_name: String) -> anyhow::Result<()> {
+    use p43::sync_store::KeyRef;
+    use p43::wallet::ChainName;
+    use serde_bytes::ByteBuf;
+
+    let cn = ChainName::from_chain_name(&chain_name)
+        .ok_or_else(|| anyhow::anyhow!("invalid chain name: {chain_name}"))?;
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+    let store = open_gate_key_store()?;
+    let ids = store.list()?;
+    anyhow::ensure!(!ids.is_empty(), "no gate-key configured");
+    let id_bytes = hex::decode(ids[0].trim_start_matches("gate-"))?;
+    let key_ref = KeyRef::Direct {
+        gate_key_id: ByteBuf::from(id_bytes),
+    };
+    wallet.delete(&cn.fingerprint, &cn.kind, &root_key, key_ref, "ui")
 }

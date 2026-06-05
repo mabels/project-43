@@ -1,5 +1,6 @@
 mod bus_cmd;
 mod chain_cmd;
+mod device_id_cmd;
 mod gate_key_cmd;
 mod kdbx_cmd;
 mod key_mgmt;
@@ -13,6 +14,7 @@ use anyhow::Result;
 use bus_cmd::subcmd::BusCmd;
 use chain_cmd::subcmd::ChainCmd;
 use clap::{Parser, Subcommand};
+use device_id_cmd::subcmd::DeviceIdCmd;
 use gate_key_cmd::subcmd::GateKeyCmd;
 use kdbx_cmd::subcmd::KdbxCmd;
 use key_mgmt::subcmd::KeyCmd;
@@ -93,6 +95,10 @@ enum Command {
     /// Wallet — manage typed credentials (card PINs, YubiKey refs, SSH keys)
     #[command(subcommand)]
     Wallet(WalletCmd),
+
+    /// Device-ID — manage wallet-gated device identities and certifications
+    #[command(subcommand)]
+    DeviceId(DeviceIdCmd),
 }
 
 fn main() -> Result<()> {
@@ -129,7 +135,10 @@ fn main() -> Result<()> {
         }
         Command::Pgp(cmd) => {
             p43::telemetry::init("")?;
-            pgp::run(cmd, soft_key, cli.passphrase, cli.pin)
+            let passphrase = cli
+                .passphrase
+                .or_else(|| std::env::var("YK_PASSPHRASE").ok());
+            pgp::run(cmd, &store_dir, passphrase)
         }
         Command::SshAgent(args) => {
             let passphrase = cli
@@ -167,6 +176,10 @@ fn main() -> Result<()> {
         Command::Wallet(cmd) => {
             p43::telemetry::init("")?;
             wallet_cmd::run(cmd, &store_dir)
+        }
+        Command::DeviceId(cmd) => {
+            p43::telemetry::init("")?;
+            device_id_cmd::run(cmd, &store_dir)
         }
     }
 }

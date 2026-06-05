@@ -138,4 +138,14 @@ pub struct SshAgentArgs {
     /// Defaults to `p43-ssh-agent.log` next to the key store.
     #[arg(long, value_name = "FILE")]
     pub log_file: Option<String>,
+
+    /// Gate-key passphrase for loading the device identity from the wallet.
+    ///
+    /// When set, the agent loads the certified device identity from the wallet
+    /// instead of from `<bus_dir>/devices/`.  Required for wallet-based bus
+    /// access.  Run `p43 device-id register` first to create the cert.
+    ///
+    /// [env: P43_GATE_PASSPHRASE]
+    #[arg(long, env = "P43_GATE_PASSPHRASE", value_name = "PASSPHRASE")]
+    pub wallet_passphrase: Option<String>,
 }

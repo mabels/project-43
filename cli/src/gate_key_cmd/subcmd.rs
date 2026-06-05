@@ -2,16 +2,15 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum GateKeyCmd {
-    /// Create a new gate-key sealed with a passphrase
+    /// First-time setup: generate the master secret and seal it with a passphrase.
+    ///
+    /// The passphrase is always required for the first seal.  Additional seals
+    /// (more passphrases or biometric) can be added with `add-passphrase` after
+    /// this step.
     Create {
-        /// Passphrase (prompted interactively if omitted) [env: P43_GATE_PASSPHRASE]
+        /// Master passphrase (prompted if omitted) [env: P43_GATE_PASSPHRASE]
         #[arg(short, long, env = "P43_GATE_PASSPHRASE")]
         passphrase: Option<String>,
-
-        /// Re-seal an existing random instead of generating a new one (hex, 64 chars).
-        /// Use `gate-key verify --show-secret` to obtain the value.
-        #[arg(long, value_name = "HEX")]
-        from_secret: Option<String>,
 
         /// Argon2 memory cost in KiB (default: 65536 = 64 MiB)
         #[arg(long, default_value_t = 65536)]
@@ -26,13 +25,39 @@ pub enum GateKeyCmd {
         p_cost: u32,
     },
 
-    /// List all gate-key IDs in the store
+    /// Add a new passphrase seal for the same master secret.
+    ///
+    /// You must prove ownership by supplying a currently-working passphrase
+    /// (--passphrase).  The master secret is then re-sealed with the new
+    /// passphrase, creating an additional entry in the gate-keys directory.
+    AddPassphrase {
+        /// An existing working passphrase (proves ownership) [env: P43_GATE_PASSPHRASE]
+        #[arg(short, long, env = "P43_GATE_PASSPHRASE")]
+        passphrase: Option<String>,
+
+        /// New passphrase for the additional seal (prompted if omitted)
+        #[arg(long)]
+        new_passphrase: Option<String>,
+
+        /// Argon2 memory cost in KiB (default: 65536)
+        #[arg(long, default_value_t = 65536)]
+        m_cost: u32,
+
+        /// Argon2 iterations (default: 3)
+        #[arg(long, default_value_t = 3)]
+        t_cost: u32,
+
+        /// Argon2 parallelism threads (default: 4)
+        #[arg(long, default_value_t = 4)]
+        p_cost: u32,
+    },
+
+    /// List all seal IDs in the store.
     List,
 
-    /// Verify that a passphrase unlocks at least one gate-key.
-    /// Reports every file attempted and whether it succeeded or failed.
+    /// Verify that a passphrase works and optionally print the master secret.
     Verify {
-        /// Passphrase (prompted interactively if omitted) [env: P43_GATE_PASSPHRASE]
+        /// Passphrase (prompted if omitted) [env: P43_GATE_PASSPHRASE]
         #[arg(short, long, env = "P43_GATE_PASSPHRASE")]
         passphrase: Option<String>,
 
@@ -40,7 +65,7 @@ pub enum GateKeyCmd {
         #[arg(long, value_name = "KEY_ID")]
         key_id: Option<String>,
 
-        /// Print the unlocked random as hex so it can be passed to `create --from-secret`
+        /// Print the master secret as hex (for adding a biometric lock externally)
         #[arg(long)]
         show_secret: bool,
 
@@ -49,37 +74,17 @@ pub enum GateKeyCmd {
         format: String,
     },
 
-    /// Change the passphrase for a gate-key
-    ChangePassphrase {
-        /// Current passphrase (prompted if omitted) [env: P43_GATE_PASSPHRASE]
-        #[arg(long, env = "P43_GATE_PASSPHRASE")]
-        passphrase: Option<String>,
-
-        /// New passphrase (prompted if omitted)
-        #[arg(long)]
-        new_passphrase: Option<String>,
-
-        /// Argon2 memory cost in KiB for the new seal (default: 65536)
-        #[arg(long, default_value_t = 65536)]
-        m_cost: u32,
-
-        /// Argon2 iterations for the new seal (default: 3)
-        #[arg(long, default_value_t = 3)]
-        t_cost: u32,
-
-        /// Argon2 parallelism threads for the new seal (default: 4)
-        #[arg(long, default_value_t = 4)]
-        p_cost: u32,
-    },
-
-    /// Revoke (delete) a gate-key by key-id
+    /// Revoke a seal by key-id.
+    ///
+    /// You must prove ownership with a DIFFERENT working passphrase — you cannot
+    /// revoke the only remaining seal (that would lock you out permanently).
     Revoke {
         /// Key ID to revoke (as shown by `gate-key list`)
         #[arg(value_name = "KEY_ID")]
         key_id: String,
 
-        /// Skip confirmation prompt
-        #[arg(long)]
-        yes: bool,
+        /// A currently-working passphrase (must be for a DIFFERENT seal) [env: P43_GATE_PASSPHRASE]
+        #[arg(short, long, env = "P43_GATE_PASSPHRASE")]
+        passphrase: Option<String>,
     },
 }

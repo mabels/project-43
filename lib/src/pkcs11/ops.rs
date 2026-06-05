@@ -64,7 +64,12 @@ fn verify_signed_message(msg: &Message<'_>, signer: &SignedPublicKey) -> Result<
 /// Sign `data` using the card's signing slot; returns an armored detached
 /// signature.
 pub fn sign(data: &[u8], pin: &str) -> Result<String> {
-    let mut card = open_first_card()?;
+    sign_with_ident(data, pin, None)
+}
+
+/// Like [`sign`] but selects a card by AID ident string.
+pub fn sign_with_ident(data: &[u8], pin: &str, ident: Option<&str>) -> Result<String> {
+    let mut card = open_card(ident)?;
     let mut tx = card.transaction().context("Failed to open transaction")?;
     tx.verify_user_signing_pin(pin_to_secret(pin))
         .context("PIN verification failed")?;
@@ -263,4 +268,148 @@ pub fn decrypt_verify(data: &[u8], signer_path: &Path, pin: &str) -> Result<Vec<
     decrypted.read_to_end(&mut out)?;
     verify_signed_message(&decrypted, &cert)?;
     Ok(out)
+}
+
+// ── YubiKey slot info ─────────────────────────────────────────────────────────
+
+/// One slot's public-key metadata — algo string + OpenSSH key + optional PGP armor.
+pub struct CardSlotInfo {
+    pub role: String,
+    pub algo: String,
+    pub openssh_key: Option<String>,
+    /// Armored OpenPGP public key packet for this slot (single raw packet, no cert).
+    pub pgp_armored: Option<String>,
+}
+
+/// Read all three OpenPGP slots from the card identified by `ident` and
+/// return their public-key metadata.  Slots with no key loaded are skipped.
+pub fn read_card_slot_info(ident: &str, label: &str) -> anyhow::Result<Vec<CardSlotInfo>> {
+    let mut card = open_card(Some(ident))
+        .with_context(|| format!("Cannot open card {ident} — is the YubiKey connected?"))?;
+    let mut tx = card.transaction().context("card transaction")?;
+    let no_touch: &(dyn Fn() + Send + Sync) = &|| {};
+
+    let mut slots = Vec::new();
+    for (key_type, role) in &[
+        (KeyType::Authentication, "auth"),
+        (KeyType::Signing, "sign"),
+        (KeyType::Decryption, "encrypt"),
+    ] {
+        let slot = match CardSlot::init_from_card(&mut tx, *key_type, no_touch) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        use pgp::types::KeyDetails as _;
+        let params = slot.public_key().public_params();
+        let algo = crate::ssh_agent::pub_params_algo_string(params);
+        let openssh_key = if *role != "encrypt" {
+            crate::ssh_agent::pub_params_to_openssh_string(params, label)
+        } else {
+            None
+        };
+        // Armor the raw OpenPGP public key packet as "PUBLIC KEY BLOCK".
+        let pgp_armored = {
+            use pgp::armor::{self, BlockType};
+            let mut armored = Vec::new();
+            let ok = armor::write(
+                slot.public_key(),
+                BlockType::PublicKey,
+                &mut armored,
+                None,
+                false,
+            )
+            .is_ok();
+            if ok {
+                String::from_utf8(armored).ok()
+            } else {
+                None
+            }
+        };
+        slots.push(CardSlotInfo {
+            role: role.to_string(),
+            algo,
+            openssh_key,
+            pgp_armored,
+        });
+    }
+    Ok(slots)
+}
+
+// ── bytes-based variants (no filesystem paths) ────────────────────────────────
+
+/// Sign-then-encrypt using a card identified by `ident`, with the recipient's
+/// armored public key given as raw bytes (no file path needed).
+pub fn sign_encrypt_with_recipient_bytes(
+    data: &[u8],
+    recipient_armored: &[u8],
+    pin: &str,
+    ident: Option<&str>,
+) -> Result<String> {
+    let recipient = load_pubkey_from_bytes(recipient_armored)?;
+    let enc_subkey = recipient
+        .public_subkeys
+        .iter()
+        .find(|sk| {
+            sk.signatures
+                .iter()
+                .any(|sig| sig.key_flags().encrypt_comms())
+        })
+        .context("No encryption subkey in recipient cert")?;
+
+    let mut card = open_card(ident)?;
+    let mut tx = card.transaction().context("Failed to open transaction")?;
+    tx.verify_user_signing_pin(pin_to_secret(pin))
+        .context("PIN verification failed")?;
+    let touch = || eprintln!("Touch YubiKey now...");
+    let slot = CardSlot::init_from_card(&mut tx, KeyType::Signing, &touch)
+        .context("Failed to init signing slot")?;
+
+    let mut builder = MessageBuilder::from_bytes("", data.to_vec())
+        .seipd_v1(thread_rng(), SymmetricKeyAlgorithm::AES256);
+    builder
+        .encrypt_to_key(thread_rng(), enc_subkey)
+        .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
+    builder.sign(
+        &slot as &dyn SigningKey,
+        Password::empty(),
+        HashAlgorithm::Sha256,
+    );
+    builder
+        .to_armored_string(thread_rng(), ArmorOptions::default())
+        .map_err(|e| anyhow::anyhow!("Failed to build message: {e}"))
+}
+
+/// Decrypt-then-verify using a card, with the signer's armored public key
+/// given as raw bytes.
+pub fn decrypt_verify_with_signer_bytes(
+    data: &[u8],
+    signer_armored: &[u8],
+    pin: &str,
+    ident: Option<&str>,
+) -> Result<Vec<u8>> {
+    let cert = load_pubkey_from_bytes(signer_armored)?;
+    let (msg, _) = Message::from_armor(BufReader::new(Cursor::new(data)))
+        .context("Failed to parse armored message")?;
+
+    let mut card = open_card(ident)?;
+    let mut tx = card.transaction().context("Failed to open transaction")?;
+    tx.verify_user_pin(pin_to_secret(pin))
+        .context("PIN verification failed")?;
+    let touch = || eprintln!("Touch YubiKey now...");
+    let slot = CardSlot::init_from_card(&mut tx, KeyType::Decryption, &touch)
+        .context("Failed to init decryption slot")?;
+    let mut decrypted = slot
+        .decrypt_message(msg)
+        .map_err(|e| anyhow::anyhow!("Card decrypt failed: {e}"))?;
+
+    let mut out = Vec::new();
+    decrypted.read_to_end(&mut out)?;
+    verify_signed_message(&decrypted, &cert)?;
+    Ok(out)
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn load_pubkey_from_bytes(bytes: &[u8]) -> Result<SignedPublicKey> {
+    crate::pgp_ops::load_pubkey_from_bytes(bytes)
 }

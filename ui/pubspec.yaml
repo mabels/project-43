@@ -37,7 +37,7 @@ dependencies:
   flutter_rust_bridge: 2.12.0
   freezed_annotation: ^3.1.0
   path: ^1.9.0
-  path_provider: ^2.1.5
+  path_provider: ^2.1.6
   rust_lib_p43:
     path: rust_builder
   flutter_local_notifications: ^21.0.0

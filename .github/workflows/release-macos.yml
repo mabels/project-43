@@ -51,7 +51,7 @@ jobs:
 
     steps:
       # ── source ────────────────────────────────────────────────────────────
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # ── sccache ────────────────────────────────────────────────────────────
       # On self-hosted runners sccache is pre-installed via brew.

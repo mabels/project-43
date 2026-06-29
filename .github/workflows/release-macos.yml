@@ -113,7 +113,7 @@ jobs:
 
       # ── caches ─────────────────────────────────────────────────────────────
       - name: Cache cargo registry & build artefacts
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -123,7 +123,7 @@ jobs:
           restore-keys: macos-cargo-
 
       - name: Cache Flutter pub cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.pub-cache
           key: macos-pub-${{ hashFiles('ui/pubspec.lock') }}

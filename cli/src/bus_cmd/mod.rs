@@ -143,6 +143,7 @@ fn cmd_init(bus_dir: &Path, recipient: &Path, force: bool) -> Result<()> {
         ecdh_pubkey: authority_pub.x25519_pub.clone(),
         nonce: vec![0u8; 16],
         timestamp: p43::bus::unix_now()?,
+        meta: std::collections::HashMap::new(),
     };
     let authority_cert = DeviceCert::issue(&authority_csr_payload, &authority_key, None)?;
     authority_cert.save(&cert_path)?;

@@ -1,5 +1,7 @@
 //! SSH agent: public key listing, signing (soft + card), cached key operations.
 
+pub mod meta;
+
 use anyhow::{bail, Context, Result};
 use pgp::composed::{SignedPublicKey, SignedSecretKey};
 use pgp::types::{KeyDetails as _, PublicParams, SignatureBytes, SigningKey as _};

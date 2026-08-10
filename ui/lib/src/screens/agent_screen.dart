@@ -16,6 +16,7 @@ class AgentScreen extends StatefulWidget {
     this.agentStream,
     this.onRoomChanged,
     this.walletMasterHex,
+    this.onWalletUnlock,
   });
 
   /// Called when an `ssh.sign_request` arrives so the shell can switch to
@@ -34,6 +35,10 @@ class AgentScreen extends StatefulWidget {
   /// Wallet master secret (non-null = unlocked).  When set, list-keys and
   /// sign requests are satisfied from the wallet without any dialogs.
   final String? walletMasterHex;
+
+  /// Triggers the wallet unlock flow from within the widget tree.
+  /// Called when a sign request arrives and the wallet is locked.
+  final Future<String?> Function()? onWalletUnlock;
 
   @override
   State<AgentScreen> createState() => _AgentScreenState();
@@ -139,14 +144,12 @@ class _AgentScreenState extends State<AgentScreen> {
     final fp = event.fingerprint;
 
     widget.onSignRequest?.call();
+    WindowService.instance.bringToFront();
 
     final SshKeyDetails? details = fp.isNotEmpty
         ? await getSshKeyDetails(fingerprint: fp)
         : null;
     if (!mounted) return;
-
-    final bool autoApprove =
-        SettingsService.instance.settings.autoApproveWhenCached;
 
     // Notification.
     {
@@ -160,7 +163,23 @@ class _AgentScreenState extends State<AgentScreen> {
       final srcPart = srcLabel.isNotEmpty
           ? srcLabel
           : (srcId.isNotEmpty ? srcId : null);
-      final body = srcPart != null ? '$keyPart · from $srcPart' : keyPart;
+
+      // Build meta suffix: hostname + first IP from the live snapshot.
+      final metaMap = Map<String, String>.from(event.meta);
+      final hostname = metaMap['hostname'] ?? '';
+      final ip =
+          metaMap.entries
+              .where((e) => e.key.startsWith('net.') && e.key.endsWith('.ip'))
+              .map((e) => e.value)
+              .firstOrNull ??
+          '';
+      final metaSuffix = [hostname, ip].where((s) => s.isNotEmpty).join(' · ');
+
+      final fromPart = [
+        srcPart,
+        if (metaSuffix.isNotEmpty) metaSuffix,
+      ].nonNulls.join(' @ ');
+      final body = fromPart.isNotEmpty ? '$keyPart · $fromPart' : keyPart;
       NotificationService.instance.show(
         title: 'Sign request',
         body: body,
@@ -171,6 +190,22 @@ class _AgentScreenState extends State<AgentScreen> {
       );
     }
 
+    // Load the cert's registration-time meta for comparison.
+    final certMeta = event.deviceId.isNotEmpty
+        ? await busGetPeerMeta(deviceId: event.deviceId)
+        : <String, String>{};
+
+    // Decide whether to auto-process this request immediately:
+    //
+    //   • wallet unlocked (masterHex in hand) → auto-sign silently right now.
+    //   • wallet locked → show as "pending" and wait for the user to tap
+    //     Approve, which calls _processSignRequest from a Flutter gesture
+    //     context.  Dialogs and local_auth on macOS require a gesture-initiated
+    //     call stack; triggering them from a background stream listener callback
+    //     causes the dialog to be suppressed silently.
+    final walletUnlocked = widget.walletMasterHex != null;
+    final autoApprove = SettingsService.instance.settings.autoApproveWhenCached;
+
     final entry = RequestEntry(
       type: 'ssh.sign_request',
       requestId: event.requestId,
@@ -179,19 +214,24 @@ class _AgentScreenState extends State<AgentScreen> {
       keyName: details?.name,
       keyAlgo: details?.algo,
       cardIdents: details?.cardIdents ?? const [],
-      // autoApprove → show as "responding" immediately; manual → "pending"
-      // so the Approve button appears.
-      status:
-          autoApprove ? RequestStatus.responding : RequestStatus.pending,
+      // Responding = we will auto-sign right now.
+      // Pending    = user must tap Approve (unlocks + signs).
+      status: (walletUnlocked && autoApprove)
+          ? RequestStatus.responding
+          : RequestStatus.pending,
       sourceLabel: event.deviceLabel,
       sourceDeviceId: event.deviceId,
+      meta: Map<String, String>.from(event.meta),
+      certMeta: Map<String, String>.from(certMeta),
     );
     setState(() => _log.insert(0, entry));
 
-    if (autoApprove) {
+    // Only auto-process when the wallet is already open AND auto-approve is on.
+    // All other cases keep the request pending — the Approve button triggers
+    // _processSignRequest from a user-gesture call stack.
+    if (walletUnlocked && autoApprove) {
       await _processSignRequest(entry);
     }
-    // autoApprove=false: stays pending, user taps the Approve button.
   }
 
   /// Process a sign request — called from the auto-approve path or user tap.
@@ -226,7 +266,9 @@ class _AgentScreenState extends State<AgentScreen> {
         try {
           await mxRejectSign(roomId: roomId, requestId: entry.requestId);
         } catch (rejectErr) {
-          debugPrint('[p43::agent] reject error ${entry.requestId}: $rejectErr');
+          debugPrint(
+            '[p43::agent] reject error ${entry.requestId}: $rejectErr',
+          );
         }
         _updateStatus(entry.requestId, RequestStatus.error);
       }
@@ -275,9 +317,15 @@ class _AgentScreenState extends State<AgentScreen> {
     final requestId = entry.requestId;
 
     // ── 0. Wallet path (preferred) ────────────────────────────────────────
-    // The wallet holds the PIN (YubiKey) or plaintext private key (SSH).
-    // No dialog, no biometric prompt — just unlock the wallet and sign.
-    final masterHex = widget.walletMasterHex;
+    // If wallet is locked, trigger unlock from within the widget context
+    // (required for biometric to work on macOS — needs key window context).
+    String? masterHex = widget.walletMasterHex;
+    if (masterHex == null && widget.onWalletUnlock != null) {
+      // Re-bring window to front — the notification shown earlier may have
+      // stolen macOS focus between the start of _handleSignEvent and here.
+      WindowService.instance.bringToFront();
+      masterHex = await widget.onWalletUnlock!();
+    }
     if (masterHex != null) {
       try {
         debugPrint('[p43::agent] path=wallet  $requestId');
@@ -305,10 +353,7 @@ class _AgentScreenState extends State<AgentScreen> {
         if (await hasCachedCardPin(cardIdent: id)) {
           debugPrint('[p43::agent] path=rust-cache  $requestId');
           _updateStatus(requestId, RequestStatus.responding);
-          await mxRespondSignCardCached(
-            roomId: roomId,
-            requestId: requestId,
-          );
+          await mxRespondSignCardCached(roomId: roomId, requestId: requestId);
           return; // credential stays hot for waiters
         }
       }
@@ -346,7 +391,9 @@ class _AgentScreenState extends State<AgentScreen> {
         }
         return; // Rust also caches the credential for waiters
       }
-      debugPrint('[p43::agent] biometric cancelled/failed  $requestId  → dialog');
+      debugPrint(
+        '[p43::agent] biometric cancelled/failed  $requestId  → dialog',
+      );
       // Biometric cancelled / failed — fall through to dialog.
     }
 
@@ -565,6 +612,14 @@ class _AgentScreenState extends State<AgentScreen> {
                   ],
                 ),
               ),
+              if (entry.meta.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                MetaSection(
+                  meta: entry.meta,
+                  certMeta: entry.certMeta.isNotEmpty ? entry.certMeta : null,
+                ),
+                const SizedBox(height: 4),
+              ],
               TextField(
                 controller: ctrl,
                 obscureText: obscure,
@@ -776,6 +831,13 @@ class _AgentScreenState extends State<AgentScreen> {
                       ),
                     ),
                   ],
+                ),
+                const SizedBox(height: 10),
+              ],
+              if (entry.meta.isNotEmpty) ...[
+                MetaSection(
+                  meta: entry.meta,
+                  certMeta: entry.certMeta.isNotEmpty ? entry.certMeta : null,
                 ),
                 const SizedBox(height: 10),
               ],

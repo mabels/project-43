@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use coset::{iana, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable};
 use ed25519_dalek::{Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::{
@@ -38,6 +39,10 @@ pub struct CertPayload {
     pub iat: i64,
     /// Expiry unix timestamp; `None` = never expires.
     pub exp: Option<i64>,
+    /// Device snapshot copied from the CSR at issuance time.
+    /// Older certs that lack this field deserialise with an empty map.
+    #[serde(default)]
+    pub meta: HashMap<String, String>,
 }
 
 // ── DeviceCert ────────────────────────────────────────────────────────────────
@@ -72,6 +77,7 @@ impl DeviceCert {
             issuer_fp: authority.fingerprint().to_vec(),
             iat,
             exp,
+            meta: csr.meta.clone(),
         };
 
         let payload_cbor = cbor_encode(&payload)?;

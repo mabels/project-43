@@ -17,6 +17,8 @@ class RequestEntry {
     this.errorMessage,
     this.sourceLabel = '',
     this.sourceDeviceId = '',
+    this.meta = const {},
+    this.certMeta = const {},
     DateTime? timestamp,
   }) : timestamp = timestamp ?? DateTime.now();
 
@@ -36,8 +38,27 @@ class RequestEntry {
   /// Stable device identifier from the sender's bus certificate.
   final String sourceDeviceId;
 
+  /// Live device snapshot collected at request time on the agent side.
+  final Map<String, String> meta;
+
+  /// Registration-time snapshot from the device's cert (empty for uncertified devices).
+  final Map<String, String> certMeta;
+
   /// Wall-clock time when this entry was created.
   final DateTime timestamp;
+
+  /// Convenience: hostname from meta, or empty string.
+  String get hostname => meta['hostname'] ?? '';
+
+  /// Convenience: first IP address found in meta, or empty string.
+  String get primaryIp {
+    for (final entry in meta.entries) {
+      if (entry.key.startsWith('net.') && entry.key.endsWith('.ip')) {
+        return entry.value;
+      }
+    }
+    return '';
+  }
 
   RequestEntry copyWith({
     RequestStatus? status,
@@ -59,6 +80,8 @@ class RequestEntry {
     errorMessage: errorMessage ?? this.errorMessage,
     sourceLabel: sourceLabel ?? this.sourceLabel,
     sourceDeviceId: sourceDeviceId ?? this.sourceDeviceId,
-    timestamp: timestamp, // preserve original arrival time
+    meta: meta,
+    certMeta: certMeta,
+    timestamp: timestamp,
   );
 }

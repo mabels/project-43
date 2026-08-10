@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:p43/src/rust/api/simple.dart' as rust;
 import 'settings/authority_section.dart';
+import 'agent/agent_widgets.dart' show MetaSection;
 import '../services/notification_service.dart';
 import '../services/settings_service.dart';
 import '../services/window_service.dart';
@@ -56,9 +57,6 @@ class DevicesScreen extends StatefulWidget {
   /// Wallet master secret — non-null means the wallet (and therefore the
   /// authority session) is unlocked.
   final String? walletMasterHex;
-
-  /// Called when the screen needs the wallet unlocked.
-  /// Returns the master hex on success, null if the user cancelled.
   final Future<String?> Function()? onWalletUnlock;
 
   @override
@@ -257,21 +255,26 @@ class _DevicesScreenState extends State<DevicesScreen>
         ? event.deviceLabel
         : event.deviceId;
 
-    // ── Wallet locked: trigger the same unlock flow as the AppBar lock icon ────
+    // If wallet is locked, trigger unlock from widget context (biometric works there).
     String? masterHex = widget.walletMasterHex;
     if (masterHex == null) {
-      if (!mounted) { _approvalInFlight = false; return; }
+      if (!mounted) {
+        _approvalInFlight = false;
+        return;
+      }
+      WindowService.instance.bringToFront();
       masterHex = await widget.onWalletUnlock?.call();
       if (masterHex == null) {
-        // User cancelled unlock — drop the request.
         _approvalInFlight = false;
         _drainQueue();
         return;
       }
     }
 
-    // ── Approve / reject ──────────────────────────────────────────────────────
-    if (!mounted) { _approvalInFlight = false; return; }
+    if (!mounted) {
+      _approvalInFlight = false;
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
@@ -284,14 +287,19 @@ class _DevicesScreenState extends State<DevicesScreen>
           children: [
             Row(
               children: [
-                const Icon(Icons.computer_outlined,
-                    size: 18, color: Color(0xFF0A84FF)),
+                const Icon(
+                  Icons.computer_outlined,
+                  size: 18,
+                  color: Color(0xFF0A84FF),
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     deviceLabel,
                     style: const TextStyle(
-                        fontSize: 15, fontWeight: FontWeight.w600),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ],
@@ -300,11 +308,16 @@ class _DevicesScreenState extends State<DevicesScreen>
             Text(
               event.deviceId,
               style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 11,
-                  color: Color(0xFF8E8E93)),
+                fontFamily: 'monospace',
+                fontSize: 11,
+                color: Color(0xFF8E8E93),
+              ),
             ),
             const SizedBox(height: 12),
+            if (event.meta.isNotEmpty) ...[
+              MetaSection(meta: Map<String, String>.from(event.meta)),
+              const SizedBox(height: 8),
+            ],
             const Text(
               'The authority session is active — no passphrase needed.',
               style: TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
@@ -335,9 +348,9 @@ class _DevicesScreenState extends State<DevicesScreen>
         if (mounted) _loadPeers();
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Approval failed: $e')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Approval failed: $e')));
         }
       }
     }
@@ -538,6 +551,19 @@ class _PeerTile extends StatelessWidget {
   final rust.BusPeer peer;
   final VoidCallback onRemove;
 
+  /// Hostname + first routable IP from the registration-time snapshot.
+  String get _metaSummary {
+    final meta = Map<String, String>.from(peer.meta);
+    final hostname = meta['hostname'] ?? '';
+    final ip =
+        meta.entries
+            .where((e) => e.key.startsWith('net.') && e.key.endsWith('.ip'))
+            .map((e) => e.value)
+            .firstOrNull ??
+        '';
+    return [hostname, ip].where((s) => s.isNotEmpty).join(' · ');
+  }
+
   String _formatDate(PlatformInt64 ts) {
     final dt = DateTime.fromMillisecondsSinceEpoch(
       ts * 1000,
@@ -550,43 +576,83 @@ class _PeerTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final expiry = peer.expiresAt;
-    return ListTile(
-      tileColor: const Color(0xFF2C2C2E),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      leading: const Icon(
-        Icons.verified_user_outlined,
-        size: 20,
-        color: Color(0xFF30D158),
-      ),
-      title: Text(
-        peer.label.isNotEmpty ? peer.label : peer.deviceId,
-        style: const TextStyle(fontSize: 15),
-      ),
-      subtitle: Column(
+    final metaMap = Map<String, String>.from(peer.meta);
+    return Container(
+      color: const Color(0xFF2C2C2E),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            peer.deviceId,
-            style: const TextStyle(
-              fontSize: 10,
-              fontFamily: 'monospace',
-              color: Color(0xFF8E8E93),
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 4,
+            ),
+            leading: const Icon(
+              Icons.verified_user_outlined,
+              size: 20,
+              color: Color(0xFF30D158),
+            ),
+            title: Text(
+              peer.label.isNotEmpty ? peer.label : peer.deviceId,
+              style: const TextStyle(fontSize: 15),
+            ),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  peer.deviceId,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontFamily: 'monospace',
+                    color: Color(0xFF8E8E93),
+                  ),
+                ),
+                if (_metaSummary.isNotEmpty)
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.computer_outlined,
+                        size: 10,
+                        color: Color(0xFF8E8E93),
+                      ),
+                      const SizedBox(width: 3),
+                      Expanded(
+                        child: Text(
+                          _metaSummary,
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: Color(0xFF8E8E93),
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                Text(
+                  'Issued ${_formatDate(peer.issuedAt)}'
+                  '${expiry != null ? ' · Expires ${_formatDate(expiry)}' : ' · No expiry'}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF8E8E93),
+                  ),
+                ),
+              ],
+            ),
+            trailing: TextButton(
+              onPressed: onRemove,
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFFFF453A),
+                visualDensity: VisualDensity.compact,
+              ),
+              child: const Text('Remove', style: TextStyle(fontSize: 13)),
             ),
           ),
-          Text(
-            'Issued ${_formatDate(peer.issuedAt)}'
-            '${expiry != null ? ' · Expires ${_formatDate(expiry)}' : ' · No expiry'}',
-            style: const TextStyle(fontSize: 11, color: Color(0xFF8E8E93)),
-          ),
+          if (metaMap.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: MetaSection(meta: metaMap),
+            ),
         ],
-      ),
-      trailing: TextButton(
-        onPressed: onRemove,
-        style: TextButton.styleFrom(
-          foregroundColor: const Color(0xFFFF453A),
-          visualDensity: VisualDensity.compact,
-        ),
-        child: const Text('Remove', style: TextStyle(fontSize: 13)),
       ),
     );
   }

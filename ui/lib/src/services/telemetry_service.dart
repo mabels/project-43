@@ -38,7 +38,7 @@ class TelemetryService {
 
   static final TelemetryService instance = TelemetryService._();
 
-  otel.Tracer? _tracer;     // null in local/noop mode
+  otel.Tracer? _tracer; // null in local/noop mode
   bool _otlpActive = false; // true only when a real exporter is running
   bool _initialised = false;
 
@@ -64,15 +64,13 @@ class TelemetryService {
     }
 
     // OTLP mode: export spans to the cluster collector.
-    final exporter = otel_sdk.CollectorExporter(
-      Uri.parse('$ep/v1/traces'),
-    );
+    final exporter = otel_sdk.CollectorExporter(Uri.parse('$ep/v1/traces'));
 
     final provider = otel_sdk.TracerProviderBase(
       processors: [otel_sdk.BatchSpanProcessor(exporter)],
-      resource: otel_sdk.Resource(
-        [otel.Attribute.fromString('service.name', 'p43-ui')],
-      ),
+      resource: otel_sdk.Resource([
+        otel.Attribute.fromString('service.name', 'p43-ui'),
+      ]),
     );
 
     otel.registerGlobalTracerProvider(provider);
@@ -119,8 +117,7 @@ class TelemetryService {
 
     // Only inject the traceparent when the span context is real — noop spans
     // have an invalid context (all-zero IDs) that would confuse the Rust side.
-    final bool shouldPropagate =
-        _otlpActive && span.spanContext.isValid;
+    final bool shouldPropagate = _otlpActive && span.spanContext.isValid;
 
     final token = otel.Context.attach(ctx);
     try {
@@ -148,6 +145,5 @@ class TelemetryService {
   otel.Span? startSpan(
     String name, {
     List<otel.Attribute> attributes = const [],
-  }) =>
-      _tracer?.startSpan(name, attributes: attributes);
+  }) => _tracer?.startSpan(name, attributes: attributes);
 }

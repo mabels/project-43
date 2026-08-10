@@ -47,7 +47,10 @@ class _GateKeySetupScreenState extends State<GateKeySetupScreen> {
       return;
     }
 
-    setState(() { _busy = true; _error = null; });
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
 
     try {
       final result = await _svc.create(passphrase: pass);
@@ -58,7 +61,11 @@ class _GateKeySetupScreenState extends State<GateKeySetupScreen> {
 
       widget.onSetupComplete();
     } catch (e) {
-      if (mounted) setState(() { _busy = false; _error = e.toString(); });
+      if (mounted)
+        setState(() {
+          _busy = false;
+          _error = e.toString();
+        });
     }
   }
 
@@ -81,7 +88,11 @@ class _GateKeySetupScreenState extends State<GateKeySetupScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Icon(Icons.lock_outline, size: 56, color: Color(0xFF0A84FF)),
+                const Icon(
+                  Icons.lock_outline,
+                  size: 56,
+                  color: Color(0xFF0A84FF),
+                ),
                 const SizedBox(height: 24),
                 const Text(
                   'Secure your wallet',
@@ -131,10 +142,14 @@ class _GateKeySetupScreenState extends State<GateKeySetupScreen> {
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    title: const Text('Also enable Touch ID / Face ID',
-                        style: TextStyle(fontSize: 14)),
-                    subtitle: const Text('Unlock without typing the passphrase',
-                        style: TextStyle(fontSize: 12, color: Color(0xFF8E8E93))),
+                    title: const Text(
+                      'Also enable Touch ID / Face ID',
+                      style: TextStyle(fontSize: 14),
+                    ),
+                    subtitle: const Text(
+                      'Unlock without typing the passphrase',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
+                    ),
                     value: _addBio,
                     onChanged: (v) => setState(() => _addBio = v),
                   ),
@@ -143,9 +158,13 @@ class _GateKeySetupScreenState extends State<GateKeySetupScreen> {
                 // Error
                 if (_error != null) ...[
                   const SizedBox(height: 12),
-                  Text(_error!,
-                      style: const TextStyle(
-                          color: Color(0xFFFF453A), fontSize: 13)),
+                  Text(
+                    _error!,
+                    style: const TextStyle(
+                      color: Color(0xFFFF453A),
+                      fontSize: 13,
+                    ),
+                  ),
                 ],
 
                 const SizedBox(height: 24),
@@ -158,7 +177,9 @@ class _GateKeySetupScreenState extends State<GateKeySetupScreen> {
                           height: 18,
                           width: 18,
                           child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white),
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
                         )
                       : const Text('Set up wallet'),
                 ),

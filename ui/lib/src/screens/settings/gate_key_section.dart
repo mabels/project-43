@@ -78,7 +78,9 @@ class _GateKeySectionState extends State<GateKeySection> {
   // ── Add passphrase ─────────────────────────────────────────────────────────
 
   Future<void> _addPassphrase() async {
-    final existing = await _promptPassphrase('Existing passphrase (proves ownership)');
+    final existing = await _promptPassphrase(
+      'Existing passphrase (proves ownership)',
+    );
     if (existing == null || !mounted) return;
 
     String masterHex;
@@ -93,7 +95,10 @@ class _GateKeySectionState extends State<GateKeySection> {
     if (newPass == null || newPass.isEmpty || !mounted) return;
 
     try {
-      await _svc.addPassphraseSeal(masterHex: masterHex, newPassphrase: newPass);
+      await _svc.addPassphraseSeal(
+        masterHex: masterHex,
+        newPassphrase: newPass,
+      );
       await _load();
       if (mounted) _snack('Passphrase seal added');
     } catch (e) {
@@ -124,7 +129,9 @@ class _GateKeySectionState extends State<GateKeySection> {
       _snack('Cannot revoke — only one seal remains', error: true);
       return;
     }
-    final proof = await _promptPassphrase('Passphrase for a DIFFERENT seal (ownership proof)');
+    final proof = await _promptPassphrase(
+      'Passphrase for a DIFFERENT seal (ownership proof)',
+    );
     if (proof == null || !mounted) return;
 
     try {
@@ -158,8 +165,14 @@ class _GateKeySectionState extends State<GateKeySection> {
           decoration: const InputDecoration(hintText: 'Passphrase'),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(ctx, ctrl.text), child: const Text('OK')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            child: const Text('OK'),
+          ),
         ],
       ),
     );
@@ -171,11 +184,19 @@ class _GateKeySectionState extends State<GateKeySection> {
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF2C2C2E),
         title: Text(title, style: const TextStyle(fontSize: 15)),
-        content: Text(subtitle,
-            style: const TextStyle(fontSize: 13, color: Color(0xFF8E8E93))),
+        content: Text(
+          subtitle,
+          style: const TextStyle(fontSize: 13, color: Color(0xFF8E8E93)),
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('No')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Yes')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('No'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Yes'),
+          ),
         ],
       ),
     );
@@ -183,10 +204,12 @@ class _GateKeySectionState extends State<GateKeySection> {
   }
 
   void _snack(String msg, {bool error = false}) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg),
-      backgroundColor: error ? const Color(0xFFFF453A) : null,
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: error ? const Color(0xFFFF453A) : null,
+      ),
+    );
   }
 
   // ── Build ──────────────────────────────────────────────────────────────────
@@ -199,10 +222,16 @@ class _GateKeySectionState extends State<GateKeySection> {
       return ListTile(
         tileColor: const Color(0xFF2C2C2E),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        leading: const Icon(Icons.lock_open, size: 20, color: Color(0xFFFF9F0A)),
+        leading: const Icon(
+          Icons.lock_open,
+          size: 20,
+          color: Color(0xFFFF9F0A),
+        ),
         title: const Text('Wallet security', style: TextStyle(fontSize: 15)),
-        subtitle: const Text('Not configured',
-            style: TextStyle(fontSize: 12, color: Color(0xFFFF9F0A))),
+        subtitle: const Text(
+          'Not configured',
+          style: TextStyle(fontSize: 12, color: Color(0xFFFF9F0A)),
+        ),
         trailing: TextButton(onPressed: _create, child: const Text('Set up')),
       );
     }
@@ -219,23 +248,36 @@ class _GateKeySectionState extends State<GateKeySection> {
       collapsedBackgroundColor: const Color(0xFF2C2C2E),
       leading: const Icon(Icons.lock, size: 20, color: Color(0xFF30D158)),
       title: const Text('Wallet security', style: TextStyle(fontSize: 15)),
-      subtitle: Text(subtitle,
-          style: const TextStyle(fontSize: 12, color: Color(0xFF30D158))),
+      subtitle: Text(
+        subtitle,
+        style: const TextStyle(fontSize: 12, color: Color(0xFF30D158)),
+      ),
       children: [
         // Passphrase seals
         for (final id in _seals)
           ListTile(
             dense: true,
             tileColor: const Color(0xFF1C1C1E),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 0),
-            leading: const Icon(Icons.vpn_key_outlined, size: 16,
-                color: Color(0xFF8E8E93)),
-            title: Text(id,
-                style: const TextStyle(fontSize: 13, fontFamily: 'monospace')),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 24,
+              vertical: 0,
+            ),
+            leading: const Icon(
+              Icons.vpn_key_outlined,
+              size: 16,
+              color: Color(0xFF8E8E93),
+            ),
+            title: Text(
+              id,
+              style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
+            ),
             trailing: _seals.length > 1 || _hasBio
                 ? IconButton(
-                    icon: const Icon(Icons.delete_outline, size: 16,
-                        color: Color(0xFFFF453A)),
+                    icon: const Icon(
+                      Icons.delete_outline,
+                      size: 16,
+                      color: Color(0xFFFF453A),
+                    ),
                     onPressed: () => _revoke(id),
                   )
                 : null,
@@ -245,13 +287,25 @@ class _GateKeySectionState extends State<GateKeySection> {
           ListTile(
             dense: true,
             tileColor: const Color(0xFF1C1C1E),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 0),
-            leading: const Icon(Icons.fingerprint, size: 16, color: Color(0xFF8E8E93)),
-            title: const Text('Touch ID / Face ID',
-                style: TextStyle(fontSize: 13)),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 24,
+              vertical: 0,
+            ),
+            leading: const Icon(
+              Icons.fingerprint,
+              size: 16,
+              color: Color(0xFF8E8E93),
+            ),
+            title: const Text(
+              'Touch ID / Face ID',
+              style: TextStyle(fontSize: 13),
+            ),
             trailing: IconButton(
-              icon: const Icon(Icons.delete_outline, size: 16,
-                  color: Color(0xFFFF453A)),
+              icon: const Icon(
+                Icons.delete_outline,
+                size: 16,
+                color: Color(0xFFFF453A),
+              ),
               onPressed: _removeBiometric,
             ),
           ),
@@ -264,13 +318,19 @@ class _GateKeySectionState extends State<GateKeySection> {
               OutlinedButton.icon(
                 onPressed: _addPassphrase,
                 icon: const Icon(Icons.add, size: 14),
-                label: const Text('Add passphrase', style: TextStyle(fontSize: 12)),
+                label: const Text(
+                  'Add passphrase',
+                  style: TextStyle(fontSize: 12),
+                ),
               ),
               if (_bioAvailable && !_hasBio)
                 OutlinedButton.icon(
                   onPressed: _addBiometric,
                   icon: const Icon(Icons.fingerprint, size: 14),
-                  label: const Text('Add Touch ID', style: TextStyle(fontSize: 12)),
+                  label: const Text(
+                    'Add Touch ID',
+                    style: TextStyle(fontSize: 12),
+                  ),
                 ),
             ],
           ),

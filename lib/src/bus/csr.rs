@@ -12,6 +12,7 @@ use coset::{iana, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable};
 use ed25519_dalek::{Verifier, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::device_key::DeviceKey;
@@ -19,6 +20,10 @@ use super::device_key::DeviceKey;
 // ── Payload ───────────────────────────────────────────────────────────────────
 
 /// CBOR payload embedded inside the CSR's COSE_Sign1.
+///
+/// Signed by the device's own Ed25519 key — the authority verifies this
+/// before issuing a [`DeviceCert`].  Fields are CBOR-encoded and form a
+/// permanent record of the device at registration time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsrPayload {
     pub version: u8,
@@ -35,6 +40,14 @@ pub struct CsrPayload {
     pub nonce: Vec<u8>,
     /// Unix timestamp (seconds).
     pub timestamp: i64,
+    /// Live device snapshot at registration time, signed into the CSR.
+    ///
+    /// Flat key-value store — same schema as `SshSignRequest.meta`.
+    /// Standard keys: `hostname`, `net.<iface>.ip`, `net.<iface>.mac`,
+    /// `disk.total_gb`, `disk.free_gb`.  Receivers must ignore unknown keys.
+    /// Older CSRs that lack this field deserialise with an empty map.
+    #[serde(default)]
+    pub meta: HashMap<String, String>,
 }
 
 // ── DeviceCsr ─────────────────────────────────────────────────────────────────
@@ -46,17 +59,17 @@ pub struct DeviceCsr {
 }
 
 impl DeviceCsr {
-    /// Create and self-sign a CSR for `key`, using the key's own label.
+    /// Create and self-sign a CSR for `key`, collecting live device meta.
     pub fn generate(key: &DeviceKey) -> Result<Self> {
-        Self::generate_with_label(key, None)
+        Self::generate_with_meta(key, None, crate::ssh_agent::meta::collect())
     }
 
-    /// Create and self-sign a CSR for `key`.
-    ///
-    /// `label_override` replaces the device key's label in the CSR payload.
-    /// Use this when the same key should appear under a different name to the
-    /// authority (e.g. `"laptop-ssh-agent"` vs `"laptop-ui"`).
-    pub fn generate_with_label(key: &DeviceKey, label_override: Option<&str>) -> Result<Self> {
+    /// Create and self-sign a CSR with an explicit label and meta snapshot.
+    pub fn generate_with_meta(
+        key: &DeviceKey,
+        label_override: Option<&str>,
+        meta: HashMap<String, String>,
+    ) -> Result<Self> {
         let mut nonce = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
 
@@ -67,6 +80,7 @@ impl DeviceCsr {
             ecdh_pubkey: key.ecdh_pubkey().to_vec(),
             nonce: nonce.to_vec(),
             timestamp: unix_now()?,
+            meta,
         };
 
         let payload_cbor = cbor_encode(&payload)?;

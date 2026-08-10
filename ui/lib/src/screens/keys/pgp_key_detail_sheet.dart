@@ -18,6 +18,7 @@ class PgpKeyDetailSheet extends StatefulWidget {
 
   final String walletMasterHex;
   final String chainName;
+
   /// `"pgp-key"` or `"yubikey-ref"`.
   final String kind;
   final VoidCallback onRemoved;
@@ -52,7 +53,8 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
       if (!mounted) return;
       // Pre-select the first auth/sign subkey.
       final authIdx = info.subkeys.indexWhere(
-          (s) => s.role.contains('auth') || s.role.contains('sign'));
+        (s) => s.role.contains('auth') || s.role.contains('sign'),
+      );
       setState(() {
         _info = info;
         _selectedSubkey = authIdx >= 0 ? authIdx : 0;
@@ -82,7 +84,8 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: TextButton.styleFrom(
-                foregroundColor: const Color(0xFFFF453A)),
+              foregroundColor: const Color(0xFFFF453A),
+            ),
             child: const Text('Remove'),
           ),
         ],
@@ -98,7 +101,11 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
       widget.onRemoved();
       if (mounted) Navigator.pop(context);
     } catch (e) {
-      if (mounted) setState(() { _removing = false; _error = e.toString(); });
+      if (mounted)
+        setState(() {
+          _removing = false;
+          _error = e.toString();
+        });
     }
   }
 
@@ -116,7 +123,8 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 10),
             child: Container(
-              width: 36, height: 4,
+              width: 36,
+              height: 4,
               decoration: BoxDecoration(
                 color: cs.onSurface.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(2),
@@ -133,7 +141,9 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
                   child: Text(
                     _info?.uid ?? '…',
                     style: const TextStyle(
-                        fontSize: 15, fontWeight: FontWeight.w600),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -141,8 +151,9 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
                   Text(
                     _info!.algo,
                     style: TextStyle(
-                        fontSize: 12,
-                        color: cs.onSurface.withValues(alpha: 0.5)),
+                      fontSize: 12,
+                      color: cs.onSurface.withValues(alpha: 0.5),
+                    ),
                   ),
                   const SizedBox(width: 4),
                   // Export button
@@ -154,8 +165,9 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
                       isScrollControlled: true,
                       backgroundColor: const Color(0xFF1C1C1E),
                       shape: const RoundedRectangleBorder(
-                        borderRadius:
-                            BorderRadius.vertical(top: Radius.circular(16)),
+                        borderRadius: BorderRadius.vertical(
+                          top: Radius.circular(16),
+                        ),
                       ),
                       builder: (_) => WalletKeyExportSheet(
                         uid: _info!.uid,
@@ -171,13 +183,16 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
                     ? const Padding(
                         padding: EdgeInsets.all(12),
                         child: SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2)),
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
                       )
                     : IconButton(
-                        icon: const Icon(Icons.delete_outline,
-                            color: Color(0xFFFF453A)),
+                        icon: const Icon(
+                          Icons.delete_outline,
+                          color: Color(0xFFFF453A),
+                        ),
                         tooltip: 'Remove from wallet',
                         onPressed: _confirmRemove,
                       ),
@@ -192,81 +207,83 @@ class _PgpKeyDetailSheetState extends State<PgpKeyDetailSheet> {
                 ? Center(
                     child: Padding(
                       padding: const EdgeInsets.all(24),
-                      child: Text(_error!,
-                          style:
-                              const TextStyle(color: Color(0xFFFF453A))),
+                      child: Text(
+                        _error!,
+                        style: const TextStyle(color: Color(0xFFFF453A)),
+                      ),
                     ),
                   )
                 : _info == null
-                    ? const Center(child: CircularProgressIndicator())
-                    : ListView(
-                        controller: ctrl,
-                        padding: const EdgeInsets.all(16),
-                        children: [
-                          // ── subkeys ───────────────────────────────────────
-                          if (_info!.subkeys.isNotEmpty) ...[
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: Text(
-                                'SUBKEYS',
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                    color:
-                                        cs.onSurface.withValues(alpha: 0.5),
-                                    letterSpacing: 0.5),
-                              ),
+                ? const Center(child: CircularProgressIndicator())
+                : ListView(
+                    controller: ctrl,
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      // ── subkeys ───────────────────────────────────────
+                      if (_info!.subkeys.isNotEmpty) ...[
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Text(
+                            'SUBKEYS',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: cs.onSurface.withValues(alpha: 0.5),
+                              letterSpacing: 0.5,
                             ),
-                            Container(
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1C1C1E),
-                                borderRadius: BorderRadius.circular(10),
-                                border:
-                                    Border.all(color: const Color(0xFF3A3A3C)),
-                              ),
-                              child: Column(
-                                children: [
-                                  for (var i = 0;
-                                      i < _info!.subkeys.length;
-                                      i++) ...[
-                                    if (i > 0)
-                                      const Divider(
-                                          height: 1,
-                                          indent: 12,
-                                          endIndent: 12),
-                                    _SubkeyRow(
-                                      subkey: _info!.subkeys[i],
-                                      selected: i == _selectedSubkey,
-                                      onTap: () =>
-                                          setState(() => _selectedSubkey = i),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 20),
-                          ],
+                          ),
+                        ),
+                        Container(
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1C1C1E),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFF3A3A3C)),
+                          ),
+                          child: Column(
+                            children: [
+                              for (
+                                var i = 0;
+                                i < _info!.subkeys.length;
+                                i++
+                              ) ...[
+                                if (i > 0)
+                                  const Divider(
+                                    height: 1,
+                                    indent: 12,
+                                    endIndent: 12,
+                                  ),
+                                _SubkeyRow(
+                                  subkey: _info!.subkeys[i],
+                                  selected: i == _selectedSubkey,
+                                  onTap: () =>
+                                      setState(() => _selectedSubkey = i),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                      ],
 
-                          // ── OpenSSH key for selected subkey ───────────────
-                          if (_info!.subkeys.isNotEmpty &&
-                              _info!.subkeys[_selectedSubkey].opensshKey !=
-                                  null) ...[
-                            _CopyableBlock(
-                              label: 'OpenSSH (authorized_keys)',
-                              value: _info!
-                                  .subkeys[_selectedSubkey].opensshKey!,
-                            ),
-                            const SizedBox(height: 16),
-                          ],
+                      // ── OpenSSH key for selected subkey ───────────────
+                      if (_info!.subkeys.isNotEmpty &&
+                          _info!.subkeys[_selectedSubkey].opensshKey !=
+                              null) ...[
+                        _CopyableBlock(
+                          label: 'OpenSSH (authorized_keys)',
+                          value: _info!.subkeys[_selectedSubkey].opensshKey!,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
 
-                          // ── Armored public key (hidden for YubiKey) ───────
-                          if (_info!.pubkeyArmored.isNotEmpty)
-                            _CopyableBlock(
-                              label: 'OpenPGP Public Key',
-                              value: _info!.pubkeyArmored,
-                            ),
-                        ],
-                      ),
+                      // ── Armored public key (hidden for YubiKey) ───────
+                      if (_info!.pubkeyArmored.isNotEmpty)
+                        _CopyableBlock(
+                          label: 'OpenPGP Public Key',
+                          value: _info!.pubkeyArmored,
+                        ),
+                    ],
+                  ),
           ),
         ],
       ),
@@ -280,8 +297,11 @@ class _SubkeyRow extends StatelessWidget {
   final rust.SubkeyInfo subkey;
   final bool selected;
   final VoidCallback onTap;
-  const _SubkeyRow(
-      {required this.subkey, required this.selected, required this.onTap});
+  const _SubkeyRow({
+    required this.subkey,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -295,14 +315,13 @@ class _SubkeyRow extends StatelessWidget {
             // role badges
             Wrap(
               spacing: 4,
-              children: roles
-                  .map((r) => _RoleBadge(role: r))
-                  .toList(),
+              children: roles.map((r) => _RoleBadge(role: r)).toList(),
             ),
             const Spacer(),
-            Text(subkey.algo,
-                style: const TextStyle(
-                    fontSize: 12, color: Color(0xFF8E8E93))),
+            Text(
+              subkey.algo,
+              style: const TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
+            ),
             if (subkey.opensshKey != null) ...[
               const SizedBox(width: 6),
               Icon(
@@ -338,10 +357,13 @@ class _RoleBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-          color: bg, borderRadius: BorderRadius.circular(4)),
-      child: Text(role,
-          style: TextStyle(
-              fontSize: 10, fontWeight: FontWeight.w700, color: fg)),
+        color: bg,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        role,
+        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: fg),
+      ),
     );
   }
 }
@@ -361,11 +383,14 @@ class _CopyableBlock extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label,
-                style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: Color(0xFF8E8E93))),
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: Color(0xFF8E8E93),
+              ),
+            ),
             IconButton(
               iconSize: 18,
               padding: EdgeInsets.zero,
@@ -376,8 +401,9 @@ class _CopyableBlock extends StatelessWidget {
                 Clipboard.setData(ClipboardData(text: value));
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                      content: Text('Copied'),
-                      duration: Duration(seconds: 2)),
+                    content: Text('Copied'),
+                    duration: Duration(seconds: 2),
+                  ),
                 );
               },
             ),
@@ -395,10 +421,11 @@ class _CopyableBlock extends StatelessWidget {
           child: SelectableText(
             value,
             style: const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 11,
-                color: Color(0xFFD1D1D6),
-                height: 1.5),
+              fontFamily: 'monospace',
+              fontSize: 11,
+              color: Color(0xFFD1D1D6),
+              height: 1.5,
+            ),
           ),
         ),
       ],

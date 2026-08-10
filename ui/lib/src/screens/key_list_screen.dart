@@ -134,8 +134,7 @@ class _CredentialsTabWrapper extends StatefulWidget {
   });
 
   @override
-  State<_CredentialsTabWrapper> createState() =>
-      _CredentialsTabWrapperState();
+  State<_CredentialsTabWrapper> createState() => _CredentialsTabWrapperState();
 }
 
 class _CredentialsTabWrapperState extends State<_CredentialsTabWrapper> {

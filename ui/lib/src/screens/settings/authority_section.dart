@@ -53,16 +53,27 @@ class _AuthorityStatusTileState extends State<AuthorityStatusTile> {
 
   Future<void> _init() async {
     final master = widget.walletMasterHex;
-    setState(() { _busy = true; _error = null; });
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
     try {
       if (master != null) {
         await rust.walletInitAuthority(masterHex: master);
       } else {
         await rust.busInitAuthority();
       }
-      if (mounted) setState(() { _hasAuthority = true; _busy = false; });
+      if (mounted)
+        setState(() {
+          _hasAuthority = true;
+          _busy = false;
+        });
     } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _busy = false; });
+      if (mounted)
+        setState(() {
+          _error = e.toString();
+          _busy = false;
+        });
     }
   }
 
@@ -79,13 +90,13 @@ class _AuthorityStatusTileState extends State<AuthorityStatusTile> {
         content: Text(
           walletBased
               ? 'A new Ed25519 + X25519 authority keypair will be generated '
-                'and sealed inside the wallet.\n\n'
-                'Any device that already trusts the old authority will need '
-                'to be re-registered.'
+                    'and sealed inside the wallet.\n\n'
+                    'Any device that already trusts the old authority will need '
+                    'to be re-registered.'
               : 'A new Ed25519 + X25519 authority keypair will be generated '
-                'and encrypted to all currently imported keys.\n\n'
-                'Any device that already trusts the old authority will need '
-                'to be re-registered.',
+                    'and encrypted to all currently imported keys.\n\n'
+                    'Any device that already trusts the old authority will need '
+                    'to be re-registered.',
           style: const TextStyle(fontSize: 13),
         ),
         actions: [
@@ -96,7 +107,8 @@ class _AuthorityStatusTileState extends State<AuthorityStatusTile> {
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF0A84FF)),
+              backgroundColor: const Color(0xFF0A84FF),
+            ),
             child: const Text('Initialise'),
           ),
         ],
@@ -1147,6 +1159,7 @@ class _AuthorityExportDialog extends StatelessWidget {
     final savePath = await FilePicker.saveFile(
       dialogTitle: 'Save authority key bundle',
       fileName: 'p43-authority.bundle',
+      bytes: Uint8List.fromList(rawBytes),
     );
     if (savePath == null) return;
     final file = File(savePath);
@@ -1389,20 +1402,13 @@ class _AuthorityImportDialogState extends State<_AuthorityImportDialog> {
   // ── File picker ─────────────────────────────────────────────────────────
 
   Future<void> _pickFile() async {
-    final result = await FilePicker.pickFiles(
+    final picked = await FilePicker.pickFile(
       type: FileType.any,
       dialogTitle: 'Open authority key bundle',
-      withData: true,
     );
-    if (result == null || result.files.isEmpty) return;
-    final picked = result.files.first;
-    final bytes =
-        picked.bytes ??
-        (picked.path != null ? await File(picked.path!).readAsBytes() : null);
-    if (bytes == null) {
-      setState(() => _error = 'Could not read file.');
-      return;
-    }
+    if (picked == null) return;
+    final bytes = await picked.readAsBytes();
+
     setState(() {
       _fileName = picked.name;
       _fileBytes = bytes;

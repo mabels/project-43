@@ -24,9 +24,7 @@ class WindowService {
   Future<void> init() async {
     if (!_isDesktop) return;
     await windowManager.ensureInitialized();
-    const options = WindowOptions(
-      titleBarStyle: TitleBarStyle.normal,
-    );
+    const options = WindowOptions(titleBarStyle: TitleBarStyle.normal);
     await windowManager.waitUntilReadyToShow(options);
   }
 

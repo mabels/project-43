@@ -86,40 +86,33 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
       initialDir = home;
     }
 
-    FilePickerResult? result;
+    PlatformFile? file;
     try {
-      result = await FilePicker.pickFiles(
+      file = await FilePicker.pickFile(
         type: FileType.any,
         initialDirectory: initialDir,
         dialogTitle: _type == KeyImportType.ssh
             ? 'Select SSH private key'
             : 'Select OpenPGP private key (.asc)',
-        withData: false,
       );
     } catch (e) {
       setState(() => _importError = 'File picker error: $e');
       return;
     }
 
-    if (result == null || result.files.isEmpty) return;
-    final file = result.files.first;
+    if (file == null) return;
+    final picked = file;
 
     Uint8List? bytes;
     try {
-      bytes = file.bytes ??
-          (file.path != null ? await File(file.path!).readAsBytes() : null);
+      bytes = await picked.readAsBytes();
     } catch (e) {
       setState(() => _importError = 'Could not read file: $e');
       return;
     }
 
-    if (bytes == null) {
-      setState(() => _importError = 'Could not read file contents.');
-      return;
-    }
-
     setState(() {
-      _filePath = file.path ?? file.name;
+      _filePath = picked.path ?? picked.name;
       _fileBytes = bytes;
       _importError = null;
     });
@@ -144,7 +137,10 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
       bytes = _fileBytes!;
     }
 
-    setState(() { _importing = true; _importError = null; });
+    setState(() {
+      _importing = true;
+      _importError = null;
+    });
 
     try {
       if (_type == KeyImportType.ssh) {
@@ -152,14 +148,18 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
           masterHex: widget.walletMasterHex,
           privateKeyBytes: bytes,
           sshPassphrase: _sshPassCtrl.text.isEmpty ? null : _sshPassCtrl.text,
-          comment: _commentCtrl.text.trim().isEmpty ? null : _commentCtrl.text.trim(),
+          comment: _commentCtrl.text.trim().isEmpty
+              ? null
+              : _commentCtrl.text.trim(),
         );
       } else {
         await rust.walletAddPgpKey(
           masterHex: widget.walletMasterHex,
           keyArmored: String.fromCharCodes(bytes),
           passphrase: _pgpPassCtrl.text.isEmpty ? null : _pgpPassCtrl.text,
-          label: _pgpLabelCtrl.text.trim().isEmpty ? null : _pgpLabelCtrl.text.trim(),
+          label: _pgpLabelCtrl.text.trim().isEmpty
+              ? null
+              : _pgpLabelCtrl.text.trim(),
         );
       }
       if (!mounted) return;
@@ -167,7 +167,10 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
       widget.onImported();
     } catch (e) {
       if (!mounted) return;
-      setState(() { _importError = e.toString(); _importing = false; });
+      setState(() {
+        _importError = e.toString();
+        _importing = false;
+      });
     }
   }
 
@@ -186,7 +189,8 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 10),
             child: Container(
-              width: 36, height: 4,
+              width: 36,
+              height: 4,
               decoration: BoxDecoration(
                 color: const Color(0xFF8E8E93),
                 borderRadius: BorderRadius.circular(2),
@@ -200,12 +204,15 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
               children: [
                 const Icon(Icons.download_outlined, size: 20),
                 const SizedBox(width: 8),
-                const Text('Import private key',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                const Text(
+                  'Import private key',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
                 const Spacer(),
                 if (_importing)
                   const SizedBox(
-                    width: 16, height: 16,
+                    width: 16,
+                    height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   ),
               ],
@@ -217,7 +224,6 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
               controller: ctrl,
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
               children: [
-
                 // ── Type toggle ─────────────────────────────────────────────
                 Row(
                   children: [
@@ -227,8 +233,10 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                       selected: _type == KeyImportType.ssh,
                       onTap: () => setState(() {
                         _type = KeyImportType.ssh;
-                        _fileBytes = null; _filePath = null;
-                        _pasteCtrl.clear(); _importError = null;
+                        _fileBytes = null;
+                        _filePath = null;
+                        _pasteCtrl.clear();
+                        _importError = null;
                       }),
                     ),
                     const SizedBox(width: 8),
@@ -238,8 +246,10 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                       selected: _type == KeyImportType.openpgp,
                       onTap: () => setState(() {
                         _type = KeyImportType.openpgp;
-                        _fileBytes = null; _filePath = null;
-                        _pasteCtrl.clear(); _importError = null;
+                        _fileBytes = null;
+                        _filePath = null;
+                        _pasteCtrl.clear();
+                        _importError = null;
                       }),
                     ),
                   ],
@@ -254,7 +264,8 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                       icon: Icons.folder_open,
                       selected: _sourceMode == KeySourceMode.file,
                       onTap: () => setState(() {
-                        _sourceMode = KeySourceMode.file; _importError = null;
+                        _sourceMode = KeySourceMode.file;
+                        _importError = null;
                       }),
                     ),
                     const SizedBox(width: 8),
@@ -263,7 +274,8 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                       icon: Icons.content_paste,
                       selected: _sourceMode == KeySourceMode.paste,
                       onTap: () => setState(() {
-                        _sourceMode = KeySourceMode.paste; _importError = null;
+                        _sourceMode = KeySourceMode.paste;
+                        _importError = null;
                       }),
                     ),
                   ],
@@ -276,7 +288,9 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                     onTap: _pickFile,
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 12),
+                        horizontal: 12,
+                        vertical: 12,
+                      ),
                       decoration: BoxDecoration(
                         color: const Color(0xFF2C2C2E),
                         borderRadius: BorderRadius.circular(10),
@@ -303,8 +317,8 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                               _filePath != null
                                   ? _filePath!.split('/').last
                                   : _type == KeyImportType.ssh
-                                      ? 'Browse ~/.ssh/ …'
-                                      : 'Browse for .asc file …',
+                                  ? 'Browse ~/.ssh/ …'
+                                  : 'Browse for .asc file …',
                               style: TextStyle(
                                 fontSize: 13,
                                 color: _filePath != null
@@ -314,9 +328,13 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          const Text('Browse',
-                              style: TextStyle(
-                                  fontSize: 12, color: Color(0xFF0A84FF))),
+                          const Text(
+                            'Browse',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF0A84FF),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -327,9 +345,10 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                       child: Text(
                         _filePath!,
                         style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 10,
-                            color: Color(0xFF8E8E93)),
+                          fontFamily: 'monospace',
+                          fontSize: 10,
+                          color: Color(0xFF8E8E93),
+                        ),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -341,40 +360,53 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                     controller: _pasteCtrl,
                     maxLines: 8,
                     style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 11,
-                        color: Color(0xFFE5E5EA),
-                        height: 1.5),
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                      color: Color(0xFFE5E5EA),
+                      height: 1.5,
+                    ),
                     decoration: InputDecoration(
                       hintText: _type == KeyImportType.ssh
                           ? '-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----'
                           : '-----BEGIN PGP PRIVATE KEY BLOCK-----\n…\n-----END PGP PRIVATE KEY BLOCK-----',
                       hintStyle: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 11,
-                          color: Color(0xFF48484A),
-                          height: 1.5),
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        color: Color(0xFF48484A),
+                        height: 1.5,
+                      ),
                       filled: true,
                       fillColor: const Color(0xFF1C1C1E),
                       border: OutlineInputBorder(
-                          borderSide: BorderSide(
-                              color: _pasteHasText
-                                  ? const Color(0xFF30D158)
-                                  : const Color(0xFF3A3A3C))),
+                        borderSide: BorderSide(
+                          color: _pasteHasText
+                              ? const Color(0xFF30D158)
+                              : const Color(0xFF3A3A3C),
+                        ),
+                      ),
                       enabledBorder: OutlineInputBorder(
-                          borderSide: BorderSide(
-                              color: _pasteHasText
-                                  ? const Color(0xFF30D158)
-                                  : const Color(0xFF3A3A3C))),
+                        borderSide: BorderSide(
+                          color: _pasteHasText
+                              ? const Color(0xFF30D158)
+                              : const Color(0xFF3A3A3C),
+                        ),
+                      ),
                       focusedBorder: const OutlineInputBorder(
-                          borderSide: BorderSide(
-                              color: Color(0xFF0A84FF), width: 1.5)),
+                        borderSide: BorderSide(
+                          color: Color(0xFF0A84FF),
+                          width: 1.5,
+                        ),
+                      ),
                       contentPadding: const EdgeInsets.all(12),
                       suffixIcon: _pasteHasText
                           ? IconButton(
-                              icon: const Icon(Icons.clear,
-                                  size: 16, color: Color(0xFF8E8E93)),
-                              onPressed: () => _pasteCtrl.clear())
+                              icon: const Icon(
+                                Icons.clear,
+                                size: 16,
+                                color: Color(0xFF8E8E93),
+                              ),
+                              onPressed: () => _pasteCtrl.clear(),
+                            )
                           : null,
                     ),
                   ),
@@ -437,9 +469,13 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                 // ── Error ───────────────────────────────────────────────────
                 if (_importError != null) ...[
                   const SizedBox(height: 12),
-                  Text(_importError!,
-                      style: const TextStyle(
-                          fontSize: 12, color: Color(0xFFFF453A))),
+                  Text(
+                    _importError!,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFFFF453A),
+                    ),
+                  ),
                 ],
                 const SizedBox(height: 20),
 
@@ -453,13 +489,19 @@ class _KeyImportSheetState extends State<KeyImportSheet> {
                   ),
                   icon: _importing
                       ? const SizedBox(
-                          width: 16, height: 16,
+                          width: 16,
+                          height: 16,
                           child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
                       : const Icon(Icons.download, size: 18),
-                  label: Text(_type == KeyImportType.ssh
-                      ? 'Import SSH key'
-                      : 'Import OpenPGP key'),
+                  label: Text(
+                    _type == KeyImportType.ssh
+                        ? 'Import SSH key'
+                        : 'Import OpenPGP key',
+                  ),
                 ),
               ],
             ),
@@ -478,16 +520,17 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 6),
-        child: Text(
-          label.toUpperCase(),
-          style: const TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF8E8E93),
-              letterSpacing: 0.5),
-        ),
-      );
+    padding: const EdgeInsets.only(bottom: 6),
+    child: Text(
+      label.toUpperCase(),
+      style: const TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        color: Color(0xFF8E8E93),
+        letterSpacing: 0.5,
+      ),
+    ),
+  );
 }
 
 class _TextField extends StatelessWidget {
@@ -497,18 +540,17 @@ class _TextField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => TextField(
-        controller: controller,
-        style: const TextStyle(fontSize: 14),
-        decoration: InputDecoration(
-          hintText: hint,
-          hintStyle: const TextStyle(color: Color(0xFF8E8E93)),
-          filled: true,
-          fillColor: const Color(0xFF2C2C2E),
-          border: const OutlineInputBorder(borderSide: BorderSide.none),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        ),
-      );
+    controller: controller,
+    style: const TextStyle(fontSize: 14),
+    decoration: InputDecoration(
+      hintText: hint,
+      hintStyle: const TextStyle(color: Color(0xFF8E8E93)),
+      filled: true,
+      fillColor: const Color(0xFF2C2C2E),
+      border: const OutlineInputBorder(borderSide: BorderSide.none),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    ),
+  );
 }
 
 class _PasswordField extends StatelessWidget {
@@ -516,32 +558,35 @@ class _PasswordField extends StatelessWidget {
   final String hint;
   final bool visible;
   final VoidCallback onToggle;
-  const _PasswordField(
-      {required this.controller,
-      required this.hint,
-      required this.visible,
-      required this.onToggle});
+  const _PasswordField({
+    required this.controller,
+    required this.hint,
+    required this.visible,
+    required this.onToggle,
+  });
 
   @override
   Widget build(BuildContext context) => TextField(
-        controller: controller,
-        obscureText: !visible,
-        style: const TextStyle(fontSize: 14),
-        decoration: InputDecoration(
-          hintText: hint,
-          hintStyle: const TextStyle(color: Color(0xFF8E8E93)),
-          filled: true,
-          fillColor: const Color(0xFF2C2C2E),
-          border: const OutlineInputBorder(borderSide: BorderSide.none),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          suffixIcon: IconButton(
-            icon: Icon(visible ? Icons.visibility_off : Icons.visibility,
-                size: 18, color: const Color(0xFF8E8E93)),
-            onPressed: onToggle,
-          ),
+    controller: controller,
+    obscureText: !visible,
+    style: const TextStyle(fontSize: 14),
+    decoration: InputDecoration(
+      hintText: hint,
+      hintStyle: const TextStyle(color: Color(0xFF8E8E93)),
+      filled: true,
+      fillColor: const Color(0xFF2C2C2E),
+      border: const OutlineInputBorder(borderSide: BorderSide.none),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      suffixIcon: IconButton(
+        icon: Icon(
+          visible ? Icons.visibility_off : Icons.visibility,
+          size: 18,
+          color: const Color(0xFF8E8E93),
         ),
-      );
+        onPressed: onToggle,
+      ),
+    ),
+  );
 }
 
 class _KeyTypeButton extends StatelessWidget {
@@ -549,55 +594,56 @@ class _KeyTypeButton extends StatelessWidget {
   final IconData icon;
   final bool selected;
   final VoidCallback onTap;
-  const _KeyTypeButton(
-      {required this.label,
-      required this.icon,
-      required this.selected,
-      required this.onTap});
+  const _KeyTypeButton({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) => Expanded(
-        child: GestureDetector(
-          onTap: onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: selected
-                  ? const Color(0xFF0A84FF).withValues(alpha: 0.15)
-                  : const Color(0xFF2C2C2E),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: selected
-                    ? const Color(0xFF0A84FF)
-                    : const Color(0xFF3A3A3C),
-                width: selected ? 1.5 : 1,
-              ),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon,
-                    size: 16,
-                    color: selected
-                        ? const Color(0xFF0A84FF)
-                        : const Color(0xFF8E8E93)),
-                const SizedBox(width: 6),
-                Text(label,
-                    style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: selected
-                            ? FontWeight.w600
-                            : FontWeight.normal,
-                        color: selected
-                            ? const Color(0xFF0A84FF)
-                            : const Color(0xFF8E8E93))),
-              ],
-            ),
+    child: GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected
+              ? const Color(0xFF0A84FF).withValues(alpha: 0.15)
+              : const Color(0xFF2C2C2E),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: selected ? const Color(0xFF0A84FF) : const Color(0xFF3A3A3C),
+            width: selected ? 1.5 : 1,
           ),
         ),
-      );
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: selected
+                  ? const Color(0xFF0A84FF)
+                  : const Color(0xFF8E8E93),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                color: selected
+                    ? const Color(0xFF0A84FF)
+                    : const Color(0xFF8E8E93),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _KeySourceToggle extends StatelessWidget {
@@ -605,50 +651,47 @@ class _KeySourceToggle extends StatelessWidget {
   final IconData icon;
   final bool selected;
   final VoidCallback onTap;
-  const _KeySourceToggle(
-      {required this.label,
-      required this.icon,
-      required this.selected,
-      required this.onTap});
+  const _KeySourceToggle({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-          decoration: BoxDecoration(
-            color: selected
-                ? const Color(0xFF2C2C2E)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      decoration: BoxDecoration(
+        color: selected ? const Color(0xFF2C2C2E) : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: selected ? const Color(0xFF0A84FF) : const Color(0xFF3A3A3C),
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 14,
+            color: selected ? const Color(0xFF0A84FF) : const Color(0xFF8E8E93),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
               color: selected
                   ? const Color(0xFF0A84FF)
-                  : const Color(0xFF3A3A3C),
-              width: selected ? 1.5 : 1,
+                  : const Color(0xFF8E8E93),
             ),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon,
-                  size: 14,
-                  color: selected
-                      ? const Color(0xFF0A84FF)
-                      : const Color(0xFF8E8E93)),
-              const SizedBox(width: 5),
-              Text(label,
-                  style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: selected
-                          ? FontWeight.w600
-                          : FontWeight.normal,
-                      color: selected
-                          ? const Color(0xFF0A84FF)
-                          : const Color(0xFF8E8E93))),
-            ],
-          ),
-        ),
-      );
+        ],
+      ),
+    ),
+  );
 }

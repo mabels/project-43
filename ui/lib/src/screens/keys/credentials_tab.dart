@@ -39,7 +39,10 @@ class _CredentialsTabState extends State<CredentialsTab> {
 
   Future<void> _load() async {
     if (widget.walletMasterHex == null) return;
-    setState(() { _loading = true; _error = null; });
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
       // Use the wallet list (full with ids) via bridge
       final result = await rust.walletListWithIds(
@@ -52,7 +55,11 @@ class _CredentialsTabState extends State<CredentialsTab> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _loading = false; });
+      if (mounted)
+        setState(() {
+          _error = e.toString();
+          _loading = false;
+        });
     }
   }
 
@@ -65,8 +72,10 @@ class _CredentialsTabState extends State<CredentialsTab> {
           children: [
             const Icon(Icons.lock_outline, size: 48, color: Color(0xFF8E8E93)),
             const SizedBox(height: 12),
-            const Text('Wallet locked',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+            const Text(
+              'Wallet locked',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+            ),
             const SizedBox(height: 6),
             const Text(
               'Tap the lock icon to unlock.',
@@ -80,7 +89,8 @@ class _CredentialsTabState extends State<CredentialsTab> {
     if (_loading) return const Center(child: CircularProgressIndicator());
 
     if (_error != null) {
-      final isDecryptError = _error!.contains('decryption failed') ||
+      final isDecryptError =
+          _error!.contains('decryption failed') ||
           _error!.contains('wrong key') ||
           _error!.contains('corrupted');
       return Center(
@@ -89,25 +99,29 @@ class _CredentialsTabState extends State<CredentialsTab> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline,
-                  size: 48, color: Color(0xFFFF453A)),
+              const Icon(
+                Icons.error_outline,
+                size: 48,
+                color: Color(0xFFFF453A),
+              ),
               const SizedBox(height: 12),
               Text(
                 isDecryptError
                     ? 'Stale data detected'
                     : 'Failed to load credentials',
                 style: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w500),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
               const SizedBox(height: 8),
               Text(
                 isDecryptError
                     ? 'Some stored entries were encrypted with an old key.\n'
-                        'Delete the sync-store data and re-add your credentials.'
+                          'Delete the sync-store data and re-add your credentials.'
                     : _error!,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                    fontSize: 13, color: Color(0xFF8E8E93)),
+                style: const TextStyle(fontSize: 13, color: Color(0xFF8E8E93)),
               ),
             ],
           ),
@@ -121,12 +135,12 @@ class _CredentialsTabState extends State<CredentialsTab> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.lock_open_outlined,
-                size: 48, color: Color(0xFF48484A)),
+            Icon(Icons.lock_open_outlined, size: 48, color: Color(0xFF48484A)),
             SizedBox(height: 12),
-            Text('No credentials yet.',
-                style: TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.w500)),
+            Text(
+              'No credentials yet.',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+            ),
             SizedBox(height: 6),
             Text(
               'Use the card or key buttons above to add.',
@@ -158,11 +172,9 @@ class _CredentialsTabState extends State<CredentialsTab> {
               isScrollControlled: true,
               backgroundColor: const Color(0xFF2C2C2E),
               shape: const RoundedRectangleBorder(
-                borderRadius:
-                    BorderRadius.vertical(top: Radius.circular(16)),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
               ),
-              builder: (_) =>
-                  (kind == 'pgp-key' || kind == 'yubikey-ref')
+              builder: (_) => (kind == 'pgp-key' || kind == 'yubikey-ref')
                   ? PgpKeyDetailSheet(
                       walletMasterHex: widget.walletMasterHex!,
                       chainName: name,
@@ -202,25 +214,25 @@ class _CredentialCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final (badgeLabel, badgeColor, badgeBg) = switch (kind) {
       'yubikey-ref' => (
-          'yubikey',
-          const Color(0xFF30D158),  // green — hardware
-          const Color(0xFF0A2A12),
-        ),
+        'yubikey',
+        const Color(0xFF30D158), // green — hardware
+        const Color(0xFF0A2A12),
+      ),
       'pgp-key' => (
-          'pgp',
-          const Color(0xFFFF9F0A),  // orange — crypto key
-          const Color(0xFF2A1A00),
-        ),
+        'pgp',
+        const Color(0xFFFF9F0A), // orange — crypto key
+        const Color(0xFF2A1A00),
+      ),
       'authority-key' => (
-          'authority',
-          const Color(0xFFBF5AF2),  // purple — bus authority
-          const Color(0xFF1A0A2A),
-        ),
+        'authority',
+        const Color(0xFFBF5AF2), // purple — bus authority
+        const Color(0xFF1A0A2A),
+      ),
       _ => (
-          'ssh',
-          const Color(0xFF0A84FF),  // blue — software
-          const Color(0xFF0A1A2A),
-        ),
+        'ssh',
+        const Color(0xFF0A84FF), // blue — software
+        const Color(0xFF0A1A2A),
+      ),
     };
 
     return InkWell(
@@ -243,7 +255,9 @@ class _CredentialCard extends StatelessWidget {
                   child: Text(
                     fingerprint,
                     style: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w600),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -251,7 +265,9 @@ class _CredentialCard extends StatelessWidget {
                 // kind badge
                 Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 6, vertical: 2),
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
                     color: badgeBg,
                     borderRadius: BorderRadius.circular(4),
@@ -259,14 +275,18 @@ class _CredentialCard extends StatelessWidget {
                   child: Text(
                     badgeLabel,
                     style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                        color: badgeColor),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: badgeColor,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 6),
-                const Icon(Icons.chevron_right,
-                    size: 16, color: Color(0xFF48484A)),
+                const Icon(
+                  Icons.chevron_right,
+                  size: 16,
+                  color: Color(0xFF48484A),
+                ),
               ],
             ),
             const SizedBox(height: 6),
@@ -292,7 +312,9 @@ class _CredentialCard extends StatelessWidget {
                     _ => 'SSH key',
                   },
                   style: const TextStyle(
-                      fontSize: 11, color: Color(0xFF8E8E93)),
+                    fontSize: 11,
+                    color: Color(0xFF8E8E93),
+                  ),
                 ),
               ],
             ),

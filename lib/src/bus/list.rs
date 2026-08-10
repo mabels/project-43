@@ -97,6 +97,8 @@ pub struct PeerInfo {
     pub issued_at: i64,
     /// Unix timestamp of cert expiry, or `None` if it never expires.
     pub expires_at: Option<i64>,
+    /// Device snapshot captured at registration time (from the CSR).
+    pub meta: std::collections::HashMap<String, String>,
 }
 
 /// List all peer certs registered under `<bus_dir>/peers/`.
@@ -125,6 +127,7 @@ pub fn list_peers(bus_dir: &Path) -> Result<Vec<PeerInfo>> {
                 label: cert.payload.label.clone(),
                 issued_at: cert.payload.iat,
                 expires_at: cert.payload.exp,
+                meta: cert.payload.meta.clone(),
             }),
             Err(e) => {
                 eprintln!("warn: skipping peer cert {}: {e}", path.display());

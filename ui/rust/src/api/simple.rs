@@ -126,6 +126,9 @@ struct PendingSign {
     fingerprint: String,
     data: Vec<u8>,
     flags: u32,
+    /// Live device snapshot sent with the request.
+    #[allow(dead_code)]
+    meta: std::collections::HashMap<String, String>,
     /// Sender's verified [`p43::bus::CertPayload`] when the request arrived
     /// inside a `BusSecure` envelope.  Used to encrypt the response back to
     /// the requesting device.  `None` for plaintext requests (legacy / tests).
@@ -755,6 +758,8 @@ pub enum AgentRequest {
         device_label: String,
         /// Stable device identifier from the sender's bus certificate (empty if unauthenticated).
         device_id: String,
+        /// Live device snapshot collected at request time on the agent side.
+        meta: std::collections::HashMap<String, String>,
     },
 }
 
@@ -920,6 +925,20 @@ pub async fn mx_respond_sign_wallet(
                     if let Ok(pk) = ssh_key::PublicKey::from_bytes(&raw) {
                         if pk.fingerprint(Default::default()).to_string() == target_fp {
                             sig = Some(k.sign_with_flags(&pending.data, pending.flags)?);
+
+                            // Extract and cache the key material so subsequent waiters can run *_cached
+                            if let Ok(sk) = ssh_key::PrivateKey::from_openssh(&k.private_key) {
+                                match sk.key_data() {
+                                    ssh_key::private::KeypairData::Ed25519(kp) => {
+                                        if let Ok(mut cache) = signing_key_cache().lock() {
+                                            cache
+                                                .insert(target_fp.clone(), Box::new(kp.to_bytes()));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+
                             break 'outer;
                         }
                     }
@@ -932,6 +951,19 @@ pub async fn mx_respond_sign_wallet(
                         if let Ok(pk) = ssh_key::PublicKey::from_bytes(&raw) {
                             if pk.fingerprint(Default::default()).to_string() == target_fp {
                                 sig = Some(r.sign_with_flags(&pending.data, pending.flags)?);
+
+                                // Cache the PIN keyed by each card AID associated with this fingerprint.
+                                let store_dir = default_store_dir();
+                                if let Some(meta) =
+                                    p43::ssh_agent::get_ssh_key_meta(&store_dir, &target_fp)
+                                {
+                                    if let Ok(mut cache) = credential_cache().lock() {
+                                        for ident in &meta.card_idents {
+                                            cache.insert(ident.clone(), r.pin.clone());
+                                        }
+                                    }
+                                }
+
                                 break 'outer;
                             }
                         }
@@ -967,6 +999,8 @@ pub struct BusCsrEvent {
     pub device_id: String,
     /// Base64-encoded COSE_Sign1 CSR bytes — passed back to mx_respond_csr.
     pub csr_b64: String,
+    /// Live device snapshot from the CSR — same key schema as sign-request meta.
+    pub meta: std::collections::HashMap<String, String>,
 }
 
 /// Unified app-level event emitted by [`mx_listen_all`].
@@ -1117,6 +1151,26 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
             )
         };
 
+        // ── Transaction Redaction ─────────────────────────────────────────────
+        let (redact_tx, _redact_handle) = p43::matrix::global::spawn_redact_worker();
+        let req_event_map = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<String, String>::new()));
+
+        let (req_ev_tx, mut req_ev_rx) = tokio::sync::mpsc::channel::<(String, String)>(256);
+        let redact_room_id = room_id.clone();
+        {
+            let map = std::sync::Arc::clone(&req_event_map);
+            let redact_tx_clone = redact_tx.clone();
+            tokio::spawn(async move {
+                while let Some((req_id, response_ev_id)) = req_ev_rx.recv().await {
+                    let request_ev_id = map.lock().ok().and_then(|mut m| m.remove(&req_id));
+                    if let Some(req_ev) = request_ev_id {
+                        let _ = redact_tx_clone.send((redact_room_id.clone(), req_ev)).await;
+                    }
+                    let _ = redact_tx_clone.send((redact_room_id.clone(), response_ev_id)).await;
+                }
+            });
+        }
+
         // ── Encrypt worker: outbound queue → seal → Matrix send ───────────────
         let encrypt_handle = p43::bus::spawn_encrypt_worker(
             |msg, recipient| {
@@ -1130,13 +1184,14 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
             },
             room_id.clone(),
             outbound_rx,
-            None, // UI does not redact individual messages
+            Some(req_ev_tx),
         );
 
         // ── Internal bus dispatcher → AppMessage stream ───────────────────────
         let dispatcher_handle = {
             let sink_dispatch = sink.clone();
             let mut internal_rx = internal_tx.subscribe();
+            let dispatch_req_map = std::sync::Arc::clone(&req_event_map);
             tokio::spawn(async move {
                 loop {
                     let inbound = match internal_rx.recv().await {
@@ -1147,6 +1202,11 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                             continue;
                         }
                     };
+                    if let Some(req_id) = inbound.message.request_id() {
+                        if let Ok(mut map) = dispatch_req_map.lock() {
+                            map.insert(req_id.to_string(), inbound.event_id.clone());
+                        }
+                    }
                     let sender_cert = inbound.sender_cert;
                     let event = match inbound.message {
                         p43::protocol::Message::SshListKeysRequest(r) => {
@@ -1190,6 +1250,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                                         fingerprint: r.fingerprint.clone(),
                                         data: r.data.clone(),
                                         flags: r.flags,
+                                        meta: r.meta.clone(),
                                         sender_cert,
                                         received_at: now,
                                     },
@@ -1202,6 +1263,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                                     description: r.description,
                                     device_label: dev_label,
                                     device_id: dev_id,
+                                    meta: r.meta,
                                 },
                             })
                         }
@@ -1211,6 +1273,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                                 device_label: r.device_label,
                                 device_id: r.device_id,
                                 csr_b64: r.csr_b64,
+                                meta: r.meta,
                             },
                         }),
                         _ => None,
@@ -1480,6 +1543,7 @@ pub fn wallet_init_authority(master_hex: String) -> anyhow::Result<String> {
         ecdh_pubkey: authority_pub.x25519_pub.clone(),
         nonce: vec![0u8; 16],
         timestamp: p43::bus::unix_now()?,
+        meta: std::collections::HashMap::new(),
     };
     let cert = DeviceCert::issue(&csr_payload, &authority_key, None)?;
 
@@ -1632,6 +1696,7 @@ pub fn bus_init_authority() -> anyhow::Result<()> {
         ecdh_pubkey: authority_pub_key.x25519_pub.clone(),
         nonce: vec![0u8; 16], // synthetic — no peer verification needed
         timestamp: p43::bus::unix_now()?,
+        meta: std::collections::HashMap::new(),
     };
     let cert = DeviceCert::issue(&csr_payload, &authority_key, None)?;
     cert.save(&bus::authority_cert_path(&bus_dir))?;
@@ -2149,6 +2214,31 @@ pub fn mx_set_message_max_age_hours(hours: u64) {
     MESSAGE_MAX_AGE_HOURS.store(hours, Ordering::Relaxed);
 }
 
+/// Purge all events in the room older than `older_than_hours`.
+#[frb]
+pub async fn mx_purge_room_history(
+    room_id: String,
+    older_than_hours: u64,
+) -> anyhow::Result<usize> {
+    let client = p43::matrix::global::take_client()
+        .await
+        .context("Not logged in to Matrix")?;
+    let rid = p43::matrix::resolve_room_id(&client, &room_id)
+        .await
+        .with_context(|| format!("Invalid room ID: {room_id}"))?;
+
+    let cutoff_ms: u64 = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("System clock is before Unix epoch")?
+            .as_millis() as u64;
+        now.saturating_sub(older_than_hours * 3_600_000)
+    };
+
+    let n = p43::matrix::room::purge_room_history(&client, &rid, cutoff_ms).await?;
+    Ok(n)
+}
+
 /// Update the credential cache timeout.
 ///
 /// Pass the value of `AgentSettings.cacheTimeoutMinutes * 60` (converted to
@@ -2640,6 +2730,8 @@ pub struct BusPeer {
     pub label: String,
     pub issued_at: i64,
     pub expires_at: Option<i64>,
+    /// Device snapshot captured at registration time.
+    pub meta: std::collections::HashMap<String, String>,
 }
 
 /// List all locally-owned device keys under `<store>/bus/devices/`.
@@ -2669,8 +2761,21 @@ pub fn bus_list_peers() -> anyhow::Result<Vec<BusPeer>> {
             label: p.label,
             issued_at: p.issued_at,
             expires_at: p.expires_at,
+            meta: p.meta,
         })
         .collect())
+}
+
+/// Return the registration-time meta snapshot for a peer identified by
+/// `device_id`, or an empty map if the peer has no cert or the cert has no meta.
+#[frb]
+pub fn bus_get_peer_meta(device_id: String) -> std::collections::HashMap<String, String> {
+    let bus_dir = p43::bus::bus_dir(&default_store_dir());
+    p43::bus::list_peers(&bus_dir)
+        .ok()
+        .and_then(|peers| peers.into_iter().find(|p| p.device_id == device_id))
+        .map(|p| p.meta)
+        .unwrap_or_default()
 }
 
 /// Remove a peer cert by device_id from `<store>/bus/peers/`.
@@ -3071,6 +3176,7 @@ impl InProcessSession {
             issuer_fp: vec![],
             iat: 0,
             exp: None,
+            meta: std::collections::HashMap::new(),
         };
 
         self.outbound_tx
@@ -3146,6 +3252,7 @@ impl ssh_agent_lib::agent::Session for InProcessSession {
             data: request.data.to_vec(),
             flags: request.flags,
             description: "SSH sign request (in-process agent)".into(),
+            meta: p43::ssh_agent::meta::collect(),
         });
 
         match self.forward(req).await? {
@@ -3226,6 +3333,7 @@ async fn ensure_registered_inprocess(
         device_label: label.clone(),
         device_id: key.device_id(),
         csr_b64: base64::engine::general_purpose::STANDARD.encode(&csr.cose_bytes),
+        meta: csr.payload.meta.clone(),
     });
     p43::matrix::global::send_message(room_id, &msg.to_json()?)
         .await

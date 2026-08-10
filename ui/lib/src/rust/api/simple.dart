@@ -577,6 +577,15 @@ Future<void> mxSetCacheKeyEnabled({required bool enabled}) =>
 Future<void> mxSetMessageMaxAgeHours({required BigInt hours}) =>
     RustLib.instance.api.crateApiSimpleMxSetMessageMaxAgeHours(hours: hours);
 
+/// Purge all events in the room older than `older_than_hours`.
+Future<BigInt> mxPurgeRoomHistory({
+  required String roomId,
+  required BigInt olderThanHours,
+}) => RustLib.instance.api.crateApiSimpleMxPurgeRoomHistory(
+  roomId: roomId,
+  olderThanHours: olderThanHours,
+);
+
 /// Update the credential cache timeout.
 ///
 /// Pass the value of `AgentSettings.cacheTimeoutMinutes * 60` (converted to
@@ -730,6 +739,11 @@ Future<List<BusOwnDevice>> busListOwnDevices() =>
 /// List all peer certs registered under `<store>/bus/peers/`.
 Future<List<BusPeer>> busListPeers() =>
     RustLib.instance.api.crateApiSimpleBusListPeers();
+
+/// Return the registration-time meta snapshot for a peer identified by
+/// `device_id`, or an empty map if the peer has no cert or the cert has no meta.
+Future<Map<String, String>> busGetPeerMeta({required String deviceId}) =>
+    RustLib.instance.api.crateApiSimpleBusGetPeerMeta(deviceId: deviceId);
 
 /// Remove a peer cert by device_id from `<store>/bus/peers/`.
 /// Returns `true` if the cert was found and deleted, `false` if it did not exist.
@@ -935,6 +949,9 @@ sealed class AgentRequest with _$AgentRequest {
 
     /// Stable device identifier from the sender's bus certificate (empty if unauthenticated).
     required String deviceId,
+
+    /// Live device snapshot collected at request time on the agent side.
+    required Map<String, String> meta,
   }) = AgentRequest_Sign;
 }
 
@@ -989,11 +1006,15 @@ class BusCsrEvent {
   /// Base64-encoded COSE_Sign1 CSR bytes — passed back to mx_respond_csr.
   final String csrB64;
 
+  /// Live device snapshot from the CSR — same key schema as sign-request meta.
+  final Map<String, String> meta;
+
   const BusCsrEvent({
     required this.requestId,
     required this.deviceLabel,
     required this.deviceId,
     required this.csrB64,
+    required this.meta,
   });
 
   @override
@@ -1001,7 +1022,8 @@ class BusCsrEvent {
       requestId.hashCode ^
       deviceLabel.hashCode ^
       deviceId.hashCode ^
-      csrB64.hashCode;
+      csrB64.hashCode ^
+      meta.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1011,7 +1033,8 @@ class BusCsrEvent {
           requestId == other.requestId &&
           deviceLabel == other.deviceLabel &&
           deviceId == other.deviceId &&
-          csrB64 == other.csrB64;
+          csrB64 == other.csrB64 &&
+          meta == other.meta;
 }
 
 /// Summary of a locally-owned device key (own side).
@@ -1059,11 +1082,15 @@ class BusPeer {
   final PlatformInt64 issuedAt;
   final PlatformInt64? expiresAt;
 
+  /// Device snapshot captured at registration time.
+  final Map<String, String> meta;
+
   const BusPeer({
     required this.deviceId,
     required this.label,
     required this.issuedAt,
     this.expiresAt,
+    required this.meta,
   });
 
   @override
@@ -1071,7 +1098,8 @@ class BusPeer {
       deviceId.hashCode ^
       label.hashCode ^
       issuedAt.hashCode ^
-      expiresAt.hashCode;
+      expiresAt.hashCode ^
+      meta.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1081,7 +1109,8 @@ class BusPeer {
           deviceId == other.deviceId &&
           label == other.label &&
           issuedAt == other.issuedAt &&
-          expiresAt == other.expiresAt;
+          expiresAt == other.expiresAt &&
+          meta == other.meta;
 }
 
 /// Summary of a connected OpenPGP card returned by [list_connected_cards].

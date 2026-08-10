@@ -214,6 +214,34 @@ class AgentLogTile extends StatelessWidget {
                             color: cs.onSurface.withValues(alpha: 0.55),
                           ),
                         ),
+                      // ── Device meta (hostname + IP) ──────────────────────
+                      if (entry.hostname.isNotEmpty ||
+                          entry.primaryIp.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.computer_outlined,
+                                size: 10,
+                                color: Color(0xFF8E8E93),
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                [
+                                  if (entry.hostname.isNotEmpty) entry.hostname,
+                                  if (entry.primaryIp.isNotEmpty)
+                                    entry.primaryIp,
+                                ].join(' · '),
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: Color(0xFF8E8E93),
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
                       Text(
                         entry.requestId.substring(0, 8),
                         style: TextStyle(
@@ -272,7 +300,9 @@ class AgentLogTile extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 10,
                         fontFamily: 'monospace',
-                        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.35),
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.onSurface.withValues(alpha: 0.35),
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -316,6 +346,14 @@ class AgentLogTile extends StatelessWidget {
                     child: const Text('Approve'),
                   ),
                 ],
+              ),
+            ],
+            // ── Meta detail (always shown for sign requests) ───────────────
+            if (isSign && entry.meta.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              MetaSection(
+                meta: entry.meta,
+                certMeta: entry.certMeta.isNotEmpty ? entry.certMeta : null,
               ),
             ],
           ],
@@ -364,6 +402,180 @@ class AgentStatusLabel extends StatelessWidget {
     return Text(
       label,
       style: TextStyle(fontSize: 10, color: color, fontFamily: 'monospace'),
+    );
+  }
+}
+
+// ── Meta section ──────────────────────────────────────────────────────────────
+
+/// Collapsible device metadata section — shown in sign-request dialogs.
+///
+/// Renders all key-value pairs from [meta] sorted alphabetically.
+/// Hidden when [meta] is empty.
+class MetaSection extends StatefulWidget {
+  const MetaSection({super.key, required this.meta, this.certMeta});
+  final Map<String, String> meta;
+
+  /// Optional cert/registration-time snapshot for comparison.
+  /// When present, values that differ from [meta] are highlighted.
+  final Map<String, String>? certMeta;
+
+  @override
+  State<MetaSection> createState() => _MetaSectionState();
+}
+
+class _MetaSectionState extends State<MetaSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.meta.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        GestureDetector(
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.computer_outlined,
+                size: 12,
+                color: Color(0xFF8E8E93),
+              ),
+              const SizedBox(width: 4),
+              const Text(
+                'Device info',
+                style: TextStyle(fontSize: 11, color: Color(0xFF8E8E93)),
+              ),
+              const Spacer(),
+              Icon(
+                _expanded ? Icons.expand_less : Icons.expand_more,
+                size: 14,
+                color: const Color(0xFF8E8E93),
+              ),
+            ],
+          ),
+        ),
+        if (_expanded) ...[
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1C1C1E),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Column headers when cert meta is present.
+                if (widget.certMeta != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Row(
+                      children: const [
+                        SizedBox(width: 110),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'live',
+                            style: TextStyle(
+                              fontSize: 9,
+                              color: Color(0xFF8E8E93),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            'cert',
+                            style: TextStyle(
+                              fontSize: 9,
+                              color: Color(0xFF8E8E93),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                // All keys from both snapshots, merged.
+                ...() {
+                  final cert = widget.certMeta;
+                  final allKeys = {
+                    ...widget.meta.keys,
+                    if (cert != null) ...cert.keys,
+                  }.toList()..sort();
+                  return allKeys.map((key) {
+                    final live = widget.meta[key];
+                    final certVal = cert?[key];
+                    final changed =
+                        cert != null &&
+                        live != null &&
+                        certVal != null &&
+                        live != certVal;
+                    final missingInLive =
+                        cert != null && live == null && certVal != null;
+                    final newInLive =
+                        cert != null && live != null && certVal == null;
+                    final rowColor = changed
+                        ? const Color(0xFFFF9F0A) // amber — value changed
+                        : missingInLive
+                        ? const Color(0xFFFF453A) // red — gone from live
+                        : newInLive
+                        ? const Color(0xFF30D158) // green — new in live
+                        : const Color(0xFFD1D1D6);
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 1),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 110,
+                            child: Text(
+                              key,
+                              style: const TextStyle(
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                                color: Color(0xFF8E8E93),
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              live ?? '—',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                                color: rowColor,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (cert != null)
+                            Expanded(
+                              child: Text(
+                                certVal ?? '—',
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  fontFamily: 'monospace',
+                                  color: Color(0xFF8E8E93),
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  }).toList();
+                }(),
+              ],
+            ),
+          ),
+        ],
+      ],
     );
   }
 }

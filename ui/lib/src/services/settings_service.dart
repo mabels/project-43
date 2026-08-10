@@ -97,58 +97,55 @@ class AgentSettings {
     bool? desktopAgentEnabled,
     Object? desktopAgentLabel = _sentinel,
     Object? desktopAgentSocketPath = _sentinel,
-  }) =>
-      AgentSettings(
-        autoApproveWhenCached:
-            autoApproveWhenCached ?? this.autoApproveWhenCached,
-        cacheDecryptedKey: cacheDecryptedKey ?? this.cacheDecryptedKey,
-        cacheTimeoutMinutes: cacheTimeoutMinutes == _sentinel
-            ? this.cacheTimeoutMinutes
-            : cacheTimeoutMinutes as int?,
-        notifyOnSignRequest: notifyOnSignRequest ?? this.notifyOnSignRequest,
-        otelEndpoint: otelEndpoint ?? this.otelEndpoint,
-        deviceCertTtlDays: deviceCertTtlDays ?? this.deviceCertTtlDays,
-        defaultKeyFingerprint: defaultKeyFingerprint == _sentinel
-            ? this.defaultKeyFingerprint
-            : defaultKeyFingerprint as String?,
-        messageMaxAgeHours: messageMaxAgeHours ?? this.messageMaxAgeHours,
-        desktopAgentEnabled: desktopAgentEnabled ?? this.desktopAgentEnabled,
-        desktopAgentLabel: desktopAgentLabel == _sentinel
-            ? this.desktopAgentLabel
-            : desktopAgentLabel as String?,
-        desktopAgentSocketPath: desktopAgentSocketPath == _sentinel
-            ? this.desktopAgentSocketPath
-            : desktopAgentSocketPath as String?,
-      );
+  }) => AgentSettings(
+    autoApproveWhenCached: autoApproveWhenCached ?? this.autoApproveWhenCached,
+    cacheDecryptedKey: cacheDecryptedKey ?? this.cacheDecryptedKey,
+    cacheTimeoutMinutes: cacheTimeoutMinutes == _sentinel
+        ? this.cacheTimeoutMinutes
+        : cacheTimeoutMinutes as int?,
+    notifyOnSignRequest: notifyOnSignRequest ?? this.notifyOnSignRequest,
+    otelEndpoint: otelEndpoint ?? this.otelEndpoint,
+    deviceCertTtlDays: deviceCertTtlDays ?? this.deviceCertTtlDays,
+    defaultKeyFingerprint: defaultKeyFingerprint == _sentinel
+        ? this.defaultKeyFingerprint
+        : defaultKeyFingerprint as String?,
+    messageMaxAgeHours: messageMaxAgeHours ?? this.messageMaxAgeHours,
+    desktopAgentEnabled: desktopAgentEnabled ?? this.desktopAgentEnabled,
+    desktopAgentLabel: desktopAgentLabel == _sentinel
+        ? this.desktopAgentLabel
+        : desktopAgentLabel as String?,
+    desktopAgentSocketPath: desktopAgentSocketPath == _sentinel
+        ? this.desktopAgentSocketPath
+        : desktopAgentSocketPath as String?,
+  );
 
   Map<String, dynamic> toJson() => {
-        'autoApproveWhenCached': autoApproveWhenCached,
-        'cacheDecryptedKey': cacheDecryptedKey,
-        'cacheTimeoutMinutes': cacheTimeoutMinutes,
-        'notifyOnSignRequest': notifyOnSignRequest,
-        'otelEndpoint': otelEndpoint,
-        'deviceCertTtlDays': deviceCertTtlDays,
-        'defaultKeyFingerprint': defaultKeyFingerprint,
-        'messageMaxAgeHours': messageMaxAgeHours,
-        'desktopAgentEnabled': desktopAgentEnabled,
-        'desktopAgentLabel': desktopAgentLabel,
-        'desktopAgentSocketPath': desktopAgentSocketPath,
-      };
+    'autoApproveWhenCached': autoApproveWhenCached,
+    'cacheDecryptedKey': cacheDecryptedKey,
+    'cacheTimeoutMinutes': cacheTimeoutMinutes,
+    'notifyOnSignRequest': notifyOnSignRequest,
+    'otelEndpoint': otelEndpoint,
+    'deviceCertTtlDays': deviceCertTtlDays,
+    'defaultKeyFingerprint': defaultKeyFingerprint,
+    'messageMaxAgeHours': messageMaxAgeHours,
+    'desktopAgentEnabled': desktopAgentEnabled,
+    'desktopAgentLabel': desktopAgentLabel,
+    'desktopAgentSocketPath': desktopAgentSocketPath,
+  };
 
   factory AgentSettings.fromJson(Map<String, dynamic> json) => AgentSettings(
-        autoApproveWhenCached:
-            json['autoApproveWhenCached'] as bool? ?? false,
-        cacheDecryptedKey: json['cacheDecryptedKey'] as bool? ?? false,
-        cacheTimeoutMinutes: json['cacheTimeoutMinutes'] as int? ?? 15,
-        notifyOnSignRequest: json['notifyOnSignRequest'] as bool? ?? true,
-        otelEndpoint: json['otelEndpoint'] as String? ?? '',
-        deviceCertTtlDays: json['deviceCertTtlDays'] as int? ?? 180,
-        defaultKeyFingerprint: json['defaultKeyFingerprint'] as String?,
-        messageMaxAgeHours: json['messageMaxAgeHours'] as int? ?? 8,
-        desktopAgentEnabled: json['desktopAgentEnabled'] as bool? ?? false,
-        desktopAgentLabel: json['desktopAgentLabel'] as String?,
-        desktopAgentSocketPath: json['desktopAgentSocketPath'] as String?,
-      );
+    autoApproveWhenCached: json['autoApproveWhenCached'] as bool? ?? false,
+    cacheDecryptedKey: json['cacheDecryptedKey'] as bool? ?? false,
+    cacheTimeoutMinutes: json['cacheTimeoutMinutes'] as int? ?? 15,
+    notifyOnSignRequest: json['notifyOnSignRequest'] as bool? ?? true,
+    otelEndpoint: json['otelEndpoint'] as String? ?? '',
+    deviceCertTtlDays: json['deviceCertTtlDays'] as int? ?? 180,
+    defaultKeyFingerprint: json['defaultKeyFingerprint'] as String?,
+    messageMaxAgeHours: json['messageMaxAgeHours'] as int? ?? 8,
+    desktopAgentEnabled: json['desktopAgentEnabled'] as bool? ?? false,
+    desktopAgentLabel: json['desktopAgentLabel'] as String?,
+    desktopAgentSocketPath: json['desktopAgentSocketPath'] as String?,
+  );
 }
 
 // Sentinel used to distinguish "not passed" from explicit null in copyWith.
@@ -217,7 +214,7 @@ class SettingsService extends ChangeNotifier {
           sshAgentStart(
             label: updated.desktopAgentLabel,
             socketPath: updated.desktopAgentSocketPath,
-          ).catchError((_) {}),
+          ).catchError((_) => ''),
         );
       } else {
         unawaited(sshAgentStop().catchError((_) {}));

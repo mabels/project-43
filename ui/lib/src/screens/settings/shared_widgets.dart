@@ -51,7 +51,7 @@ class SettingsToggleTile extends StatelessWidget {
         style: const TextStyle(fontSize: 12, color: Color(0xFF8E8E93)),
       ),
       value: value,
-      activeColor: const Color(0xFF30D158),
+      activeThumbColor: const Color(0xFF30D158),
       onChanged: onChanged,
     );
   }

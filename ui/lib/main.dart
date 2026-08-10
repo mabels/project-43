@@ -54,10 +54,9 @@ Future<void> main() async {
   // Attempt to restore a previously saved Matrix session.
   final loggedIn = await mxRestore();
   final gateKeyConfigured = await GateKeyService.instance.isConfigured();
-  runApp(P43App(
-    initiallyLoggedIn: loggedIn,
-    gateKeyConfigured: gateKeyConfigured,
-  ));
+  runApp(
+    P43App(initiallyLoggedIn: loggedIn, gateKeyConfigured: gateKeyConfigured),
+  );
 }
 
 class P43App extends StatefulWidget {
@@ -120,8 +119,8 @@ class _RootShell extends StatefulWidget {
 class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   int _tabIndex = 0;
   late bool _loggedIn;
-  bool _sessionUnlocked = false;   // bus/authority session
-  String? _walletMasterHex;        // wallet master secret (null = locked)
+  bool _sessionUnlocked = false; // bus/authority session
+  String? _walletMasterHex; // wallet master secret (null = locked)
 
   static const _tabTitles = ['Keys', 'Agent', 'Devices', 'Settings'];
 
@@ -146,6 +145,7 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   final StreamController<void> _externalLockCtrl =
       StreamController<void>.broadcast();
   StreamSubscription<AppMessage>? _allSub;
+  Timer? _purgeTimer;
   // Set to true when paused/hidden; cleared after the reconnect fires.
   // Guards against macOS firing `resumed` on every window-focus event.
   bool _wasBackground = false;
@@ -157,10 +157,28 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _initListener();
     _refreshLockState();
+    _startPurgeTimer();
+  }
+
+  void _startPurgeTimer() {
+    _purgeTimer?.cancel();
+    _purgeTimer = Timer.periodic(const Duration(hours: 1), (_) async {
+      try {
+        final room = await mxGetAgentRoom();
+        if (room != null) {
+          final maxAge = SettingsService.instance.settings.messageMaxAgeHours;
+          await mxPurgeRoomHistory(
+            roomId: room,
+            olderThanHours: BigInt.from(maxAge),
+          );
+        }
+      } catch (_) {}
+    });
   }
 
   @override
   void dispose() {
+    _purgeTimer?.cancel();
     _allSub?.cancel();
     _agentCtrl.close();
     _busCtrl.close();
@@ -223,8 +241,10 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF2C2C2E),
-        title: const Text('Wallet passphrase',
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+        title: const Text(
+          'Wallet passphrase',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
         content: TextField(
           controller: ctrl,
           obscureText: true,
@@ -276,7 +296,7 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     _allSub?.cancel();
     unawaited(_maybeAutoStartAgent());
     _allSub = mxListenAll(roomId: roomId).listen(
-      (msg) {
+      (msg) async {
         if (msg is AppMessage_AgentEvent) {
           _agentCtrl.add(msg.event);
         } else if (msg is AppMessage_BusEvent) {
@@ -286,8 +306,6 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
           _sessionLockCtrl.add(null);
           _externalLockCtrl.add(null);
           WindowService.instance.bringToFront();
-          // A BusSecure message arrived that we couldn't decrypt — reflect
-          // the locked state in the global lock icon immediately.
           if (mounted) setState(() => _sessionUnlocked = false);
         }
       },
@@ -364,8 +382,7 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
             color: _walletMasterHex != null
                 ? const Color(0xFF30D158) // green — wallet open
                 : Colors.grey,
-            onPressed:
-                _walletMasterHex != null ? _lockAll : _openUnlockDialog,
+            onPressed: _walletMasterHex != null ? _lockAll : _openUnlockDialog,
           ),
           const SizedBox(width: 4),
         ],
@@ -381,6 +398,7 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
             },
             onRoomChanged: _onAgentRoomChanged,
             walletMasterHex: _walletMasterHex,
+            onWalletUnlock: _openUnlockDialog,
           ),
           DevicesScreen(
             busStream: _busCtrl.stream,

@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2007617697;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -627568752;
 
 // Section: executor
 
@@ -214,6 +214,40 @@ fn wire__crate__api__simple__bus_export_authority_impl(
                         Ok(output_ok)
                     })(),
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__simple__bus_get_peer_meta_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "bus_get_peer_meta",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_device_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::simple::bus_get_peer_meta(api_device_id))?;
+                    Ok(output_ok)
+                })())
             }
         },
     )
@@ -2023,6 +2057,47 @@ fn wire__crate__api__simple__mx_prime_passphrase_cache_impl(
         },
     )
 }
+fn wire__crate__api__simple__mx_purge_room_history_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "mx_purge_room_history",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_room_id = <String>::sse_decode(&mut deserializer);
+            let api_older_than_hours = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::simple::mx_purge_room_history(
+                            api_room_id,
+                            api_older_than_hours,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__mx_reject_sign_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3419,6 +3494,14 @@ impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
     }
 }
 
+impl SseDecode for std::collections::HashMap<String, String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <Vec<(String, String)>>::sse_decode(deserializer);
+        return inner.into_iter().collect();
+    }
+}
+
 impl SseDecode
     for StreamSink<crate::api::simple::AppMessage, flutter_rust_bridge::for_generated::SseCodec>
 {
@@ -3474,12 +3557,15 @@ impl SseDecode for crate::api::simple::AgentRequest {
                 let mut var_description = <String>::sse_decode(deserializer);
                 let mut var_deviceLabel = <String>::sse_decode(deserializer);
                 let mut var_deviceId = <String>::sse_decode(deserializer);
+                let mut var_meta =
+                    <std::collections::HashMap<String, String>>::sse_decode(deserializer);
                 return crate::api::simple::AgentRequest::Sign {
                     request_id: var_requestId,
                     fingerprint: var_fingerprint,
                     description: var_description,
                     device_label: var_deviceLabel,
                     device_id: var_deviceId,
+                    meta: var_meta,
                 };
             }
             _ => {
@@ -3538,11 +3624,13 @@ impl SseDecode for crate::api::simple::BusCsrEvent {
         let mut var_deviceLabel = <String>::sse_decode(deserializer);
         let mut var_deviceId = <String>::sse_decode(deserializer);
         let mut var_csrB64 = <String>::sse_decode(deserializer);
+        let mut var_meta = <std::collections::HashMap<String, String>>::sse_decode(deserializer);
         return crate::api::simple::BusCsrEvent {
             request_id: var_requestId,
             device_label: var_deviceLabel,
             device_id: var_deviceId,
             csr_b64: var_csrB64,
+            meta: var_meta,
         };
     }
 }
@@ -3572,11 +3660,13 @@ impl SseDecode for crate::api::simple::BusPeer {
         let mut var_label = <String>::sse_decode(deserializer);
         let mut var_issuedAt = <i64>::sse_decode(deserializer);
         let mut var_expiresAt = <Option<i64>>::sse_decode(deserializer);
+        let mut var_meta = <std::collections::HashMap<String, String>>::sse_decode(deserializer);
         return crate::api::simple::BusPeer {
             device_id: var_deviceId,
             label: var_label,
             issued_at: var_issuedAt,
             expires_at: var_expiresAt,
+            meta: var_meta,
         };
     }
 }
@@ -3778,6 +3868,18 @@ impl SseDecode for Vec<u8> {
     }
 }
 
+impl SseDecode for Vec<(String, String)> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<(String, String)>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::simple::SubkeyInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3919,6 +4021,15 @@ impl SseDecode for Option<crate::api::simple::SshKeyDetails> {
     }
 }
 
+impl SseDecode for (String, String) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_field0 = <String>::sse_decode(deserializer);
+        let mut var_field1 = <String>::sse_decode(deserializer);
+        return (var_field0, var_field1);
+    }
+}
+
 impl SseDecode for crate::api::simple::SshKeyDetails {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -3964,6 +4075,13 @@ impl SseDecode for u8 {
 impl SseDecode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
+}
+
+impl SseDecode for usize {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u64::<NativeEndian>().unwrap() as _
+    }
 }
 
 impl SseDecode for crate::api::simple::WalletCredentialDetail {
@@ -4057,204 +4175,208 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         5 => wire__crate__api__simple__bus_export_authority_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__simple__bus_has_authority_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__simple__bus_import_authority_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__simple__bus_init_authority_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__simple__bus_is_session_unlocked_impl(
+        6 => wire__crate__api__simple__bus_get_peer_meta_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__simple__bus_has_authority_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__simple__bus_import_authority_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__simple__bus_init_authority_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__simple__bus_is_session_unlocked_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        10 => {
+        11 => {
             wire__crate__api__simple__bus_list_own_devices_impl(port, ptr, rust_vec_len, data_len)
         }
-        11 => wire__crate__api__simple__bus_list_peers_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__simple__bus_lock_session_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__simple__bus_remove_peer_impl(port, ptr, rust_vec_len, data_len),
-        14 => {
+        12 => wire__crate__api__simple__bus_list_peers_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__simple__bus_lock_session_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__simple__bus_remove_peer_impl(port, ptr, rust_vec_len, data_len),
+        15 => {
             wire__crate__api__simple__bus_reseal_authority_impl(port, ptr, rust_vec_len, data_len)
         }
-        15 => wire__crate__api__simple__bus_reseal_authority_excluding_impl(
+        16 => wire__crate__api__simple__bus_reseal_authority_excluding_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        16 => wire__crate__api__simple__bus_unlock_session_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__simple__clear_active_traceparent_impl(
+        17 => wire__crate__api__simple__bus_unlock_session_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__simple__clear_active_traceparent_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        18 => wire__crate__api__simple__credential_cache_set_timeout_impl(
+        19 => wire__crate__api__simple__credential_cache_set_timeout_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        19 => wire__crate__api__simple__delete_key_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__simple__gate_key_change_passphrase_impl(
+        20 => wire__crate__api__simple__delete_key_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__simple__gate_key_change_passphrase_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        21 => wire__crate__api__simple__gate_key_create_impl(port, ptr, rust_vec_len, data_len),
-        22 => {
+        22 => wire__crate__api__simple__gate_key_create_impl(port, ptr, rust_vec_len, data_len),
+        23 => {
             wire__crate__api__simple__gate_key_is_configured_impl(port, ptr, rust_vec_len, data_len)
         }
-        23 => wire__crate__api__simple__gate_key_list_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__simple__gate_key_revoke_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__simple__gate_key_seal_passphrase_impl(
+        24 => wire__crate__api__simple__gate_key_list_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__simple__gate_key_revoke_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__simple__gate_key_seal_passphrase_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        26 => wire__crate__api__simple__gate_key_verify_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__simple__generate_key_impl(port, ptr, rust_vec_len, data_len),
-        28 => {
+        27 => wire__crate__api__simple__gate_key_verify_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__simple__generate_key_impl(port, ptr, rust_vec_len, data_len),
+        29 => {
             wire__crate__api__simple__get_card_pin_retries_impl(port, ptr, rust_vec_len, data_len)
         }
-        29 => wire__crate__api__simple__get_private_key_armored_impl(
+        30 => wire__crate__api__simple__get_private_key_armored_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        30 => {
+        31 => {
             wire__crate__api__simple__get_public_key_armored_impl(port, ptr, rust_vec_len, data_len)
         }
-        31 => {
+        32 => {
             wire__crate__api__simple__get_public_key_openssh_impl(port, ptr, rust_vec_len, data_len)
         }
-        32 => wire__crate__api__simple__get_ssh_key_details_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__simple__has_cached_card_pin_impl(port, ptr, rust_vec_len, data_len),
-        34 => {
+        33 => wire__crate__api__simple__get_ssh_key_details_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__simple__has_cached_card_pin_impl(port, ptr, rust_vec_len, data_len),
+        35 => {
             wire__crate__api__simple__has_cached_passphrase_impl(port, ptr, rust_vec_len, data_len)
         }
-        35 => wire__crate__api__simple__import_card_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__simple__import_openpgp_key_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__simple__import_ssh_key_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__simple__init_telemetry_impl(port, ptr, rust_vec_len, data_len),
-        40 => {
+        36 => wire__crate__api__simple__import_card_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__simple__import_openpgp_key_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__simple__import_ssh_key_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__simple__init_telemetry_impl(port, ptr, rust_vec_len, data_len),
+        41 => {
             wire__crate__api__simple__list_connected_cards_impl(port, ptr, rust_vec_len, data_len)
         }
-        41 => wire__crate__api__simple__list_keys_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__simple__lock_all_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__simple__mx_clear_caches_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__simple__mx_confirm_verify_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__simple__mx_force_reconnect_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__simple__mx_get_agent_room_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__simple__mx_is_logged_in_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__simple__mx_join_room_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__simple__mx_list_devices_impl(port, ptr, rust_vec_len, data_len),
-        50 => wire__crate__api__simple__mx_list_rooms_impl(port, ptr, rust_vec_len, data_len),
-        51 => wire__crate__api__simple__mx_listen_impl(port, ptr, rust_vec_len, data_len),
-        52 => wire__crate__api__simple__mx_listen_all_impl(port, ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__simple__mx_login_impl(port, ptr, rust_vec_len, data_len),
-        54 => wire__crate__api__simple__mx_logout_impl(port, ptr, rust_vec_len, data_len),
-        55 => wire__crate__api__simple__mx_prime_passphrase_cache_impl(
+        42 => wire__crate__api__simple__list_keys_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__simple__lock_all_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__simple__mx_clear_caches_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__simple__mx_confirm_verify_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__simple__mx_force_reconnect_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__simple__mx_get_agent_room_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__simple__mx_is_logged_in_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__simple__mx_join_room_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__simple__mx_list_devices_impl(port, ptr, rust_vec_len, data_len),
+        51 => wire__crate__api__simple__mx_list_rooms_impl(port, ptr, rust_vec_len, data_len),
+        52 => wire__crate__api__simple__mx_listen_impl(port, ptr, rust_vec_len, data_len),
+        53 => wire__crate__api__simple__mx_listen_all_impl(port, ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__simple__mx_login_impl(port, ptr, rust_vec_len, data_len),
+        55 => wire__crate__api__simple__mx_logout_impl(port, ptr, rust_vec_len, data_len),
+        56 => wire__crate__api__simple__mx_prime_passphrase_cache_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__simple__mx_reject_sign_impl(port, ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__simple__mx_respond_csr_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__simple__mx_respond_csr_from_session_impl(
+        57 => {
+            wire__crate__api__simple__mx_purge_room_history_impl(port, ptr, rust_vec_len, data_len)
+        }
+        58 => wire__crate__api__simple__mx_reject_sign_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__simple__mx_respond_csr_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__simple__mx_respond_csr_from_session_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        59 => {
+        61 => {
             wire__crate__api__simple__mx_respond_list_keys_impl(port, ptr, rust_vec_len, data_len)
         }
-        60 => wire__crate__api__simple__mx_respond_sign_impl(port, ptr, rust_vec_len, data_len),
-        61 => {
+        62 => wire__crate__api__simple__mx_respond_sign_impl(port, ptr, rust_vec_len, data_len),
+        63 => {
             wire__crate__api__simple__mx_respond_sign_cached_impl(port, ptr, rust_vec_len, data_len)
         }
-        62 => {
+        64 => {
             wire__crate__api__simple__mx_respond_sign_card_impl(port, ptr, rust_vec_len, data_len)
         }
-        63 => wire__crate__api__simple__mx_respond_sign_card_cached_impl(
+        65 => wire__crate__api__simple__mx_respond_sign_card_cached_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => {
+        66 => {
             wire__crate__api__simple__mx_respond_sign_wallet_impl(port, ptr, rust_vec_len, data_len)
         }
-        65 => wire__crate__api__simple__mx_restore_impl(port, ptr, rust_vec_len, data_len),
-        66 => wire__crate__api__simple__mx_send_impl(port, ptr, rust_vec_len, data_len),
-        67 => wire__crate__api__simple__mx_set_agent_room_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__simple__mx_set_cache_key_enabled_impl(
+        67 => wire__crate__api__simple__mx_restore_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__simple__mx_send_impl(port, ptr, rust_vec_len, data_len),
+        69 => wire__crate__api__simple__mx_set_agent_room_impl(port, ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__simple__mx_set_cache_key_enabled_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        69 => wire__crate__api__simple__mx_set_message_max_age_hours_impl(
+        71 => wire__crate__api__simple__mx_set_message_max_age_hours_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        70 => wire__crate__api__simple__mx_start_verify_impl(port, ptr, rust_vec_len, data_len),
-        71 => wire__crate__api__simple__register_card_ident_impl(port, ptr, rust_vec_len, data_len),
-        72 => {
+        72 => wire__crate__api__simple__mx_start_verify_impl(port, ptr, rust_vec_len, data_len),
+        73 => wire__crate__api__simple__register_card_ident_impl(port, ptr, rust_vec_len, data_len),
+        74 => {
             wire__crate__api__simple__set_active_traceparent_impl(port, ptr, rust_vec_len, data_len)
         }
-        73 => wire__crate__api__simple__set_key_enabled_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__simple__set_store_dir_impl(port, ptr, rust_vec_len, data_len),
-        75 => wire__crate__api__simple__shutdown_telemetry_impl(port, ptr, rust_vec_len, data_len),
-        76 => {
+        75 => wire__crate__api__simple__set_key_enabled_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__simple__set_store_dir_impl(port, ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__simple__shutdown_telemetry_impl(port, ptr, rust_vec_len, data_len),
+        78 => {
             wire__crate__api__simple__ssh_agent_is_running_impl(port, ptr, rust_vec_len, data_len)
         }
-        77 => {
+        79 => {
             wire__crate__api__simple__ssh_agent_socket_path_impl(port, ptr, rust_vec_len, data_len)
         }
-        78 => wire__crate__api__simple__ssh_agent_start_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__simple__ssh_agent_stop_impl(port, ptr, rust_vec_len, data_len),
-        80 => {
+        80 => wire__crate__api__simple__ssh_agent_start_impl(port, ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__simple__ssh_agent_stop_impl(port, ptr, rust_vec_len, data_len),
+        82 => {
             wire__crate__api__simple__verify_key_passphrase_impl(port, ptr, rust_vec_len, data_len)
         }
-        81 => wire__crate__api__simple__wallet_add_pgp_key_impl(port, ptr, rust_vec_len, data_len),
-        82 => wire__crate__api__simple__wallet_add_ssh_key_impl(port, ptr, rust_vec_len, data_len),
-        83 => {
+        83 => wire__crate__api__simple__wallet_add_pgp_key_impl(port, ptr, rust_vec_len, data_len),
+        84 => wire__crate__api__simple__wallet_add_ssh_key_impl(port, ptr, rust_vec_len, data_len),
+        85 => {
             wire__crate__api__simple__wallet_add_yubikey_ref_impl(port, ptr, rust_vec_len, data_len)
         }
-        84 => {
+        86 => {
             wire__crate__api__simple__wallet_get_credential_impl(port, ptr, rust_vec_len, data_len)
         }
-        85 => wire__crate__api__simple__wallet_get_pgp_key_info_impl(
+        87 => wire__crate__api__simple__wallet_get_pgp_key_info_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        86 => wire__crate__api__simple__wallet_get_yubikey_info_impl(
+        88 => wire__crate__api__simple__wallet_get_yubikey_info_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        87 => {
+        89 => {
             wire__crate__api__simple__wallet_has_authority_impl(port, ptr, rust_vec_len, data_len)
         }
-        88 => {
+        90 => {
             wire__crate__api__simple__wallet_init_authority_impl(port, ptr, rust_vec_len, data_len)
         }
-        89 => {
+        91 => {
             wire__crate__api__simple__wallet_list_with_ids_impl(port, ptr, rust_vec_len, data_len)
         }
-        90 => wire__crate__api__simple__wallet_remove_entry_impl(port, ptr, rust_vec_len, data_len),
-        91 => {
+        92 => wire__crate__api__simple__wallet_remove_entry_impl(port, ptr, rust_vec_len, data_len),
+        93 => {
             wire__crate__api__simple__wallet_unlock_session_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -4288,6 +4410,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::simple::AgentRequest {
                 description,
                 device_label,
                 device_id,
+                meta,
             } => [
                 1.into_dart(),
                 request_id.into_into_dart().into_dart(),
@@ -4295,6 +4418,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::simple::AgentRequest {
                 description.into_into_dart().into_dart(),
                 device_label.into_into_dart().into_dart(),
                 device_id.into_into_dart().into_dart(),
+                meta.into_into_dart().into_dart(),
             ]
             .into_dart(),
             _ => {
@@ -4371,6 +4495,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::simple::BusCsrEvent {
             self.device_label.into_into_dart().into_dart(),
             self.device_id.into_into_dart().into_dart(),
             self.csr_b64.into_into_dart().into_dart(),
+            self.meta.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4418,6 +4543,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::simple::BusPeer {
             self.label.into_into_dart().into_dart(),
             self.issued_at.into_into_dart().into_dart(),
             self.expires_at.into_into_dart().into_dart(),
+            self.meta.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4755,6 +4881,13 @@ impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
     }
 }
 
+impl SseEncode for std::collections::HashMap<String, String> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<(String, String)>>::sse_encode(self.into_iter().collect(), serializer);
+    }
+}
+
 impl SseEncode
     for StreamSink<crate::api::simple::AppMessage, flutter_rust_bridge::for_generated::SseCodec>
 {
@@ -4803,6 +4936,7 @@ impl SseEncode for crate::api::simple::AgentRequest {
                 description,
                 device_label,
                 device_id,
+                meta,
             } => {
                 <i32>::sse_encode(1, serializer);
                 <String>::sse_encode(request_id, serializer);
@@ -4810,6 +4944,7 @@ impl SseEncode for crate::api::simple::AgentRequest {
                 <String>::sse_encode(description, serializer);
                 <String>::sse_encode(device_label, serializer);
                 <String>::sse_encode(device_id, serializer);
+                <std::collections::HashMap<String, String>>::sse_encode(meta, serializer);
             }
             _ => {
                 unimplemented!("");
@@ -4862,6 +4997,7 @@ impl SseEncode for crate::api::simple::BusCsrEvent {
         <String>::sse_encode(self.device_label, serializer);
         <String>::sse_encode(self.device_id, serializer);
         <String>::sse_encode(self.csr_b64, serializer);
+        <std::collections::HashMap<String, String>>::sse_encode(self.meta, serializer);
     }
 }
 
@@ -4883,6 +5019,7 @@ impl SseEncode for crate::api::simple::BusPeer {
         <String>::sse_encode(self.label, serializer);
         <i64>::sse_encode(self.issued_at, serializer);
         <Option<i64>>::sse_encode(self.expires_at, serializer);
+        <std::collections::HashMap<String, String>>::sse_encode(self.meta, serializer);
     }
 }
 
@@ -5034,6 +5171,16 @@ impl SseEncode for Vec<u8> {
     }
 }
 
+impl SseEncode for Vec<(String, String)> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <(String, String)>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::simple::SubkeyInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5146,6 +5293,14 @@ impl SseEncode for Option<crate::api::simple::SshKeyDetails> {
     }
 }
 
+impl SseEncode for (String, String) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.0, serializer);
+        <String>::sse_encode(self.1, serializer);
+    }
+}
+
 impl SseEncode for crate::api::simple::SshKeyDetails {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5181,6 +5336,16 @@ impl SseEncode for u8 {
 impl SseEncode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
+}
+
+impl SseEncode for usize {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer
+            .cursor
+            .write_u64::<NativeEndian>(self as _)
+            .unwrap();
+    }
 }
 
 impl SseEncode for crate::api::simple::WalletCredentialDetail {

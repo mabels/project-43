@@ -150,11 +150,11 @@ return sign(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String requestId)?  listKeys,TResult Function( String requestId,  String fingerprint,  String description,  String deviceLabel,  String deviceId)?  sign,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String requestId)?  listKeys,TResult Function( String requestId,  String fingerprint,  String description,  String deviceLabel,  String deviceId,  Map<String, String> meta)?  sign,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case AgentRequest_ListKeys() when listKeys != null:
 return listKeys(_that.requestId);case AgentRequest_Sign() when sign != null:
-return sign(_that.requestId,_that.fingerprint,_that.description,_that.deviceLabel,_that.deviceId);case _:
+return sign(_that.requestId,_that.fingerprint,_that.description,_that.deviceLabel,_that.deviceId,_that.meta);case _:
   return orElse();
 
 }
@@ -172,11 +172,11 @@ return sign(_that.requestId,_that.fingerprint,_that.description,_that.deviceLabe
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String requestId)  listKeys,required TResult Function( String requestId,  String fingerprint,  String description,  String deviceLabel,  String deviceId)  sign,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String requestId)  listKeys,required TResult Function( String requestId,  String fingerprint,  String description,  String deviceLabel,  String deviceId,  Map<String, String> meta)  sign,}) {final _that = this;
 switch (_that) {
 case AgentRequest_ListKeys():
 return listKeys(_that.requestId);case AgentRequest_Sign():
-return sign(_that.requestId,_that.fingerprint,_that.description,_that.deviceLabel,_that.deviceId);}
+return sign(_that.requestId,_that.fingerprint,_that.description,_that.deviceLabel,_that.deviceId,_that.meta);}
 }
 /// A variant of `when` that fallback to returning `null`
 ///
@@ -190,11 +190,11 @@ return sign(_that.requestId,_that.fingerprint,_that.description,_that.deviceLabe
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String requestId)?  listKeys,TResult? Function( String requestId,  String fingerprint,  String description,  String deviceLabel,  String deviceId)?  sign,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String requestId)?  listKeys,TResult? Function( String requestId,  String fingerprint,  String description,  String deviceLabel,  String deviceId,  Map<String, String> meta)?  sign,}) {final _that = this;
 switch (_that) {
 case AgentRequest_ListKeys() when listKeys != null:
 return listKeys(_that.requestId);case AgentRequest_Sign() when sign != null:
-return sign(_that.requestId,_that.fingerprint,_that.description,_that.deviceLabel,_that.deviceId);case _:
+return sign(_that.requestId,_that.fingerprint,_that.description,_that.deviceLabel,_that.deviceId,_that.meta);case _:
   return null;
 
 }
@@ -272,7 +272,7 @@ as String,
 
 
 class AgentRequest_Sign extends AgentRequest {
-  const AgentRequest_Sign({required this.requestId, required this.fingerprint, required this.description, required this.deviceLabel, required this.deviceId}): super._();
+  const AgentRequest_Sign({required this.requestId, required this.fingerprint, required this.description, required this.deviceLabel, required this.deviceId, required final  Map<String, String> meta}): _meta = meta,super._();
   
 
 @override final  String requestId;
@@ -282,6 +282,15 @@ class AgentRequest_Sign extends AgentRequest {
  final  String deviceLabel;
 /// Stable device identifier from the sender's bus certificate (empty if unauthenticated).
  final  String deviceId;
+/// Live device snapshot collected at request time on the agent side.
+ final  Map<String, String> _meta;
+/// Live device snapshot collected at request time on the agent side.
+ Map<String, String> get meta {
+  if (_meta is EqualUnmodifiableMapView) return _meta;
+  // ignore: implicit_dynamic_type
+  return EqualUnmodifiableMapView(_meta);
+}
+
 
 /// Create a copy of AgentRequest
 /// with the given fields replaced by the non-null parameter values.
@@ -293,16 +302,16 @@ $AgentRequest_SignCopyWith<AgentRequest_Sign> get copyWith => _$AgentRequest_Sig
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AgentRequest_Sign&&(identical(other.requestId, requestId) || other.requestId == requestId)&&(identical(other.fingerprint, fingerprint) || other.fingerprint == fingerprint)&&(identical(other.description, description) || other.description == description)&&(identical(other.deviceLabel, deviceLabel) || other.deviceLabel == deviceLabel)&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is AgentRequest_Sign&&(identical(other.requestId, requestId) || other.requestId == requestId)&&(identical(other.fingerprint, fingerprint) || other.fingerprint == fingerprint)&&(identical(other.description, description) || other.description == description)&&(identical(other.deviceLabel, deviceLabel) || other.deviceLabel == deviceLabel)&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId)&&const DeepCollectionEquality().equals(other._meta, _meta));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,requestId,fingerprint,description,deviceLabel,deviceId);
+int get hashCode => Object.hash(runtimeType,requestId,fingerprint,description,deviceLabel,deviceId,const DeepCollectionEquality().hash(_meta));
 
 @override
 String toString() {
-  return 'AgentRequest.sign(requestId: $requestId, fingerprint: $fingerprint, description: $description, deviceLabel: $deviceLabel, deviceId: $deviceId)';
+  return 'AgentRequest.sign(requestId: $requestId, fingerprint: $fingerprint, description: $description, deviceLabel: $deviceLabel, deviceId: $deviceId, meta: $meta)';
 }
 
 
@@ -313,7 +322,7 @@ abstract mixin class $AgentRequest_SignCopyWith<$Res> implements $AgentRequestCo
   factory $AgentRequest_SignCopyWith(AgentRequest_Sign value, $Res Function(AgentRequest_Sign) _then) = _$AgentRequest_SignCopyWithImpl;
 @override @useResult
 $Res call({
- String requestId, String fingerprint, String description, String deviceLabel, String deviceId
+ String requestId, String fingerprint, String description, String deviceLabel, String deviceId, Map<String, String> meta
 });
 
 
@@ -330,14 +339,15 @@ class _$AgentRequest_SignCopyWithImpl<$Res>
 
 /// Create a copy of AgentRequest
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? requestId = null,Object? fingerprint = null,Object? description = null,Object? deviceLabel = null,Object? deviceId = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? requestId = null,Object? fingerprint = null,Object? description = null,Object? deviceLabel = null,Object? deviceId = null,Object? meta = null,}) {
   return _then(AgentRequest_Sign(
 requestId: null == requestId ? _self.requestId : requestId // ignore: cast_nullable_to_non_nullable
 as String,fingerprint: null == fingerprint ? _self.fingerprint : fingerprint // ignore: cast_nullable_to_non_nullable
 as String,description: null == description ? _self.description : description // ignore: cast_nullable_to_non_nullable
 as String,deviceLabel: null == deviceLabel ? _self.deviceLabel : deviceLabel // ignore: cast_nullable_to_non_nullable
 as String,deviceId: null == deviceId ? _self.deviceId : deviceId // ignore: cast_nullable_to_non_nullable
-as String,
+as String,meta: null == meta ? _self._meta : meta // ignore: cast_nullable_to_non_nullable
+as Map<String, String>,
   ));
 }
 

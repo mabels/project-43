@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:p43/src/rust/api/simple.dart' as rust;
@@ -30,7 +31,7 @@ class GateKeyService {
     mOptions: MacOsOptions(
       accessibility: KeychainAccessibility.unlocked_this_device,
     ),
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    aOptions: AndroidOptions(),
   );
 
   // ── Status ─────────────────────────────────────────────────────────────────
@@ -110,12 +111,19 @@ class GateKeyService {
     // Biometric path — try SE first.
     final bio = await _storage.read(key: _kBioMasterKey);
     if (bio != null) {
-      final authenticated = await _auth.authenticate(
-        localizedReason: 'Unlock p43 wallet',
-        biometricOnly: false,
-      );
-      if (authenticated) return bio;
-      // Biometric failed/cancelled — fall through to passphrase.
+      try {
+        final authenticated = await _auth.authenticate(
+          localizedReason: 'Unlock p43 wallet',
+          biometricOnly: false,
+        );
+        if (authenticated) return bio;
+        // Biometric declined / failed — fall through to passphrase.
+      } catch (e) {
+        // local_auth can throw if the app is not the key window (macOS) or
+        // if the platform channel is in an unexpected state.  Swallow and
+        // fall through so the passphrase dialog is always reachable.
+        debugPrint('[p43::gate_key] biometric exception, falling back: $e');
+      }
     }
 
     // Passphrase path.

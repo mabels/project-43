@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use p43::bus::ExternalBusMessage;
-use p43::bus::{self, load_or_generate_device_key, AuthorityPub, DeviceCsr, DeviceKey};
+use p43::bus::{self, load_or_generate_device_key, AuthorityPub, DeviceKey};
 use p43::matrix::{device_id_from_config, resolve_agent_room, MatrixConfig, RoomPointerStore};
 use p43::protocol::{BusCsrRequest, Message};
 use p43::ssh_agent::{card_auth_sign_ssh, load_card_auth_key_info, load_ssh_key, SshKeySlot};
@@ -207,6 +207,7 @@ impl MatrixProxySession {
             issuer_fp: vec![],
             iat: 0,
             exp: None,
+            meta: std::collections::HashMap::new(),
         };
 
         let outbound = p43::bus::OutboundBusMessage {
@@ -321,6 +322,7 @@ impl ssh_agent_lib::agent::Session for MatrixProxySession {
             data: request.data.to_vec(),
             flags: request.flags,
             description: "SSH sign request".into(),
+            meta: p43::ssh_agent::meta::collect(),
         });
 
         match self.forward(req).await? {
@@ -966,8 +968,9 @@ async fn ensure_registered(
         }
     }
 
-    // ── Generate CSR ──────────────────────────────────────────────────────────
-    let csr = DeviceCsr::generate(&key)?;
+    // ── Generate CSR with live meta snapshot ─────────────────────────────────
+    let meta = p43::ssh_agent::meta::collect();
+    let csr = p43::bus::DeviceCsr::generate_with_meta(&key, None, meta.clone())?;
     let request_id = uuid::Uuid::new_v4().to_string();
 
     // Register a oneshot in the pending map *before* sending, so we don't miss
@@ -981,6 +984,7 @@ async fn ensure_registered(
         device_label: label.clone(),
         device_id: key.device_id(),
         csr_b64: B64.encode(&csr.cose_bytes),
+        meta,
     });
     p43::matrix::global::send_message(room_id, &msg.to_json()?).await?;
 

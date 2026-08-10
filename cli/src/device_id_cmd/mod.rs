@@ -257,7 +257,8 @@ async fn do_register(cmd: DeviceIdCmd, store_dir: &Path) -> Result<()> {
     };
 
     let key = DeviceKey::from_scalars(&label, &ed_scalar, &x_scalar)?;
-    let csr = DeviceCsr::generate(&key)?;
+    let meta = p43::ssh_agent::meta::collect();
+    let csr = DeviceCsr::generate_with_meta(&key, None, meta.clone())?;
     let request_id = uuid::Uuid::new_v4().to_string();
 
     let msg = Message::BusCsrRequest(BusCsrRequest {
@@ -265,6 +266,7 @@ async fn do_register(cmd: DeviceIdCmd, store_dir: &Path) -> Result<()> {
         device_label: label.clone(),
         device_id: device_id_hex.clone(),
         csr_b64: base64::engine::general_purpose::STANDARD.encode(&csr.cose_bytes),
+        meta,
     });
 
     // Connect to Matrix (must already be logged in).

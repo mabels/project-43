@@ -5,6 +5,30 @@ use openpgp_card::ocard::KeyType;
 use openpgp_card::state::{Open, Transaction};
 use openpgp_card::Card;
 use secrecy::SecretString;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Mutex, MutexGuard};
+
+static CARD_LOCK: Mutex<()> = Mutex::new(());
+
+/// A wrapper around `Card<Open>` that holds a static process-wide mutex guard.
+/// This serialises all concurrent card operations, preventing PC/SC sharing violations.
+pub struct LockedCard {
+    card: Card<Open>,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl Deref for LockedCard {
+    type Target = Card<Open>;
+    fn deref(&self) -> &Self::Target {
+        &self.card
+    }
+}
+
+impl DerefMut for LockedCard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.card
+    }
+}
 
 /// Summary of a connected OpenPGP card, returned by [`list_connected_cards`].
 pub struct ConnectedCard {
@@ -17,6 +41,7 @@ pub struct ConnectedCard {
 }
 
 pub fn list_card() -> Result<()> {
+    let _guard = CARD_LOCK.lock().map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
     let backends =
         PcscBackend::cards(None).context("Failed to list PC/SC cards — is pcscd running?")?;
 
@@ -105,6 +130,7 @@ pub fn list_card() -> Result<()> {
 
 /// Return a summary of every connected OpenPGP card (no PIN required).
 pub fn list_connected_cards() -> Result<Vec<ConnectedCard>> {
+    let _guard = CARD_LOCK.lock().map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
     let backends =
         PcscBackend::cards(None).context("Failed to list PC/SC cards — is pcscd running?")?;
     let mut out = Vec::new();
@@ -161,29 +187,41 @@ pub fn card_pin_retries(ident: Option<&str>) -> Result<u8> {
     Ok(pw.err_count_pw1())
 }
 
-pub fn open_first_card() -> Result<Card<Open>> {
+pub fn open_first_card() -> Result<LockedCard> {
+    let guard = CARD_LOCK.lock().map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
     let mut backends =
         PcscBackend::cards(None).context("Failed to list PC/SC cards — is pcscd running?")?;
     let backend = backends
         .next()
         .context("No OpenPGP cards found")?
         .context("Failed to open card backend")?;
-    Card::<Open>::new(backend).context("Failed to open card")
+    let card = Card::<Open>::new(backend).context("Failed to open card")?;
+    Ok(LockedCard { card, _guard: guard })
 }
 
 /// Open a specific card by its AID ident string, or the first card if `ident`
 /// is `None`.
-pub fn open_card(ident: Option<&str>) -> Result<Card<Open>> {
-    match ident {
-        None => open_first_card(),
+pub fn open_card(ident: Option<&str>) -> Result<LockedCard> {
+    let guard = CARD_LOCK.lock().map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
+    let card = match ident {
+        None => {
+            let mut backends = PcscBackend::cards(None)
+                .context("Failed to list PC/SC cards — is pcscd running?")?;
+            let backend = backends
+                .next()
+                .context("No OpenPGP cards found")?
+                .context("Failed to open card backend")?;
+            Card::<Open>::new(backend).context("Failed to open card")?
+        }
         Some(wanted) => {
             let backends = PcscBackend::cards(None)
                 .context("Failed to list PC/SC cards — is pcscd running?")?
                 .map(|r| r.map(|b| Box::new(b) as Box<dyn CardBackend + Send + Sync>));
             Card::<Open>::open_by_ident(backends, wanted)
-                .context(format!("No connected card with ident '{wanted}'"))
+                .context(format!("No connected card with ident '{wanted}'"))?
         }
-    }
+    };
+    Ok(LockedCard { card, _guard: guard })
 }
 
 /// Wrap a raw PIN string as a `SecretString` for the card API.
@@ -191,9 +229,9 @@ pub(crate) fn pin_to_secret(pin: &str) -> SecretString {
     SecretString::new(pin.to_owned().into())
 }
 
-/// Open a transaction on an already-opened `Card<Open>`.
+/// Open a transaction on an already-opened `LockedCard`.
 #[allow(dead_code)]
-pub(crate) fn begin_tx(card: &mut Card<Open>) -> Result<Card<Transaction<'_>>> {
+pub(crate) fn begin_tx(card: &mut LockedCard) -> Result<Card<Transaction<'_>>> {
     card.transaction()
         .context("Failed to open card transaction")
 }

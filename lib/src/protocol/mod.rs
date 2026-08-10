@@ -9,6 +9,8 @@
 //! typeshare lib/ --lang typescript --output-file ui/extension/src/generated/messages.ts
 //! ```
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
@@ -144,6 +146,14 @@ pub struct SshSignRequest {
     pub flags: u32,
     /// Shown on the phone's approval UI, e.g. `"git push on laptop"`.
     pub description: String,
+    /// Live device snapshot collected at request time.
+    ///
+    /// Flat key-value store — no fixed schema, forward-compatible.
+    /// Standard keys: `hostname`, `net.<iface>.ip`, `net.<iface>.mac`,
+    /// `disk.total_gb`, `disk.free_gb`.  Additional keys may appear in
+    /// future versions; receivers must ignore unknown keys.
+    #[serde(default)]
+    pub meta: HashMap<String, String>,
 }
 
 /// Phone → Desktop: the resulting signature.
@@ -172,6 +182,10 @@ pub struct BusCsrRequest {
     pub device_id: String,
     /// Base64-encoded COSE_Sign1 CSR bytes.
     pub csr_b64: String,
+    /// Live device snapshot at registration time (same keys as sign-request meta).
+    /// Carried separately for quick UI display without decoding the CSR.
+    #[serde(default)]
+    pub meta: HashMap<String, String>,
 }
 
 /// Phone → Room: signed certificate + authority public key.
@@ -233,6 +247,7 @@ mod tests {
             data: b"Hello world".to_vec(),
             flags: 0,
             description: "git push on laptop".into(),
+            meta: Default::default(),
         });
 
         let json = msg.to_json().unwrap();

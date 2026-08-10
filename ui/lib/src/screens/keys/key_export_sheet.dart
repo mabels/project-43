@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -55,7 +56,11 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
       : widget.opensshKey ?? '';
 
   Future<void> _doExport() async {
-    setState(() { _busy = true; _error = null; _savedPath = null; });
+    setState(() {
+      _busy = true;
+      _error = null;
+      _savedPath = null;
+    });
     try {
       final base = widget.uid.replaceAll(RegExp(r'[^\w@.+-]'), '_');
       final (defaultName, ext) = _fmt == _ExportFmt.pgpPublic
@@ -67,15 +72,25 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
         fileName: defaultName,
         type: FileType.custom,
         allowedExtensions: [ext],
+        bytes: utf8.encode(_content),
       );
 
-      if (savePath == null) { setState(() => _busy = false); return; }
+      if (savePath == null) {
+        setState(() => _busy = false);
+        return;
+      }
 
       final out = savePath.endsWith('.$ext') ? savePath : '$savePath.$ext';
       await File(out).writeAsString(_content);
-      setState(() { _savedPath = out; _busy = false; });
+      setState(() {
+        _savedPath = out;
+        _busy = false;
+      });
     } catch (e) {
-      setState(() { _error = e.toString(); _busy = false; });
+      setState(() {
+        _error = e.toString();
+        _busy = false;
+      });
     }
   }
 
@@ -91,10 +106,12 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 10),
             child: Container(
-              width: 36, height: 4,
+              width: 36,
+              height: 4,
               decoration: BoxDecoration(
-                  color: const Color(0xFF8E8E93),
-                  borderRadius: BorderRadius.circular(2)),
+                color: const Color(0xFF8E8E93),
+                borderRadius: BorderRadius.circular(2),
+              ),
             ),
           ),
           Padding(
@@ -103,14 +120,17 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
               children: [
                 const Icon(Icons.upload_outlined, size: 18),
                 const SizedBox(width: 8),
-                const Text('Export public key',
-                    style: TextStyle(
-                        fontSize: 15, fontWeight: FontWeight.w600)),
+                const Text(
+                  'Export public key',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
                 const Spacer(),
                 if (_busy)
                   const SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2)),
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
               ],
             ),
           ),
@@ -144,14 +164,19 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
                   const SizedBox(height: 12),
                   Row(
                     children: [
-                      const Icon(Icons.check_circle_outline,
-                          size: 16, color: Color(0xFF30D158)),
+                      const Icon(
+                        Icons.check_circle_outline,
+                        size: 16,
+                        color: Color(0xFF30D158),
+                      ),
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
                           'Saved to ${_savedPath!.split('/').last}',
                           style: const TextStyle(
-                              fontSize: 12, color: Color(0xFF30D158)),
+                            fontSize: 12,
+                            color: Color(0xFF30D158),
+                          ),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
@@ -160,9 +185,13 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
                 ],
                 if (_error != null) ...[
                   const SizedBox(height: 12),
-                  Text(_error!,
-                      style: const TextStyle(
-                          fontSize: 12, color: Color(0xFFFF453A))),
+                  Text(
+                    _error!,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFFFF453A),
+                    ),
+                  ),
                 ],
                 const SizedBox(height: 20),
 
@@ -176,9 +205,9 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
                     minimumSize: const Size.fromHeight(44),
                   ),
                   icon: const Icon(Icons.save_alt_outlined, size: 18),
-                  label: Text(_fmt == _ExportFmt.pgpPublic
-                      ? 'Save .asc'
-                      : 'Save .pub'),
+                  label: Text(
+                    _fmt == _ExportFmt.pgpPublic ? 'Save .asc' : 'Save .pub',
+                  ),
                 ),
               ],
             ),
@@ -205,55 +234,55 @@ class _FormatTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: selected
-                ? const Color(0xFF0A84FF).withValues(alpha: 0.1)
-                : const Color(0xFF2C2C2E),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: selected
-                  ? const Color(0xFF0A84FF)
-                  : const Color(0xFF3A3A3C),
-              width: selected ? 1.5 : 1,
+    onTap: onTap,
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: selected
+            ? const Color(0xFF0A84FF).withValues(alpha: 0.1)
+            : const Color(0xFF2C2C2E),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: selected ? const Color(0xFF0A84FF) : const Color(0xFF3A3A3C),
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            icon,
+            size: 18,
+            color: selected ? const Color(0xFF0A84FF) : const Color(0xFF8E8E93),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                    color: selected ? const Color(0xFF0A84FF) : null,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF8E8E93),
+                  ),
+                ),
+              ],
             ),
           ),
-          child: Row(
-            children: [
-              Icon(icon,
-                  size: 18,
-                  color: selected
-                      ? const Color(0xFF0A84FF)
-                      : const Color(0xFF8E8E93)),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(label,
-                        style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: selected
-                                ? FontWeight.w600
-                                : FontWeight.normal,
-                            color: selected
-                                ? const Color(0xFF0A84FF)
-                                : null)),
-                    const SizedBox(height: 2),
-                    Text(subtitle,
-                        style: const TextStyle(
-                            fontSize: 11, color: Color(0xFF8E8E93))),
-                  ],
-                ),
-              ),
-              if (selected)
-                const Icon(Icons.check_circle,
-                    size: 18, color: Color(0xFF0A84FF)),
-            ],
-          ),
-        ),
-      );
+          if (selected)
+            const Icon(Icons.check_circle, size: 18, color: Color(0xFF0A84FF)),
+        ],
+      ),
+    ),
+  );
 }

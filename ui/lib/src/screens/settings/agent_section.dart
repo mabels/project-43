@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:p43/src/rust/api/simple.dart'
-    show sshAgentIsRunning, sshAgentSocketPath, sshAgentStart, sshAgentStop;
+    show sshAgentIsRunning, sshAgentSocketPath;
 import '../../services/settings_service.dart';
 import 'shared_widgets.dart';
 
@@ -120,18 +120,18 @@ class _DesktopAgentSectionState extends State<DesktopAgentSection> {
     try {
       final running = await sshAgentIsRunning();
       final path = running ? await sshAgentSocketPath() : null;
-      if (mounted) setState(() {
-        _running = running;
-        _socketPath = path;
-      });
+      if (mounted) {
+        setState(() {
+          _running = running;
+          _socketPath = path;
+        });
+      }
     } catch (_) {}
   }
 
   Future<void> _onToggle(bool value) async {
     final s = SettingsService.instance.settings;
-    await SettingsService.instance.save(
-      s.copyWith(desktopAgentEnabled: value),
-    );
+    await SettingsService.instance.save(s.copyWith(desktopAgentEnabled: value));
     // Give Rust a moment to start/stop then refresh status.
     await Future<void>.delayed(const Duration(milliseconds: 400));
     await _refresh();
@@ -140,9 +140,7 @@ class _DesktopAgentSectionState extends State<DesktopAgentSection> {
   Future<void> _onLabelChanged(String value) async {
     final s = SettingsService.instance.settings;
     final label = value.trim().isEmpty ? null : value.trim();
-    await SettingsService.instance.save(
-      s.copyWith(desktopAgentLabel: label),
-    );
+    await SettingsService.instance.save(s.copyWith(desktopAgentLabel: label));
   }
 
   void _copySocket() {

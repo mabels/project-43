@@ -34,12 +34,28 @@ class BuildPod {
     final artifacts = await provider.getArtifacts(targets);
 
     void performLipo(String targetFile, Iterable<String> sourceFiles) {
-      runCommand("lipo", [
-        '-create',
-        ...sourceFiles,
-        '-output',
-        targetFile,
-      ]);
+      // `lipo -create` creates the output with O_EXCL when it does not exist
+      // yet, so it fails with `errno=17 (File exists)` when the build script
+      // phase runs more than once concurrently for the same output (Xcode can
+      // schedule it that way, e.g. for multiple targets/slices). Write to a
+      // unique temporary file first and atomically rename it into place so
+      // concurrent invocations cannot collide.
+      final tempFile =
+          '$targetFile.tmp-$pid-${DateTime.now().microsecondsSinceEpoch}';
+      try {
+        runCommand("lipo", [
+          '-create',
+          ...sourceFiles,
+          '-output',
+          tempFile,
+        ]);
+        File(tempFile).renameSync(targetFile);
+      } finally {
+        final leftover = File(tempFile);
+        if (leftover.existsSync()) {
+          leftover.deleteSync();
+        }
+      }
     }
 
     final outputDir = Environment.outputDir;

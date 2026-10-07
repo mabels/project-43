@@ -1311,7 +1311,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
             _ = stop_rx.notified() => {
                 eprintln!("[p43::bridge] Reconnect requested — stopping listener for catch-up");
             }
-            _ = p43::matrix::global::listen_room(
+            result = p43::matrix::global::listen_room(
                 &room_id,
                 since.as_deref(),
                 on_pointer,
@@ -1325,7 +1325,11 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                             .send(p43::bus::ExternalBusMessage { message: msg, event_id });
                     }
                 },
-            ) => {}
+            ) => {
+                if let Err(e) = result {
+                    eprintln!("[p43::bridge] listen_room for {room_id} exited with error: {e:?}");
+                }
+            }
         }
 
         // ── Teardown ──────────────────────────────────────────────────────────

@@ -120,6 +120,56 @@ pub async fn send_message(client: &Client, room_id: &RoomId, text: &str) -> Resu
 /// only new messages.
 pub type ListenPointer = String;
 
+/// True if `e` is a well-formed Matrix client-API error response (the
+/// request reached the homeserver and was rejected with an `errcode`),
+/// as opposed to a network/timeout/connection failure.
+fn is_stale_pointer_error(e: &matrix_sdk::Error) -> bool {
+    e.client_api_error_kind().is_some()
+}
+
+/// Bound placed on individual catch-up requests (the anchor `sync_once`
+/// and each backward-pagination `room.messages()` page) in the `Some(token)`
+/// branch of [`listen`]. Chosen to be strictly less than matrix-sdk's own
+/// default per-request timeout (30s, see `DEFAULT_REQUEST_TIMEOUT` in
+/// `vendor/matrix-sdk/src/http_client/mod.rs`) so *we* control what happens
+/// on expiry instead of just re-surfacing the SDK's own timeout error.
+const CATCH_UP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Outcome of a bounded catch-up request, collapsing two distinct failure
+/// causes into one recoverable case: [`CatchUpFailure::Recoverable`] means
+/// nothing else about this specific `since` token/gap will help — either the
+/// server said so directly (rejected pagination token/range), or the
+/// request just never completed within [`CATCH_UP_REQUEST_TIMEOUT`].
+///
+/// The latter matters because a stored `since` token can point into a
+/// region of room history that server-side retention purges (see
+/// `docs/decisions/0006-synapse-message-retention.md`) or client-issued
+/// redaction (`redact_event` / `purge_room_history`) have since made
+/// expensive or impossible for the server to walk through — this can
+/// surface as an outright rejection *or* as the request simply taking far
+/// longer than normal (observed: a `/messages` backward-pagination request
+/// against a stale token exceeding the SDK's flat 30s timeout, even though
+/// the homeserver is otherwise fast and reachable — a longer client-side
+/// timeout would not help, since the request itself may never complete in
+/// reasonable time). Either way, retrying with the *same* token again is
+/// pointless, so both cases fall back the same way: abandon catch-up for
+/// this pointer and resync from the current live position.
+enum CatchUpFailure {
+    Recoverable,
+    Fatal(matrix_sdk::Error),
+}
+
+async fn bounded_catch_up_request<T>(
+    fut: impl std::future::Future<Output = matrix_sdk::Result<T>>,
+) -> std::result::Result<T, CatchUpFailure> {
+    match tokio::time::timeout(CATCH_UP_REQUEST_TIMEOUT, fut).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) if is_stale_pointer_error(&e) => Err(CatchUpFailure::Recoverable),
+        Ok(Err(e)) => Err(CatchUpFailure::Fatal(e)),
+        Err(_elapsed) => Err(CatchUpFailure::Recoverable),
+    }
+}
+
 /// Subscribe to plain-text messages in `room_id`, blocking until interrupted.
 ///
 /// ## Catch-up behaviour
@@ -225,11 +275,35 @@ where
         //
         // Backward pagination with `to = token` fetches ALL events since
         // `token` in 100-event pages, regardless of how many accumulated.
+        //
+        // A stored `token` can go stale (see [`CatchUpFailure`] for why, and
+        // why both failure modes fall back the same way): the anchor sync
+        // and every pagination page below are wrapped in
+        // [`bounded_catch_up_request`] so a broken token can't wedge this
+        // call forever.
         Some(token) => {
-            let resp = client
-                .sync_once(SyncSettings::default().token(token).timeout(Duration::ZERO))
-                .await
-                .context("Catch-up sync failed")?;
+            let resp = match bounded_catch_up_request(
+                client.sync_once(SyncSettings::default().token(token).timeout(Duration::ZERO)),
+            )
+            .await
+            {
+                Ok(resp) => resp,
+                Err(CatchUpFailure::Recoverable) => {
+                    eprintln!(
+                        "[p43::matrix] stored sync pointer for {room_id} could not be \
+                         resolved (rejected by server, or no response within \
+                         {CATCH_UP_REQUEST_TIMEOUT:?}) — resyncing from current position, \
+                         catch-up history skipped"
+                    );
+                    client
+                        .sync_once(SyncSettings::default().timeout(Duration::ZERO))
+                        .await
+                        .context("Fallback sync after catch-up anchor failure failed")?
+                }
+                Err(CatchUpFailure::Fatal(e)) => {
+                    return Err(anyhow::Error::new(e)).context("Catch-up sync failed");
+                }
+            };
 
             let next_batch = resp.next_batch.clone();
 
@@ -245,10 +319,21 @@ where
                 opts.from = from.clone();
                 opts.to = Some(token.to_string());
 
-                let page = room
-                    .messages(opts)
-                    .await
-                    .context("Failed to fetch catch-up history page")?;
+                let page = match bounded_catch_up_request(room.messages(opts)).await {
+                    Ok(page) => page,
+                    Err(CatchUpFailure::Recoverable) => {
+                        eprintln!(
+                            "[p43::matrix] catch-up pagination for {room_id} could not \
+                             continue (server rejected the gap, or no response within \
+                             {CATCH_UP_REQUEST_TIMEOUT:?}) — accepting partial catch-up"
+                        );
+                        break;
+                    }
+                    Err(CatchUpFailure::Fatal(e)) => {
+                        return Err(anyhow::Error::new(e))
+                            .context("Failed to fetch catch-up history page");
+                    }
+                };
 
                 for ev in &page.chunk {
                     if let Some(quad) = extract_text_event(ev) {

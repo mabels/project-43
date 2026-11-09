@@ -1156,12 +1156,13 @@ class _AuthorityExportDialog extends StatelessWidget {
   }
 
   Future<void> _saveFile(BuildContext context) async {
-    final savePath = await FilePicker.saveFile(
+    final saveUri = await FilePicker.saveFile(
       dialogTitle: 'Save authority key bundle',
       fileName: 'p43-authority.bundle',
       bytes: Uint8List.fromList(rawBytes),
     );
-    if (savePath == null) return;
+    if (saveUri == null) return;
+    final savePath = saveUri.toFilePath();
     final file = File(savePath);
     await file.writeAsBytes(rawBytes, flush: true);
     if (context.mounted) {

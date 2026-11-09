@@ -192,7 +192,14 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   Future<void> _refreshLockState() async {
     try {
       final v = await busIsSessionUnlocked();
-      if (mounted) setState(() => _sessionUnlocked = v);
+      if (mounted) {
+        setState(() {
+          _sessionUnlocked = v;
+          if (!v) {
+            _walletMasterHex = null;
+          }
+        });
+      }
     } catch (_) {}
   }
 
@@ -207,10 +214,14 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     });
   }
 
+  bool _unlocking = false;
+
   /// Unlock the wallet: try biometric first, fall back to passphrase prompt.
   /// On success, also triggers the bus session unlock flow.
   /// Returns the master hex on success, null on cancel / error.
   Future<String?> _openUnlockDialog() async {
+    if (_unlocking) return null;
+    _unlocking = true;
     try {
       final masterHex = await GateKeyService.instance.unlock(
         passphraseProvider: () => _promptWalletPassphrase(),
@@ -231,6 +242,8 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
         _unlockRequestCtrl.add(null);
       }
       return null;
+    } finally {
+      _unlocking = false;
     }
   }
 
@@ -302,11 +315,17 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
         } else if (msg is AppMessage_BusEvent) {
           _busCtrl.add(msg.event);
         } else if (msg is AppMessage_SessionLockRequired) {
-          if (_tabIndex != 2) setState(() => _tabIndex = 2);
-          _sessionLockCtrl.add(null);
           _externalLockCtrl.add(null);
           WindowService.instance.bringToFront();
-          if (mounted) setState(() => _sessionUnlocked = false);
+          if (mounted) {
+            setState(() {
+              _sessionUnlocked = false;
+              _walletMasterHex = null;
+            });
+            // Automatically prompt for unlock (Touch ID / biometric first)
+            // so the incoming request is unblocked without needing a manual click.
+            _openUnlockDialog();
+          }
         }
       },
       onError: (_) => _scheduleReconnect(roomId),
@@ -338,9 +357,7 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
       _wasBackground = true;
-      SettingsService.instance.invalidateCache();
-      _externalLockCtrl.add(null);
-      if (mounted) setState(() => _sessionUnlocked = false);
+      _lockAll();
     } else if (state == AppLifecycleState.resumed) {
       _refreshLockState();
       if (_wasBackground) {
@@ -357,6 +374,8 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
   void _onLoggedIn() => setState(() => _loggedIn = true);
   void _onLoggedOut() => setState(() => _loggedIn = false);
 
+  bool get _isUnlocked => _walletMasterHex != null && _sessionUnlocked;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -371,18 +390,18 @@ class _RootShellState extends State<_RootShell> with WidgetsBindingObserver {
         ),
         actions: [
           IconButton(
-            tooltip: _walletMasterHex != null
-                ? 'Lock wallet${_sessionUnlocked ? ' + session' : ''}'
+            tooltip: _isUnlocked
+                ? 'Lock wallet + session'
                 : 'Unlock wallet',
             icon: Icon(
-              _walletMasterHex != null
+              _isUnlocked
                   ? Icons.lock_open_outlined
                   : Icons.lock_outlined,
             ),
-            color: _walletMasterHex != null
+            color: _isUnlocked
                 ? const Color(0xFF30D158) // green — wallet open
                 : Colors.grey,
-            onPressed: _walletMasterHex != null ? _lockAll : _openUnlockDialog,
+            onPressed: _isUnlocked ? _lockAll : _openUnlockDialog,
           ),
           const SizedBox(width: 4),
         ],

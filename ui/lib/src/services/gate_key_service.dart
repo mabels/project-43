@@ -114,7 +114,7 @@ class GateKeyService {
       try {
         final authenticated = await _auth.authenticate(
           localizedReason: 'Unlock p43 wallet',
-          biometricOnly: false,
+          biometricOnly: true,
         );
         if (authenticated) return bio;
         // Biometric declined / failed — fall through to passphrase.

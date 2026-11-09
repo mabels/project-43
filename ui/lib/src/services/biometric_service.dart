@@ -181,7 +181,7 @@ class BiometricService {
     try {
       final ok = await _auth.authenticate(
         localizedReason: reason,
-        biometricOnly: false,
+        biometricOnly: true,
       );
       if (!ok) return null;
       final cred = await _storage.read(key: _credKey(fingerprint));

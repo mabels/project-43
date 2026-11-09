@@ -41,6 +41,10 @@ post_install do |installer|
 
     target.build_configurations.each do |config|
       config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '12.0'
+      flags = config.build_settings['OTHER_LDFLAGS'] || '$(inherited)'
+      unless flags.include?('-Wl,-no_compact_unwind')
+        config.build_settings['OTHER_LDFLAGS'] = "#{flags} -Wl,-no_compact_unwind"
+      end
     end
   end
 end

@@ -67,7 +67,7 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
           ? ('${base}_pub.asc', 'asc')
           : ('$base.pub', 'pub');
 
-      final savePath = await FilePicker.saveFile(
+      final saveUri = await FilePicker.saveFile(
         dialogTitle: 'Export public key…',
         fileName: defaultName,
         type: FileType.custom,
@@ -75,11 +75,12 @@ class _WalletKeyExportSheetState extends State<WalletKeyExportSheet> {
         bytes: utf8.encode(_content),
       );
 
-      if (savePath == null) {
+      if (saveUri == null) {
         setState(() => _busy = false);
         return;
       }
 
+      final savePath = saveUri.toFilePath();
       final out = savePath.endsWith('.$ext') ? savePath : '$savePath.$ext';
       await File(out).writeAsString(_content);
       setState(() {

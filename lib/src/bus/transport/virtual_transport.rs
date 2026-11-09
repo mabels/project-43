@@ -93,6 +93,12 @@ impl TransportBackend for VirtualTransport {
     }
 
     async fn send(&self, raw_frame: &str) -> anyhow::Result<String> {
+        let lat = self.latency_ms.lock().ok().and_then(|g| *g);
+        if let Some(ms) = lat {
+            if ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+        }
         if *self.fail_send.lock().unwrap() {
             anyhow::bail!("VirtualTransport {} simulated send failure", self.name);
         }

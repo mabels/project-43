@@ -178,6 +178,7 @@ pub fn spawn_decrypt_middleware(
     internal_tx: broadcast::Sender<InboundBusMessage>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let dedup = super::transport::dedup::MessageDeduplicator::default();
         loop {
             let ExternalBusMessage {
                 message: raw_msg,
@@ -191,6 +192,11 @@ pub fn spawn_decrypt_middleware(
                 }
             };
 
+            // 1. Drop duplicate outer messages (e.g. same BusSecure envelope arriving via multiple transports)
+            if dedup.is_duplicate_message(&raw_msg) {
+                continue;
+            }
+
             // Evaluate the decrypt callback using a shared reference so that
             // `raw_msg` remains owned and can be moved into `on_locked` if the
             // session is locked.
@@ -201,7 +207,15 @@ pub fn spawn_decrypt_middleware(
             // The borrow of `raw_msg` inside the match above ends here.
 
             let (msg, sender_cert) = match decrypt_result {
-                Some(DecryptResult::Ok(inner, cert)) => (inner, Some(*cert)),
+                Some(DecryptResult::Ok(inner, cert)) => {
+                    // 2. Drop duplicate inner messages by request_id
+                    if let Some(rid) = inner.request_id() {
+                        if dedup.is_duplicate(rid) {
+                            continue;
+                        }
+                    }
+                    (inner, Some(*cert))
+                }
                 Some(DecryptResult::Locked) => {
                     // Pass the original ExternalBusMessage (including event_id)
                     // to the caller so it can be buffered and replayed once the

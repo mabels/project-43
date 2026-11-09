@@ -9,10 +9,24 @@ use tokio::sync::{broadcast, watch};
 
 use crate::bus::bridge::ExternalBusMessage;
 
+pub mod dedup;
 pub mod local_uds;
 pub mod virtual_transport;
 #[cfg(feature = "matrix")]
 pub mod matrix;
+
+pub use dedup::{message_dedup_id, MessageDeduplicator};
+
+/// Emission strategy for outbound transport routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SendStrategy {
+    /// Send to ALL available backends concurrently; fastest delivery wins and
+    /// subsequent duplicates are dropped by the deduplicator (default).
+    #[default]
+    Parallel,
+    /// Try backends sequentially: preferred/primary first, then fallback list.
+    Sequential,
+}
 
 // ── Connection state ──────────────────────────────────────────────────────────
 
@@ -82,6 +96,8 @@ pub struct TransportRouter {
     inbound_tx: broadcast::Sender<ExternalBusMessage>,
     status_tx: watch::Sender<Vec<BackendStatus>>,
     status_rx: watch::Receiver<Vec<BackendStatus>>,
+    deduplicator: dedup::MessageDeduplicator,
+    strategy: SendStrategy,
 }
 
 impl TransportRouter {
@@ -93,7 +109,24 @@ impl TransportRouter {
             inbound_tx,
             status_tx,
             status_rx,
+            deduplicator: dedup::MessageDeduplicator::default(),
+            strategy: SendStrategy::Parallel,
         }
+    }
+
+    /// Set the emission strategy (Parallel racing or Sequential fallback).
+    pub fn set_strategy(&mut self, strategy: SendStrategy) {
+        self.strategy = strategy;
+    }
+
+    /// Current emission strategy.
+    pub fn strategy(&self) -> SendStrategy {
+        self.strategy
+    }
+
+    /// Access the shared message deduplicator.
+    pub fn deduplicator(&self) -> &dedup::MessageDeduplicator {
+        &self.deduplicator
     }
 
     /// Register a backend with this router.
@@ -150,19 +183,77 @@ impl TransportRouter {
         });
     }
 
-    /// Send `raw_frame` over the optimal available backend.
-    ///
-    /// If `preferred_backend` is supplied and available, it is tried first.
-    /// Otherwise, backends are tried in registration priority order.
-    /// Returns `(tracking_id, backend_name)` on success.
+    /// Send `raw_frame` over transport backends according to the configured [`SendStrategy`].
     pub async fn send(
         &self,
         raw_frame: &str,
         preferred_backend: Option<&str>,
     ) -> anyhow::Result<(String, &'static str)> {
-        // 1. Try preferred backend first if specified and ready.
+        match self.strategy {
+            SendStrategy::Parallel => self.send_parallel(raw_frame, preferred_backend).await,
+            SendStrategy::Sequential => self.send_sequential(raw_frame, preferred_backend).await,
+        }
+    }
+
+    /// Parallel racing: sends to all available backends concurrently; fastest to succeed wins!
+    pub async fn send_parallel(
+        &self,
+        raw_frame: &str,
+        preferred_backend: Option<&str>,
+    ) -> anyhow::Result<(String, &'static str)> {
+        let available: Vec<_> = self
+            .backends
+            .iter()
+            .filter(|b| b.is_available())
+            .cloned()
+            .collect();
+
+        if available.is_empty() {
+            // Fallback: if preferred backend is explicitly given, attempt it directly
+            if let Some(pref) = preferred_backend {
+                if let Some(b) = self.backends.iter().find(|b| b.name() == pref) {
+                    let id = b.send(raw_frame).await?;
+                    return Ok((id, b.name()));
+                }
+            }
+            anyhow::bail!("no transport backends available");
+        }
+
+        if available.len() == 1 {
+            let b = &available[0];
+            let id = b.send(raw_frame).await?;
+            return Ok((id, b.name()));
+        }
+
+        // Fan out concurrently to all available backends; fastest wins!
+        let futures: Vec<_> = available
+            .iter()
+            .map(|b| {
+                let name = b.name();
+                let frame = raw_frame.to_string();
+                let backend = Arc::clone(b);
+                Box::pin(async move {
+                    let id = backend.send(&frame).await?;
+                    Ok::<(String, &'static str), anyhow::Error>((id, name))
+                })
+            })
+            .collect();
+
+        match futures_util::future::select_ok(futures).await {
+            Ok(((id, name), _remaining)) => Ok((id, name)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Sequential fallback: tries preferred/primary first, then fallback list.
+    pub async fn send_sequential(
+        &self,
+        raw_frame: &str,
+        preferred_backend: Option<&str>,
+    ) -> anyhow::Result<(String, &'static str)> {
+        // 1. Try preferred backend first if specified.
         if let Some(pref) = preferred_backend {
-            if let Some(b) = self.backends.iter().find(|b| b.name() == pref && b.is_available()) {
+            if let Some(b) = self.backends.iter().find(|b| b.name() == pref) {
                 match b.send(raw_frame).await {
                     Ok(id) => return Ok((id, b.name())),
                     Err(e) => {
@@ -174,9 +265,12 @@ impl TransportRouter {
             }
         }
 
-        // 2. Iterate through available backends in priority order.
+        // 2. Iterate through available backends in priority order (skipping the preferred backend that already failed).
         let mut last_err = None;
         for b in &self.backends {
+            if Some(b.name()) == preferred_backend {
+                continue;
+            }
             if b.is_available() {
                 match b.send(raw_frame).await {
                     Ok(id) => return Ok((id, b.name())),
@@ -265,6 +359,7 @@ mod tests {
     async fn test_router_priority_order() {
         let (inbound_tx, _inbound_rx) = new_external_bus();
         let mut router = TransportRouter::new(inbound_tx);
+        router.set_strategy(SendStrategy::Sequential);
 
         let t1 = Arc::new(VirtualTransport::new("matrix"));
         let t2 = Arc::new(VirtualTransport::new("local_uds"));
@@ -272,7 +367,7 @@ mod tests {
         router.register_backend(t1.clone());
         router.register_backend(t2.clone());
 
-        // Both are connected. matrix (t1) has priority.
+        // Both are connected. In sequential mode, matrix (t1) has priority.
         let status = router.status();
         assert!(status[0].is_active, "matrix should be active");
         assert!(!status[1].is_active, "local_uds should be standby");
@@ -282,6 +377,32 @@ mod tests {
         assert_eq!(id, "matrix:1");
         assert_eq!(t1.sent_frames(), vec!["payload 1"]);
         assert!(t2.sent_frames().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_router_parallel_racing_fastest_wins() {
+        let (inbound_tx, _inbound_rx) = new_external_bus();
+        let mut router = TransportRouter::new(inbound_tx);
+        // Default strategy is SendStrategy::Parallel
+
+        let t1 = Arc::new(VirtualTransport::new("matrix"));
+        let t2 = Arc::new(VirtualTransport::new("local_uds"));
+
+        // Matrix is slow (50 ms), Local UDS is instant (0 ms).
+        t1.set_latency_ms(Some(50));
+        t2.set_latency_ms(None);
+
+        router.register_backend(t1.clone());
+        router.register_backend(t2.clone());
+
+        let start = std::time::Instant::now();
+        let (id, name) = router.send("payload parallel", None).await.unwrap();
+        let elapsed = start.elapsed();
+
+        // Local UDS wins immediately without waiting for Matrix!
+        assert_eq!(name, "local_uds");
+        assert_eq!(id, "local_uds:1");
+        assert!(elapsed.as_millis() < 40, "parallel send should return immediately on fastest backend");
     }
 
     #[tokio::test]
@@ -312,6 +433,7 @@ mod tests {
     async fn test_router_preferred_backend() {
         let (inbound_tx, _inbound_rx) = new_external_bus();
         let mut router = TransportRouter::new(inbound_tx);
+        router.set_strategy(SendStrategy::Sequential);
 
         let t1 = Arc::new(VirtualTransport::new("local_uds"));
         let t2 = Arc::new(VirtualTransport::new("matrix"));
@@ -328,6 +450,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_router_preferred_backend_fallback_when_preferred_fails() {
+        let (inbound_tx, _inbound_rx) = new_external_bus();
+        let mut router = TransportRouter::new(inbound_tx);
+        router.set_strategy(SendStrategy::Sequential);
+
+        let t1 = Arc::new(VirtualTransport::new("matrix"));
+        let t2 = Arc::new(VirtualTransport::new("local_uds"));
+
+        // Simulate matrix failing to send.
+        t1.set_fail_send(true);
+
+        router.register_backend(t1.clone());
+        router.register_backend(t2.clone());
+
+        // Preferred is matrix (incoming transport), but it fails to send.
+        // Router should seamlessly fall back to the available fallback list (local_uds).
+        let (id, name) = router.send("payload fallback", Some("matrix")).await.unwrap();
+        assert_eq!(name, "local_uds");
+        assert_eq!(id, "local_uds:1");
+        assert_eq!(t2.sent_frames(), vec!["payload fallback"]);
+    }
+
+    #[tokio::test]
     async fn test_router_all_offline_error() {
         let (inbound_tx, _inbound_rx) = new_external_bus();
         let mut router = TransportRouter::new(inbound_tx);
@@ -340,6 +485,60 @@ mod tests {
 
         let err = router.send("payload 4", None).await.unwrap_err();
         assert!(err.to_string().contains("no transport backends available"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_decrypt_middleware_deduplication() {
+        use crate::bus::{
+            new_external_bus, new_internal_bus, spawn_decrypt_middleware, DecryptResult,
+            ExternalBusMessage,
+        };
+        use crate::protocol::{Message, SshSignRequest};
+
+        let (ext_tx, ext_rx) = new_external_bus();
+        let (int_tx, mut int_rx) = new_internal_bus();
+
+        let _handle = spawn_decrypt_middleware(|_| DecryptResult::Skip, |_| {}, ext_rx, int_tx);
+
+        let req = Message::SshSignRequest(SshSignRequest {
+            request_id: "req-dedup-test".into(),
+            fingerprint: "fp".into(),
+            data: b"data".to_vec(),
+            flags: 0,
+            description: "test".into(),
+            meta: Default::default(),
+        });
+
+        // Send same message twice (simulating arrival from both Local UDS and Matrix)
+        ext_tx
+            .send(ExternalBusMessage {
+                message: req.clone(),
+                event_id: "local_uds:1".into(),
+            })
+            .unwrap();
+
+        ext_tx
+            .send(ExternalBusMessage {
+                message: req,
+                event_id: "$matrix_duplicate_event".into(),
+            })
+            .unwrap();
+
+        // 1st message arrives on internal bus
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(500), int_rx.recv())
+                .await
+                .expect("first message should arrive")
+                .unwrap();
+        assert_eq!(received.event_id, "local_uds:1");
+
+        // 2nd duplicate message is dropped: channel should timeout with no message
+        let second_res =
+            tokio::time::timeout(std::time::Duration::from_millis(150), int_rx.recv()).await;
+        assert!(
+            second_res.is_err(),
+            "second duplicate message should be filtered out by deduplicator"
+        );
     }
 
     #[tokio::test]

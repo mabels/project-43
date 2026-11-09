@@ -671,6 +671,15 @@ fn run_matrix(
             }
         }
 
+        match args.strategy {
+            subcmd::StrategyPreference::Parallel => {
+                router.set_strategy(p43::bus::SendStrategy::Parallel);
+            }
+            subcmd::StrategyPreference::Sequential => {
+                router.set_strategy(p43::bus::SendStrategy::Sequential);
+            }
+        }
+
         let router = Arc::new(router);
         let _router_monitor = router.clone().spawn_monitoring();
 

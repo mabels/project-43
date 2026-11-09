@@ -54,9 +54,10 @@ pub use message::{
 };
 pub use signer::BusSigner;
 pub use transport::{
+    dedup::{message_dedup_id, MessageDeduplicator, DEFAULT_DEDUP_CAPACITY, DEFAULT_DEDUP_TTL},
     local_uds::{local_bus_socket_path, LocalUdsClient, LocalUdsServer, LOCAL_BUS_SOCK_NAME},
     virtual_transport::VirtualTransport,
-    BackendState, BackendStatus, TransportBackend, TransportRouter,
+    BackendState, BackendStatus, SendStrategy, TransportBackend, TransportRouter,
 };
 #[cfg(feature = "matrix")]
 pub use transport::matrix::MatrixBackend;

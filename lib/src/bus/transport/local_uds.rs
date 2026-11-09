@@ -72,13 +72,13 @@ impl LocalUdsServer {
             let _ = std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600));
         }
 
-        let (state_tx, state_rx) = watch::channel(BackendState::Connected);
+        let (state_tx, state_rx) = watch::channel(BackendState::Disconnected);
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
         let clients: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>> = Arc::new(Mutex::new(Vec::new()));
 
         let server = Arc::new(Self {
             sock_path: sock_path.clone(),
-            _state_tx: state_tx,
+            _state_tx: state_tx.clone(),
             state_rx,
             clients: Arc::clone(&clients),
             seq: AtomicU64::new(1),
@@ -87,6 +87,7 @@ impl LocalUdsServer {
 
         let sock_path_for_cleanup = sock_path.clone();
         let clients_for_loop = Arc::clone(&clients);
+        let state_tx_loop = state_tx.clone();
 
         tokio::spawn(async move {
             loop {
@@ -101,10 +102,19 @@ impl LocalUdsServer {
                                 if let Ok(mut g) = clients_for_loop.lock() {
                                     g.push(client_tx);
                                 }
+                                let _ = state_tx_loop.send_if_modified(|curr| {
+                                    if *curr != BackendState::Connected {
+                                        *curr = BackendState::Connected;
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                });
 
                                 let (reader, mut writer) = stream.into_split();
                                 let in_tx = inbound_tx.clone();
                                 let clients_cleanup = Arc::clone(&clients_for_loop);
+                                let state_tx_cleanup = state_tx_loop.clone();
 
                                 // Client read task: read line-delimited JSON.
                                 tokio::spawn(async move {
@@ -133,6 +143,16 @@ impl LocalUdsServer {
                                     // Remove disconnected client from pool.
                                     if let Ok(mut g) = clients_cleanup.lock() {
                                         g.retain(|c| !c.is_closed());
+                                        if g.is_empty() {
+                                            let _ = state_tx_cleanup.send_if_modified(|curr| {
+                                                if *curr != BackendState::Disconnected {
+                                                    *curr = BackendState::Disconnected;
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            });
+                                        }
                                     }
                                 });
                             }
@@ -180,9 +200,14 @@ impl TransportBackend for LocalUdsServer {
 
     fn status(&self) -> BackendStatus {
         let active = self.active_clients();
+        let state = if active > 0 {
+            BackendState::Connected
+        } else {
+            BackendState::Disconnected
+        };
         BackendStatus {
             name: "local_uds".into(),
-            state: BackendState::Connected,
+            state,
             is_active: false,
             latency_ms: Some(0),
             last_seen_ms: 0,
@@ -193,6 +218,10 @@ impl TransportBackend for LocalUdsServer {
                 if active == 1 { "" } else { "s" }
             )),
         }
+    }
+
+    fn is_available(&self) -> bool {
+        self.active_clients() > 0
     }
 
     fn watch_state(&self) -> watch::Receiver<BackendState> {

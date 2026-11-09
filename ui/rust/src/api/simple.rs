@@ -1072,6 +1072,8 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
             None => eprintln!("[p43::bridge] No stored pointer — replaying full room history"),
         }
 
+        let matrix_backend = p43::bus::MatrixBackend::new(room_id.clone());
+
         // Throttle pointer writes to at most once every 60 s to save
         // flash I/O and battery on iOS/Android.
         let pointer_last_write: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>> =
@@ -1079,7 +1081,9 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
         let on_pointer = {
             let last_write = std::sync::Arc::clone(&pointer_last_write);
             let room_id_for_ptr = room_id.clone();
+            let mb = matrix_backend.clone();
             move |token: String| {
+                mb.set_state(p43::bus::BackendState::Connected);
                 let Some(ref store) = ptr_store else { return };
                 let Ok(mut guard) = last_write.lock() else { return };
                 let due = match *guard {
@@ -1195,8 +1199,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
         let mut router = p43::bus::TransportRouter::new(external_tx.clone());
 
         // 1. Matrix backend (primary):
-        let matrix_backend = p43::bus::MatrixBackend::new(room_id.clone());
-        router.register_backend(matrix_backend);
+        router.register_backend(matrix_backend.clone());
 
         // 2. Local UDS backend (fallback when Matrix is unreachable):
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -1374,6 +1377,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                     }
                 },
             ) => {
+                matrix_backend.set_state(p43::bus::BackendState::Disconnected);
                 if let Err(e) = result {
                     eprintln!("[p43::bridge] listen_room for {room_id} exited with error: {e:?}");
                 }

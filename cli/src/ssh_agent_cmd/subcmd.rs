@@ -49,6 +49,25 @@ impl fmt::Display for TransportBackendKind {
     }
 }
 
+/// Transport emission strategy.
+#[derive(Clone, Copy, Debug, Default, ValueEnum, PartialEq, Eq)]
+pub enum StrategyPreference {
+    /// Emit to all active transports concurrently; fastest response wins (default)
+    #[default]
+    Parallel,
+    /// Try transports sequentially in configured priority order
+    Sequential,
+}
+
+impl fmt::Display for StrategyPreference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StrategyPreference::Parallel => write!(f, "parallel"),
+            StrategyPreference::Sequential => write!(f, "sequential"),
+        }
+    }
+}
+
 /// Arguments for `p43 ssh-agent`.
 #[derive(Args, Debug)]
 pub struct SshAgentArgs {
@@ -63,9 +82,14 @@ pub struct SshAgentArgs {
     /// Transport backend for remote signing. Can be specified multiple times to
     /// define priority order (e.g. `--transport matrix --transport local`).
     ///
-    /// If omitted, defaults to Matrix first with Local UDS as fallback.
+    /// If omitted, defaults to Matrix and Local UDS in parallel.
     #[arg(long = "transport", value_name = "TRANSPORT")]
     pub transports: Vec<TransportBackendKind>,
+
+    /// Transport emission strategy: `parallel` (default, fastest response wins)
+    /// or `sequential` (fallback order).
+    #[arg(long, default_value_t = StrategyPreference::Parallel)]
+    pub strategy: StrategyPreference,
 
     /// Sign locally using --card or --key-file instead of proxying through Matrix.
     ///

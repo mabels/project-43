@@ -24,6 +24,18 @@ impl MatrixBackend {
         })
     }
 
+    /// Set the current connection state of this Matrix backend.
+    pub fn set_state(&self, state: BackendState) {
+        let _ = self.state_tx.send_if_modified(|curr| {
+            if *curr != state {
+                *curr = state;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     /// Spawn the Matrix sync loop feeding incoming messages to `inbound_tx`
     /// and updating connection state reactively.
     pub fn start_listener(

@@ -1,13 +1,14 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 /// Platform-aware service for bringing the app window to the foreground.
 ///
 /// Desktop (macOS / Windows / Linux)
-///   Uses [window_manager] to show and focus the native window.  Must be
-///   initialised once at startup via [init].
+///   Uses [window_manager] or native macOS channel to show and focus the native
+///   window while tracking the previous frontmost app for automatic restoration.
 ///
 /// Mobile (Android / iOS)
 ///   No programmatic foreground API exists; the OS notification that is
@@ -30,15 +31,31 @@ class WindowService {
 
   /// Bring the window to the foreground.
   ///
-  /// On desktop: shows the window if minimised/hidden and gives it focus.
-  /// On mobile: no-op (notification tap is the foreground mechanism).
+  /// On macOS: remembers the currently active app (e.g. Terminal) before focusing.
+  /// On other desktop: shows and focuses the window via window_manager.
   Future<void> bringToFront() async {
     if (!_isDesktop) return;
     try {
-      await windowManager.show();
-      await windowManager.focus();
+      if (Platform.isMacOS) {
+        const channel = MethodChannel('p43/native_touch_id');
+        await channel.invokeMethod('bringToFrontAndSavePrevious');
+      } else {
+        await windowManager.show();
+        await windowManager.focus();
+      }
     } catch (_) {
       // Best-effort — never crash the sign flow over a window hint.
+    }
+  }
+
+  /// Restore focus back to the previously active application (e.g. Terminal).
+  Future<void> restorePreviousApp() async {
+    if (!Platform.isMacOS) return;
+    try {
+      const channel = MethodChannel('p43/native_touch_id');
+      await channel.invokeMethod('restorePreviousApp');
+    } catch (_) {
+      // Best-effort
     }
   }
 }

@@ -260,6 +260,7 @@ class _AgentScreenState extends State<AgentScreen> {
         await _signCached(roomId, entry.requestId, isCardKey);
         SettingsService.instance.resetCacheTimer();
         _updateStatus(entry.requestId, RequestStatus.done);
+        unawaited(WindowService.instance.restorePreviousApp());
       } catch (e) {
         debugPrint('[p43::agent] waiter error  ${entry.requestId}: $e');
         // Gate holder was cancelled or failed — reject this request too.
@@ -283,8 +284,8 @@ class _AgentScreenState extends State<AgentScreen> {
       await _acquireAndSign(roomId, entry, isCardKey, fp);
       SettingsService.instance.resetCacheTimer();
       _updateStatus(entry.requestId, RequestStatus.done);
-      // Signal waiters: credential is now hot in the Rust cache.
       gate.complete();
+      unawaited(WindowService.instance.restorePreviousApp());
     } catch (e) {
       debugPrint('[p43::agent] gate-holder error ${entry.requestId}: $e');
       if (!gate.isCompleted) gate.completeError(e);
@@ -296,6 +297,7 @@ class _AgentScreenState extends State<AgentScreen> {
     } finally {
       _fingerprintGate.remove(fp);
       if (!gate.isCompleted) gate.completeError('disposed');
+      unawaited(WindowService.instance.restorePreviousApp());
     }
   }
 
@@ -467,6 +469,7 @@ class _AgentScreenState extends State<AgentScreen> {
     try {
       await mxRejectSign(roomId: roomId, requestId: requestId);
     } catch (_) {}
+    unawaited(WindowService.instance.restorePreviousApp());
   }
 
   // ── Status helpers ────────────────────────────────────────────────────────

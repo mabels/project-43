@@ -1,7 +1,10 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:p43/src/rust/api/simple.dart' as rust;
+import 'package:p43/src/services/biometric_service.dart';
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
@@ -112,10 +115,20 @@ class GateKeyService {
     final bio = await _storage.read(key: _kBioMasterKey);
     if (bio != null) {
       try {
-        final authenticated = await _auth.authenticate(
-          localizedReason: 'Unlock p43 wallet',
-          biometricOnly: true,
-        );
+        final bool authenticated = await BiometricGate.run(() async {
+          if (Platform.isMacOS) {
+            const channel = MethodChannel('p43/native_touch_id');
+            return await channel.invokeMethod<bool>('authenticate', {
+                  'reason': 'Unlock p43 wallet',
+                }) ??
+                false;
+          } else {
+            return await _auth.authenticate(
+              localizedReason: 'Unlock p43 wallet',
+              biometricOnly: true,
+            );
+          }
+        });
         if (authenticated) return bio;
         // Biometric declined / failed — fall through to passphrase.
       } catch (e) {

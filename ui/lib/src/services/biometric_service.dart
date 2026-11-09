@@ -1,5 +1,29 @@
+import 'dart:async';
+import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
+
+// ── BiometricGate ─────────────────────────────────────────────────────────────
+
+/// Serializes biometric prompts so concurrent requests never collide on the
+/// platform's biometric sensor.
+class BiometricGate {
+  static Future<void> _chain = Future.value();
+
+  static Future<T> run<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    _chain = _chain.then((_) async {
+      try {
+        final res = await action();
+        completer.complete(res);
+      } catch (e, st) {
+        completer.completeError(e, st);
+      }
+    }).catchError((_) {});
+    return completer.future;
+  }
+}
 
 // ── Biometric entry (metadata only, no secret) ────────────────────────────────
 
@@ -179,10 +203,20 @@ class BiometricService {
     String reason = 'Unlock p43 session',
   }) async {
     try {
-      final ok = await _auth.authenticate(
-        localizedReason: reason,
-        biometricOnly: true,
-      );
+      final bool ok = await BiometricGate.run(() async {
+        if (Platform.isMacOS) {
+          const channel = MethodChannel('p43/native_touch_id');
+          return await channel.invokeMethod<bool>('authenticate', {
+                'reason': reason,
+              }) ??
+              false;
+        } else {
+          return await _auth.authenticate(
+            localizedReason: reason,
+            biometricOnly: true,
+          );
+        }
+      });
       if (!ok) return null;
       final cred = await _storage.read(key: _credKey(fingerprint));
       if (cred == null) return null;

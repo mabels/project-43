@@ -3,7 +3,6 @@ pub mod subcmd;
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use p43::bus::ExternalBusMessage;
 use p43::bus::{self, load_or_generate_device_key, AuthorityPub, DeviceKey};
 use p43::matrix::{device_id_from_config, resolve_agent_room, MatrixConfig, RoomPointerStore};
 use p43::protocol::{BusCsrRequest, Message};
@@ -210,10 +209,7 @@ impl MatrixProxySession {
             meta: std::collections::HashMap::new(),
         };
 
-        let outbound = p43::bus::OutboundBusMessage {
-            message: msg,
-            recipient_cert: Some(recipient_cert),
-        };
+        let outbound = p43::bus::OutboundBusMessage::new(msg, Some(recipient_cert));
 
         // Unbounded sender — send never blocks or returns a capacity error.
         self.outbound_tx
@@ -625,66 +621,81 @@ fn run_matrix(
         let (internal_tx, _initial_rx) = p43::bus::new_internal_bus();
         let (outbound_tx, outbound_rx) = p43::bus::new_outbound_queue();
 
-        // 4a. Background task: listen_room → external bus.
-        //     Reconnects automatically when the sync loop exits (zombie TCP,
-        //     server restart, network drop).  Tracks the last next_batch token
-        //     via on_pointer so reconnects never replay already-seen messages.
-        let ext_tx_for_task = external_tx.clone();
-        let listen_room_id = room_id.clone();
+        // 4a. Multi-backend transport router configured by --transport.
+        let mut router = p43::bus::TransportRouter::new(external_tx.clone());
 
-        // Per-reader pointer: app-state/<device_id>/cli.json → { room_id: since }
-        // Each reader (cli, ui) has its own file so they never share cursors.
-        let mx_cfg = MatrixConfig::from_store_dir(&store_dir);
-        let store_root = store_dir.parent().unwrap_or(&store_dir).to_path_buf();
-        let device_id =
-            device_id_from_config(&mx_cfg.config_path).unwrap_or_else(|_| "unknown".into());
-        let ptr_store = Arc::new(RoomPointerStore::new(&store_root, &device_id, "cli"));
-        let initial_since: Option<String> = ptr_store.get(&room_id);
-        match &initial_since {
-            Some(token) => eprintln!(
-                "[p43::ssh_agent] Resuming from pointer: {token}\n  ({})",
-                ptr_store.path().display()
-            ),
-            None => eprintln!(
-                "[p43::ssh_agent] No stored pointer — replaying full room history\n  ({})",
-                ptr_store.path().display()
-            ),
+        let mut seen = std::collections::HashSet::new();
+        let selected_transports: Vec<subcmd::TransportBackendKind> = if args.transports.is_empty() {
+            vec![
+                subcmd::TransportBackendKind::Matrix,
+                subcmd::TransportBackendKind::Local,
+            ]
+        } else {
+            args.transports
+                .iter()
+                .copied()
+                .filter(|t| seen.insert(*t))
+                .collect()
+        };
+
+        for t in selected_transports {
+            match t {
+                subcmd::TransportBackendKind::Matrix => {
+                    let mx_cfg = MatrixConfig::from_store_dir(&store_dir);
+                    let store_root = store_dir.parent().unwrap_or(&store_dir).to_path_buf();
+                    let device_id =
+                        device_id_from_config(&mx_cfg.config_path).unwrap_or_else(|_| "unknown".into());
+                    let ptr_store = Arc::new(RoomPointerStore::new(&store_root, &device_id, "cli"));
+                    let initial_since: Option<String> = ptr_store.get(&room_id);
+                    match &initial_since {
+                        Some(token) => eprintln!(
+                            "[p43::ssh_agent] Resuming from pointer: {token}\n  ({})",
+                            ptr_store.path().display()
+                        ),
+                        None => eprintln!(
+                            "[p43::ssh_agent] No stored pointer — replaying full room history\n  ({})",
+                            ptr_store.path().display()
+                        ),
+                    }
+                    let matrix_backend = p43::bus::MatrixBackend::new(room_id.clone());
+                    let _mx_listener =
+                        matrix_backend.start_listener(external_tx.clone(), Some(ptr_store));
+                    router.register_backend(matrix_backend);
+                }
+                subcmd::TransportBackendKind::Local => {
+                    let local_uds_path = p43::bus::local_bus_socket_path(&store_dir);
+                    let local_uds =
+                        p43::bus::LocalUdsClient::start(local_uds_path, external_tx.clone());
+                    router.register_backend(local_uds);
+                }
+            }
         }
 
-        tokio::spawn(async move {
-            let since: Arc<std::sync::Mutex<Option<String>>> =
-                Arc::new(std::sync::Mutex::new(initial_since));
-            loop {
-                let ext_tx = ext_tx_for_task.clone();
-                let since_val = since.lock().ok().and_then(|g| g.clone());
-                let since_ptr = Arc::clone(&since);
-                let ptr_store_inner = Arc::clone(&ptr_store);
-                let room_id_inner = listen_room_id.clone();
-                let _ = p43::matrix::global::listen_room(
-                    &listen_room_id,
-                    since_val.as_deref(),
-                    move |token| {
-                        if let Ok(mut g) = since_ptr.lock() {
-                            *g = Some(token.clone());
-                        }
-                        if let Err(e) = ptr_store_inner.set(&room_id_inner, &token) {
-                            eprintln!("[p43::ssh_agent] warning: could not persist pointer: {e}");
-                        }
-                    },
-                    move |_sender, body, _ts_ms, event_id| {
-                        if let Ok(msg) = p43::protocol::Message::from_json(&body) {
-                            let _ = ext_tx.send(ExternalBusMessage {
-                                message: msg,
-                                event_id,
-                            });
-                        }
-                    },
-                )
-                .await;
-                eprintln!("[p43::ssh_agent] Matrix sync loop exited — reconnecting in 5 s…");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        });
+        let router = Arc::new(router);
+        let _router_monitor = router.clone().spawn_monitoring();
+
+        // Log backend status changes to stderr for live monitoring:
+        {
+            let mut status_rx = router.watch_status();
+            tokio::spawn(async move {
+                let mut last_summary: Option<String> = None;
+                while status_rx.changed().await.is_ok() {
+                    let statuses = status_rx.borrow().clone();
+                    let summary: Vec<String> = statuses
+                        .iter()
+                        .map(|s| {
+                            let active_marker = if s.is_active { " [active]" } else { "" };
+                            format!("{}: {:?}{active_marker}", s.name, s.state)
+                        })
+                        .collect();
+                    let summary_str = summary.join(" | ");
+                    if last_summary.as_deref() != Some(&summary_str) {
+                        eprintln!("[p43::transport] status: {summary_str}");
+                        last_summary = Some(summary_str);
+                    }
+                }
+            });
+        }
 
         // 4b. Decrypt middleware: external bus → internal bus.
         //     The closure captures the shared decrypt_state and reads it each time.
@@ -880,7 +891,7 @@ fn run_matrix(
             *guard = Some((Arc::clone(&device_key), authority_sign_pub));
         }
 
-        // 4d. Encrypt worker: outbound queue → seal → Matrix send.
+        // 4d. Encrypt worker: outbound queue → seal → router send.
         //     Spawned after registration so that cert_bytes and device_key are
         //     available; the worker runs for the lifetime of the agent.
         //     `req_ev_tx_opt` is Some only when --redact-on-complete is set,
@@ -888,11 +899,11 @@ fn run_matrix(
         {
             let dk = Arc::clone(&device_key);
             let cb = Arc::clone(&cert_bytes);
-            p43::bus::spawn_encrypt_worker(
+            p43::bus::spawn_encrypt_worker_with_router(
                 move |msg, recipient| {
                     p43::bus::seal_protocol_message(dk.as_ref(), &cb, recipient, msg).ok()
                 },
-                room_id.clone(),
+                Arc::clone(&router),
                 outbound_rx,
                 req_ev_tx_opt,
             );

@@ -28,6 +28,7 @@ codebase, and `docs/roadmap.md` for the ordered work list.
 | Why decisions were made + errors   | `docs/decisions-and-gotchas.md`   |
 | Product vision & what's missing    | `docs/vision.md`                  |
 | Structured open threads            | `docs/roadmap.md`                 |
+| Secret tiers & in-use sealing      | `docs/secrets-architecture.md`    |
 | Individual architecture decisions  | `docs/decisions/`                 |
 | Usage examples & env vars          | `README.md`                       |
 

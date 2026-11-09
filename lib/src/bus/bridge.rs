@@ -76,7 +76,7 @@ pub struct InboundBusMessage {
 
 // ── Outbound message ──────────────────────────────────────────────────────────
 
-/// A plaintext message to be (optionally) encrypted then sent to Matrix.
+/// A plaintext message to be (optionally) encrypted then sent via the transport router.
 pub struct OutboundBusMessage {
     /// Plaintext protocol message.
     pub message: protocol::Message,
@@ -84,6 +84,24 @@ pub struct OutboundBusMessage {
     /// `Some` → call the `seal` closure before sending.
     /// `None` → send the JSON as-is (plaintext).
     pub recipient_cert: Option<CertPayload>,
+    /// Optional preferred backend (e.g. `"local_uds"` or `"matrix"`).
+    /// When `None`, the router selects the best available backend.
+    pub preferred_backend: Option<String>,
+}
+
+impl OutboundBusMessage {
+    pub fn new(message: protocol::Message, recipient_cert: Option<CertPayload>) -> Self {
+        Self {
+            message,
+            recipient_cert,
+            preferred_backend: None,
+        }
+    }
+
+    pub fn with_preferred_backend(mut self, backend: impl Into<String>) -> Self {
+        self.preferred_backend = Some(backend.into());
+        self
+    }
 }
 
 // ── Result type for the decrypt callback ─────────────────────────────────────
@@ -272,6 +290,53 @@ pub fn spawn_encrypt_worker(
                             }
                         }
                         Err(e) => eprintln!("[p43::bus::bridge] send_message: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("[p43::bus::bridge] to_json: {e}"),
+            }
+        }
+    })
+}
+
+/// Spawn the encryption + send worker using a [`super::transport::TransportRouter`].
+///
+/// Reads from `outbound_rx`, seals each message when `recipient_cert` is `Some`,
+/// and delivers the resulting JSON over the optimal transport backend.
+pub fn spawn_encrypt_worker_with_router(
+    seal: impl Fn(&protocol::Message, &CertPayload) -> Option<protocol::Message> + Send + 'static,
+    router: std::sync::Arc<super::transport::TransportRouter>,
+    mut outbound_rx: mpsc::UnboundedReceiver<OutboundBusMessage>,
+    on_sent: Option<mpsc::Sender<(String, String)>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(outbound) = outbound_rx.recv().await {
+            let request_id: Option<String> = outbound.message.request_id().map(str::to_string);
+            let preferred = outbound.preferred_backend.as_deref();
+
+            let json_result = if let Some(ref cert) = outbound.recipient_cert {
+                match seal(&outbound.message, cert) {
+                    None => {
+                        eprintln!(
+                            "[p43::bus::bridge] encrypt_worker: signer unavailable, \
+                             dropping outbound message"
+                        );
+                        continue;
+                    }
+                    Some(sealed) => sealed.to_json(),
+                }
+            } else {
+                outbound.message.to_json()
+            };
+
+            match json_result {
+                Ok(json) => {
+                    match router.send(&json, preferred).await {
+                        Ok((event_id, _backend_name)) => {
+                            if let (Some(ref tx), Some(rid)) = (&on_sent, request_id) {
+                                let _ = tx.try_send((rid, event_id));
+                            }
+                        }
+                        Err(e) => eprintln!("[p43::bus::bridge] router.send error: {e}"),
                     }
                 }
                 Err(e) => eprintln!("[p43::bus::bridge] to_json: {e}"),

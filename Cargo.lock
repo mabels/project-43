@@ -3504,6 +3504,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
+ "async-trait",
  "base64 0.22.1",
  "card-backend",
  "card-backend-pcsc",

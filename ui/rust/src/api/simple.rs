@@ -135,12 +135,15 @@ struct PendingSign {
     sender_cert: Option<p43::bus::CertPayload>,
     /// Wall-clock instant the request arrived — used to compute response latency.
     received_at: std::time::Instant,
+    /// Transport backend that delivered this request ("local_uds", "matrix", etc.)
+    preferred_backend: Option<String>,
 }
 
 /// Data held for an in-flight `ssh.list_keys_request`.
 struct PendingListKeys {
     sender_cert: Option<p43::bus::CertPayload>,
     received_at: std::time::Instant,
+    preferred_backend: Option<String>,
 }
 
 static PENDING_SIGNS: OnceLock<Mutex<HashMap<String, PendingSign>>> = OnceLock::new();
@@ -812,7 +815,9 @@ pub async fn mx_respond_list_keys(
             p.received_at.elapsed().as_millis(),
         );
     }
-    let sender_cert = pending_lk.and_then(|p| p.sender_cert);
+    let (sender_cert, preferred_backend) = pending_lk
+        .map(|p| (p.sender_cert, p.preferred_backend))
+        .unwrap_or((None, None));
 
     // List keys from the wallet (wallet-gated: YubiKey refs + SSH keys).
     // Falls back to the legacy key store when no master_hex is supplied so
@@ -828,7 +833,7 @@ pub async fn mx_respond_list_keys(
             request_id,
             keys,
         });
-    send_via_bridge(&room_id, response, sender_cert).await
+    send_via_bridge(&room_id, response, sender_cert, preferred_backend).await
 }
 
 // ── Wallet SSH helpers ────────────────────────────────────────────────────────
@@ -986,7 +991,7 @@ pub async fn mx_respond_sign_wallet(
         request_id,
         signature: sig,
     });
-    send_via_bridge(&room_id, response, pending.sender_cert).await
+    send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await
 }
 
 // ── Bus registration (authority side) ────────────────────────────────────────
@@ -1171,8 +1176,39 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
             });
         }
 
-        // ── Encrypt worker: outbound queue → seal → Matrix send ───────────────
-        let encrypt_handle = p43::bus::spawn_encrypt_worker(
+        // ── Multi-backend transport router: Local UDS (desktop) + Matrix ──────
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        let local_uds_server = {
+            let sock_path = p43::bus::local_bus_socket_path(&default_store_dir());
+            match p43::bus::LocalUdsServer::start(sock_path.clone(), external_tx.clone()) {
+                Ok(srv) => {
+                    eprintln!("[p43::bridge] Local UDS server listening on {}", sock_path.display());
+                    Some(srv)
+                }
+                Err(e) => {
+                    eprintln!("[p43::bridge] warning: could not start local UDS server: {e}");
+                    None
+                }
+            }
+        };
+
+        let mut router = p43::bus::TransportRouter::new(external_tx.clone());
+
+        // 1. Matrix backend (primary):
+        let matrix_backend = p43::bus::MatrixBackend::new(room_id.clone());
+        router.register_backend(matrix_backend);
+
+        // 2. Local UDS backend (fallback when Matrix is unreachable):
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        if let Some(ref srv) = local_uds_server {
+            router.register_backend(std::sync::Arc::clone(srv) as std::sync::Arc<dyn p43::bus::TransportBackend>);
+        }
+
+        let router = std::sync::Arc::new(router);
+        let _monitor_handle = router.clone().spawn_monitoring();
+
+        // ── Encrypt worker: outbound queue → seal → router send ───────────────
+        let encrypt_handle = p43::bus::spawn_encrypt_worker_with_router(
             |msg, recipient| {
                 let Ok(guard) = authority_session().lock() else {
                     return None;
@@ -1182,7 +1218,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                 };
                 p43::bus::seal_protocol_message(auth_key, auth_cert, recipient, msg).ok()
             },
-            room_id.clone(),
+            std::sync::Arc::clone(&router),
             outbound_rx,
             Some(req_ev_tx),
         );
@@ -1208,6 +1244,13 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                         }
                     }
                     let sender_cert = inbound.sender_cert;
+                    let preferred_backend = if inbound.event_id.starts_with("local_uds:") {
+                        Some("local_uds".to_string())
+                    } else if inbound.event_id.starts_with('$') {
+                        Some("matrix".to_string())
+                    } else {
+                        None
+                    };
                     let event = match inbound.message {
                         p43::protocol::Message::SshListKeysRequest(r) => {
                             let now = std::time::Instant::now();
@@ -1219,7 +1262,11 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                             if let Ok(mut map) = pending_list_keys().lock() {
                                 map.insert(
                                     r.request_id.clone(),
-                                    PendingListKeys { sender_cert, received_at: now },
+                                    PendingListKeys {
+                                        sender_cert,
+                                        received_at: now,
+                                        preferred_backend: preferred_backend.clone(),
+                                    },
                                 );
                             }
                             Some(AppMessage::AgentEvent {
@@ -1253,6 +1300,7 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                                         meta: r.meta.clone(),
                                         sender_cert,
                                         received_at: now,
+                                        preferred_backend,
                                     },
                                 );
                             }
@@ -2104,6 +2152,7 @@ async fn send_via_bridge(
     room_id: &str,
     msg: p43::protocol::Message,
     sender_cert: Option<p43::bus::CertPayload>,
+    preferred_backend: Option<String>,
 ) -> anyhow::Result<()> {
     let tx_opt: Option<mpsc::UnboundedSender<p43::bus::OutboundBusMessage>> =
         outbound_tx_cell().lock().ok().and_then(|g| g.clone());
@@ -2112,6 +2161,7 @@ async fn send_via_bridge(
         tx.send(p43::bus::OutboundBusMessage {
             message: msg,
             recipient_cert: sender_cert,
+            preferred_backend,
         })
         .map_err(|_| anyhow::anyhow!("outbound queue closed"))?;
         return Ok(());
@@ -2353,7 +2403,7 @@ pub async fn mx_respond_sign(
         request_id,
         signature: sig,
     });
-    send_via_bridge(&room_id, response, pending.sender_cert).await
+    send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await
 }
 
 /// Approve an `ssh.sign_request` for a card-backed key using the card's User PIN.
@@ -2413,7 +2463,7 @@ pub async fn mx_respond_sign_card(
             request_id,
             signature: sig,
         });
-        return send_via_bridge(&room_id, response, pending.sender_cert).await;
+        return send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await;
     }
     #[cfg(any(target_os = "ios", target_os = "android"))]
     anyhow::bail!("PC/SC card operations are not supported on this platform")
@@ -2454,7 +2504,7 @@ pub async fn mx_respond_sign_card_cached(
         // Peek at the pending entry (clone fields out) WITHOUT removing it yet.
         // We only remove once we have confirmed the PIN is cached — a cache miss
         // must leave the entry intact so the caller can fall back to PIN entry.
-        let (fingerprint, data, flags, sender_cert, received_at) = {
+        let (fingerprint, data, flags, sender_cert, received_at, preferred_backend) = {
             let guard = pending_signs()
                 .lock()
                 .map_err(|e| anyhow::anyhow!("pending-sign lock poisoned: {e}"))?;
@@ -2467,6 +2517,7 @@ pub async fn mx_respond_sign_card_cached(
                 p.flags,
                 p.sender_cert.clone(),
                 p.received_at,
+                p.preferred_backend.clone(),
             )
         }; // lock released here — entry still present
 
@@ -2505,7 +2556,7 @@ pub async fn mx_respond_sign_card_cached(
             request_id,
             signature: sig,
         });
-        return send_via_bridge(&room_id, response, sender_cert).await;
+        return send_via_bridge(&room_id, response, sender_cert, preferred_backend).await;
     }
     #[cfg(any(target_os = "ios", target_os = "android"))]
     anyhow::bail!("PC/SC card operations are not supported on this platform")
@@ -2566,7 +2617,7 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
             request_id,
             signature: sig,
         });
-        return send_via_bridge(&room_id, response, pending.sender_cert).await;
+        return send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await;
     }
 
     // ── Fast path 2: cached decrypted Ed25519 keypair ─────────────────────────
@@ -2599,7 +2650,7 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
         request_id,
         signature: sig,
     });
-    send_via_bridge(&room_id, response, pending.sender_cert).await
+    send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await
 }
 
 /// Reject an `ssh.sign_request`: send an error response and discard the request.
@@ -2623,13 +2674,15 @@ pub async fn mx_reject_sign(room_id: String, request_id: String) -> anyhow::Resu
         );
     }
 
+    let preferred_backend = removed.and_then(|p| p.preferred_backend);
+
     let msg = p43::protocol::Message::Error(p43::protocol::ErrorResponse {
         request_id: Some(request_id),
         message: "User rejected the sign request".into(),
     });
 
     // Rejection is always plaintext — no recipient cert needed.
-    send_via_bridge(&room_id, msg, None).await
+    send_via_bridge(&room_id, msg, None, preferred_backend).await
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────
@@ -3184,10 +3237,7 @@ impl InProcessSession {
         };
 
         self.outbound_tx
-            .send(p43::bus::OutboundBusMessage {
-                message: msg,
-                recipient_cert: Some(recipient_cert),
-            })
+            .send(p43::bus::OutboundBusMessage::new(msg, Some(recipient_cert)))
             .map_err(|_| AgentError::other(std::io::Error::other("outbound queue closed")))?;
 
         let timeout_secs = self.timeout.as_secs();

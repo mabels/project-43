@@ -30,13 +30,15 @@ pub mod device_key;
 pub mod list;
 pub mod message;
 pub mod signer;
+pub mod transport;
 
 // ── Convenience re-exports ────────────────────────────────────────────────────
 
 pub use authority::{AuthorityKey, AuthorityPub};
 pub use bridge::{
     new_external_bus, new_internal_bus, new_outbound_queue, spawn_decrypt_middleware,
-    spawn_encrypt_worker, DecryptResult, ExternalBusMessage, InboundBusMessage, OutboundBusMessage,
+    spawn_encrypt_worker, spawn_encrypt_worker_with_router, DecryptResult, ExternalBusMessage,
+    InboundBusMessage, OutboundBusMessage,
 };
 pub use cert::{CertPayload, DeviceCert};
 pub use csr::{unix_now, CsrPayload, DeviceCsr};
@@ -51,6 +53,13 @@ pub use message::{
     BusRecipient, MsgPayload,
 };
 pub use signer::BusSigner;
+pub use transport::{
+    local_uds::{local_bus_socket_path, LocalUdsClient, LocalUdsServer, LOCAL_BUS_SOCK_NAME},
+    virtual_transport::VirtualTransport,
+    BackendState, BackendStatus, TransportBackend, TransportRouter,
+};
+#[cfg(feature = "matrix")]
+pub use transport::matrix::MatrixBackend;
 
 // ── Directory helpers ─────────────────────────────────────────────────────────
 

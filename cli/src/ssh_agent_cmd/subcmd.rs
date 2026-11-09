@@ -30,6 +30,25 @@ impl From<KeySlot> for SshKeySlot {
     }
 }
 
+/// Transport backend kind for remote signing.
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq, Hash)]
+pub enum TransportBackendKind {
+    /// Remote Matrix room
+    Matrix,
+    /// Local Unix Domain Socket (~/.config/project-43/local-bus.sock)
+    #[value(name = "local", alias = "local_uds")]
+    Local,
+}
+
+impl fmt::Display for TransportBackendKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransportBackendKind::Matrix => write!(f, "matrix"),
+            TransportBackendKind::Local => write!(f, "local"),
+        }
+    }
+}
+
 /// Arguments for `p43 ssh-agent`.
 #[derive(Args, Debug)]
 pub struct SshAgentArgs {
@@ -40,6 +59,13 @@ pub struct SshAgentArgs {
     /// path so SSH clients can find the agent.
     #[arg(long)]
     pub socket: Option<String>,
+
+    /// Transport backend for remote signing. Can be specified multiple times to
+    /// define priority order (e.g. `--transport matrix --transport local`).
+    ///
+    /// If omitted, defaults to Matrix first with Local UDS as fallback.
+    #[arg(long = "transport", value_name = "TRANSPORT")]
+    pub transports: Vec<TransportBackendKind>,
 
     /// Sign locally using --card or --key-file instead of proxying through Matrix.
     ///

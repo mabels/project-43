@@ -85,6 +85,12 @@ pub trait TransportBackend: Send + Sync {
     /// Send a serialized protocol message frame over this transport.
     /// Returns a transport-specific tracking ID (e.g. Matrix event ID or local sequence ID).
     async fn send(&self, raw_frame: &str) -> anyhow::Result<String>;
+
+    /// Redact or clean up a completed transaction event on this transport.
+    /// Default implementation is a no-op (used by Local UDS, in-memory, etc.).
+    async fn redact(&self, _event_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 // ── TransportRouter ───────────────────────────────────────────────────────────
@@ -189,9 +195,31 @@ impl TransportRouter {
         raw_frame: &str,
         preferred_backend: Option<&str>,
     ) -> anyhow::Result<(String, &'static str)> {
+        self.send_with_notifier(raw_frame, preferred_backend, |_id, _name| {}).await
+    }
+
+    /// Send `raw_frame` over transport backends, calling `on_sent` for every backend
+    /// that successfully transmits (e.g. for logging/redaction).
+    pub async fn send_with_notifier<F>(
+        &self,
+        raw_frame: &str,
+        preferred_backend: Option<&str>,
+        on_sent: F,
+    ) -> anyhow::Result<(String, &'static str)>
+    where
+        F: Fn(&str, &'static str) + Send + Sync + 'static,
+    {
         match self.strategy {
-            SendStrategy::Parallel => self.send_parallel(raw_frame, preferred_backend).await,
-            SendStrategy::Sequential => self.send_sequential(raw_frame, preferred_backend).await,
+            SendStrategy::Parallel => {
+                self.send_parallel_with_notifier(raw_frame, preferred_backend, on_sent).await
+            }
+            SendStrategy::Sequential => {
+                let res = self.send_sequential(raw_frame, preferred_backend).await;
+                if let Ok((ref id, name)) = res {
+                    on_sent(id, name);
+                }
+                res
+            }
         }
     }
 
@@ -201,6 +229,19 @@ impl TransportRouter {
         raw_frame: &str,
         preferred_backend: Option<&str>,
     ) -> anyhow::Result<(String, &'static str)> {
+        self.send_parallel_with_notifier(raw_frame, preferred_backend, |_id, _name| {}).await
+    }
+
+    /// Parallel racing with per-backend completion notifier.
+    pub async fn send_parallel_with_notifier<F>(
+        &self,
+        raw_frame: &str,
+        preferred_backend: Option<&str>,
+        on_sent: F,
+    ) -> anyhow::Result<(String, &'static str)>
+    where
+        F: Fn(&str, &'static str) + Send + Sync + 'static,
+    {
         let available: Vec<_> = self
             .backends
             .iter()
@@ -213,6 +254,7 @@ impl TransportRouter {
             if let Some(pref) = preferred_backend {
                 if let Some(b) = self.backends.iter().find(|b| b.name() == pref) {
                     let id = b.send(raw_frame).await?;
+                    on_sent(&id, b.name());
                     return Ok((id, b.name()));
                 }
             }
@@ -222,26 +264,38 @@ impl TransportRouter {
         if available.len() == 1 {
             let b = &available[0];
             let id = b.send(raw_frame).await?;
+            on_sent(&id, b.name());
             return Ok((id, b.name()));
         }
 
-        // Fan out concurrently to all available backends; fastest wins!
-        let futures: Vec<_> = available
-            .iter()
-            .map(|b| {
-                let name = b.name();
-                let frame = raw_frame.to_string();
-                let backend = Arc::clone(b);
-                Box::pin(async move {
-                    let id = backend.send(&frame).await?;
-                    Ok::<(String, &'static str), anyhow::Error>((id, name))
-                })
-            })
-            .collect();
+        let on_sent = Arc::new(on_sent);
+        // Fan out concurrently to all available backends without cancelling slower ones; fastest wins!
+        let (first_tx, mut first_rx) = tokio::sync::mpsc::channel::<(String, &'static str)>(1);
 
-        match futures_util::future::select_ok(futures).await {
-            Ok(((id, name), _remaining)) => Ok((id, name)),
-            Err(e) => Err(e),
+        for b in available {
+            let name = b.name();
+            let frame = raw_frame.to_string();
+            let backend = Arc::clone(&b);
+            let tx = first_tx.clone();
+            let on_sent_cb = Arc::clone(&on_sent);
+            tokio::spawn(async move {
+                match backend.send(&frame).await {
+                    Ok(id) => {
+                        on_sent_cb(&id, name);
+                        let _ = tx.send((id, name)).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[p43::transport] parallel send on {name} failed: {e}");
+                    }
+                }
+            });
+        }
+        drop(first_tx);
+
+        if let Some((id, name)) = first_rx.recv().await {
+            Ok((id, name))
+        } else {
+            anyhow::bail!("all parallel sends failed");
         }
     }
 
@@ -301,6 +355,24 @@ impl TransportRouter {
         }
 
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("all available backends failed to send")))
+    }
+
+    /// Redact or clean up a completed transaction event on the appropriate transport.
+    ///
+    /// For Matrix events (starting with `$`), delegates to MatrixBackend.
+    /// For other transports (like Local UDS), this safely no-ops.
+    pub async fn redact(&self, event_id: &str) -> anyhow::Result<()> {
+        if event_id.starts_with('$') {
+            if let Some(b) = self.backends.iter().find(|b| b.name() == "matrix") {
+                return b.redact(event_id).await;
+            }
+        }
+        for b in &self.backends {
+            if event_id.starts_with(&format!("{}:", b.name())) {
+                return b.redact(event_id).await;
+            }
+        }
+        Ok(())
     }
 
     /// Spawn a background task that watches all backends for state changes
@@ -539,6 +611,101 @@ mod tests {
             second_res.is_err(),
             "second duplicate message should be filtered out by deduplicator"
         );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_decrypt_middleware_locked_replay_not_dropped() {
+        use crate::bus::{
+            new_external_bus, new_internal_bus, spawn_decrypt_middleware, DecryptResult,
+            ExternalBusMessage,
+        };
+        use crate::protocol::{BusSecureEnvelope, Message, SshSignRequest};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (ext_tx, ext_rx) = new_external_bus();
+        let (int_tx, mut int_rx) = new_internal_bus();
+
+        let is_unlocked = Arc::new(AtomicBool::new(false));
+        let is_unlocked_cb = Arc::clone(&is_unlocked);
+
+        let locked_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let locked_queue_cb = Arc::clone(&locked_queue);
+
+        let _handle = spawn_decrypt_middleware(
+            move |_env| {
+                if is_unlocked_cb.load(Ordering::SeqCst) {
+                    DecryptResult::Ok(
+                        Message::SshSignRequest(SshSignRequest {
+                            request_id: "req-locked-test".into(),
+                            fingerprint: "fp".into(),
+                            data: b"data".to_vec(),
+                            flags: 0,
+                            description: "desc".into(),
+                            meta: Default::default(),
+                        }),
+                        Box::new(crate::bus::CertPayload {
+                            version: 1,
+                            device_id: "dev".into(),
+                            label: "dev".into(),
+                            sign_pubkey: vec![0; 32],
+                            ecdh_pubkey: vec![0; 32],
+                            issuer_fp: vec![],
+                            iat: 0,
+                            exp: None,
+                            meta: Default::default(),
+                        }),
+                    )
+                } else {
+                    DecryptResult::Locked
+                }
+            },
+            move |locked_msg| {
+                locked_queue_cb.lock().unwrap().push(locked_msg);
+            },
+            ext_rx,
+            int_tx,
+        );
+
+        let raw_msg = Message::BusSecure(BusSecureEnvelope {
+            v: 1,
+            from: "dev".into(),
+            envelope_b64: "ENVELOPE_LOCKED_TEST".into(),
+        });
+
+        // 1. Message arrives while locked: should be buffered in locked_queue, not delivered to internal bus
+        ext_tx
+            .send(ExternalBusMessage {
+                message: raw_msg.clone(),
+                event_id: "$matrix_locked_event".into(),
+            })
+            .unwrap();
+
+        // Yield to allow middleware to process
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let locked_items = locked_queue.lock().unwrap().clone();
+        assert_eq!(locked_items.len(), 1, "message should be buffered in locked_queue");
+
+        // Internal bus should have received nothing yet
+        let recv_none =
+            tokio::time::timeout(std::time::Duration::from_millis(50), int_rx.recv()).await;
+        assert!(recv_none.is_err(), "nothing on internal bus while locked");
+
+        // 2. User unlocks!
+        is_unlocked.store(true, Ordering::SeqCst);
+
+        // Replay the buffered message onto ext_tx (just like wallet_unlock_session does)
+        for item in locked_items {
+            ext_tx.send(item).unwrap();
+        }
+
+        // 3. The replayed message MUST be processed and not dropped by deduplicator!
+        let replayed =
+            tokio::time::timeout(std::time::Duration::from_millis(500), int_rx.recv())
+                .await
+                .expect("replayed message should arrive on internal bus after unlock")
+                .unwrap();
+        assert_eq!(replayed.event_id, "$matrix_locked_event");
     }
 
     #[tokio::test]

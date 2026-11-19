@@ -208,15 +208,21 @@ pub fn spawn_decrypt_middleware(
 
             let (msg, sender_cert) = match decrypt_result {
                 Some(DecryptResult::Ok(inner, cert)) => {
-                    // 2. Drop duplicate inner messages by request_id
+                    // 2. Drop duplicate inner messages by type and request_id.
+                    // Must qualify with type_name so a request is never mistaken for its matching response!
                     if let Some(rid) = inner.request_id() {
-                        if dedup.is_duplicate(rid) {
+                        let dedup_key = format!("{}:{}", inner.type_name(), rid);
+                        if dedup.is_duplicate(&dedup_key) {
                             continue;
                         }
                     }
                     (inner, Some(*cert))
                 }
                 Some(DecryptResult::Locked) => {
+                    // Remove from dedup so when the message is replayed after unlock,
+                    // it is not rejected as a duplicate.
+                    dedup.remove_message(&raw_msg);
+
                     // Pass the original ExternalBusMessage (including event_id)
                     // to the caller so it can be buffered and replayed once the
                     // session is unlocked.
@@ -344,13 +350,19 @@ pub fn spawn_encrypt_worker_with_router(
 
             match json_result {
                 Ok(json) => {
-                    match router.send(&json, preferred).await {
-                        Ok((event_id, _backend_name)) => {
-                            if let (Some(ref tx), Some(rid)) = (&on_sent, request_id) {
-                                let _ = tx.try_send((rid, event_id));
-                            }
+                    let on_sent_tx = on_sent.clone();
+                    let rid_clone = request_id.clone();
+                    let notify_cb = move |event_id: &str, _backend_name: &'static str| {
+                        if let (Some(ref tx), Some(ref rid)) = (&on_sent_tx, &rid_clone) {
+                            let _ = tx.try_send((rid.clone(), event_id.to_string()));
                         }
-                        Err(e) => eprintln!("[p43::bus::bridge] router.send error: {e}"),
+                    };
+
+                    if let Err(e) = router
+                        .send_with_notifier(&json, preferred, notify_cb)
+                        .await
+                    {
+                        eprintln!("[p43::bus::bridge] router.send error: {e}");
                     }
                 }
                 Err(e) => eprintln!("[p43::bus::bridge] to_json: {e}"),

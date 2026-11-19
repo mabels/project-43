@@ -193,6 +193,9 @@ pub async fn send_message(room_id: &str, text: &str) -> Result<String> {
     tracing::instrument(skip_all, fields(room_id, event_id))
 )]
 pub async fn redact_room_event(room_id: &str, event_id: &str) -> Result<()> {
+    if !event_id.starts_with('$') {
+        return Ok(());
+    }
     let client = take_client().await.context("Not logged in to Matrix")?;
     let rid = RoomId::parse(room_id).with_context(|| format!("Invalid room ID: {room_id}"))?;
     super::room::redact_event(&client, &rid, event_id).await

@@ -127,8 +127,8 @@ impl ssh_agent_lib::agent::Session for P43CardSession {
 
 // ── Matrix proxy session ──────────────────────────────────────────────────────
 
-/// Pending request map: request_id → oneshot sender for the response.
-type PendingMap = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<p43::protocol::Message>>>>;
+/// Pending request map: request_id → oneshot sender for the response and its event_id.
+type PendingMap = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<(p43::protocol::Message, String)>>>>;
 
 /// Decryption context shared between the Matrix listener middleware and the
 /// session.  Populated after [`ensure_registered`] completes; `None` during
@@ -192,7 +192,7 @@ impl MatrixProxySession {
         };
 
         // Register the oneshot *before* enqueuing so we never miss a fast reply.
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel::<(p43::protocol::Message, String)>();
         self.pending.lock().await.insert(request_id.clone(), tx);
 
         // Build a recipient cert stub carrying only the ECDH pub so the
@@ -238,11 +238,19 @@ impl MatrixProxySession {
         let wait_fut = tokio::time::timeout(self.timeout, rx);
 
         match wait_fut.await {
-            Ok(Ok(msg)) => {
+            Ok(Ok((msg, event_id))) => {
                 if self.verbose {
+                    let transport = if event_id.starts_with("local_uds:") {
+                        "local_uds"
+                    } else if event_id.starts_with('$') {
+                        "matrix"
+                    } else {
+                        "unknown"
+                    };
                     eprintln!(
-                        "[p43::ssh_agent] forward  {} at {}  (+{} ms)",
+                        "[p43::ssh_agent] forward  {} via {:<9} at {}  (+{} ms)",
                         request_id,
+                        transport,
                         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                         sent_at.elapsed().as_millis(),
                     );
@@ -764,17 +772,25 @@ fn run_matrix(
             let verbose = args.verbose;
             let redact = args.redact_on_complete;
             tokio::spawn(async move {
-                while let Some((req_id, _ev_id)) = req_ev_rx.recv().await {
+                while let Some((req_id, ev_id)) = req_ev_rx.recv().await {
+                    let transport = if ev_id.starts_with("local_uds:") {
+                        "local_uds"
+                    } else if ev_id.starts_with('$') {
+                        "matrix"
+                    } else {
+                        "unknown"
+                    };
                     if verbose {
                         let elapsed_ms = instants
                             .lock()
                             .ok()
-                            .and_then(|mut m| m.remove(&req_id))
+                            .and_then(|m| m.get(&req_id).copied())
                             .map(|t| t.elapsed().as_millis());
                         if let Some(ms) = elapsed_ms {
                             eprintln!(
-                                "[p43::ssh_agent] txd      {} at {}  (+{} ms)",
+                                "[p43::ssh_agent] txd      {} via {:<9} at {}  (+{} ms)",
                                 req_id,
+                                transport,
                                 chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                                 ms,
                             );
@@ -782,7 +798,7 @@ fn run_matrix(
                     }
                     if redact {
                         if let Ok(mut guard) = map.lock() {
-                            guard.insert(req_id, _ev_id);
+                            guard.insert(req_id, ev_id);
                         }
                     }
                 }
@@ -824,7 +840,7 @@ fn run_matrix(
                         {
                             let mut guard = dispatch_pending.lock().await;
                             if let Some(tx) = guard.remove(&id) {
-                                let _ = tx.send(inbound.message);
+                                let _ = tx.send((inbound.message, inbound.event_id.clone()));
                             }
                         }
                         // Queue both req + res for deferred redaction only when
@@ -834,10 +850,14 @@ fn run_matrix(
                             if !res_eid.is_empty() {
                                 if let Ok(mut map) = dispatch_req_map.lock() {
                                     if let Some(req_eid) = map.remove(&id) {
-                                        let _ =
-                                            redact_tx.try_send((dispatch_room_id.clone(), req_eid));
-                                        let _ =
-                                            redact_tx.try_send((dispatch_room_id.clone(), res_eid));
+                                        if req_eid.starts_with('$') {
+                                            let _ =
+                                                redact_tx.try_send((dispatch_room_id.clone(), req_eid));
+                                        }
+                                        if res_eid.starts_with('$') {
+                                            let _ =
+                                                redact_tx.try_send((dispatch_room_id.clone(), res_eid));
+                                        }
                                     }
                                 }
                             }
@@ -995,7 +1015,7 @@ async fn ensure_registered(
 
     // Register a oneshot in the pending map *before* sending, so we don't miss
     // a very fast response.
-    let (tx, rx) = tokio::sync::oneshot::channel::<Message>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<(Message, String)>();
     pending.lock().await.insert(request_id.clone(), tx);
 
     // ── Send csr_request ──────────────────────────────────────────────────────
@@ -1016,7 +1036,7 @@ async fn ensure_registered(
     );
 
     // ── Block until cert_response arrives ─────────────────────────────────────
-    let response = rx.await.context("bus registration channel closed")?;
+    let (response, _ev_id) = rx.await.context("bus registration channel closed")?;
     let cert_resp = match response {
         Message::BusCertResponse(r) => r,
         Message::Error(e) => bail!("bus registration rejected: {}", e.message),

@@ -1173,9 +1173,13 @@ pub fn mx_listen_all(room_id: String, sink: StreamSink<AppMessage>) {
                 while let Some((req_id, response_ev_id)) = req_ev_rx.recv().await {
                     let request_ev_id = map.lock().ok().and_then(|mut m| m.remove(&req_id));
                     if let Some(req_ev) = request_ev_id {
-                        let _ = redact_tx_clone.send((redact_room_id.clone(), req_ev)).await;
+                        if req_ev.starts_with('$') {
+                            let _ = redact_tx_clone.send((redact_room_id.clone(), req_ev)).await;
+                        }
                     }
-                    let _ = redact_tx_clone.send((redact_room_id.clone(), response_ev_id)).await;
+                    if response_ev_id.starts_with('$') {
+                        let _ = redact_tx_clone.send((redact_room_id.clone(), response_ev_id)).await;
+                    }
                 }
             });
         }

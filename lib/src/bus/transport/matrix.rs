@@ -127,4 +127,11 @@ impl TransportBackend for MatrixBackend {
     async fn send(&self, raw_frame: &str) -> anyhow::Result<String> {
         crate::matrix::global::send_message(&self.room_id, raw_frame).await
     }
+
+    async fn redact(&self, event_id: &str) -> anyhow::Result<()> {
+        if !event_id.starts_with('$') {
+            return Ok(());
+        }
+        crate::matrix::global::redact_room_event(&self.room_id, event_id).await
+    }
 }

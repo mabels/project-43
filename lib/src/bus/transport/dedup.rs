@@ -98,6 +98,22 @@ impl MessageDeduplicator {
         false
     }
 
+    /// Explicitly remove an ID from the deduplicator.
+    ///
+    /// Used when a message could not be processed immediately (e.g. session was locked),
+    /// so that when it is replayed after unlock, it is not rejected as a duplicate.
+    pub fn remove(&self, id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.set.remove(id);
+        inner.queue.retain(|(k, _)| k != id);
+    }
+
+    /// Convenience helper to remove a protocol message from the deduplicator.
+    pub fn remove_message(&self, msg: &Message) {
+        let id = message_dedup_id(msg);
+        self.remove(&id);
+    }
+
     /// Convenience helper that checks deduplication for a protocol message.
     pub fn is_duplicate_message(&self, msg: &Message) -> bool {
         let id = message_dedup_id(msg);

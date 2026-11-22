@@ -83,11 +83,11 @@ jobs:
 
     steps:
       # ── source ────────────────────────────────────────────────────────────────
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # ── sccache ───────────────────────────────────────────────────────────────
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────────
       - name: Bootstrap rustup (no sudo)
@@ -116,7 +116,7 @@ jobs:
 
       # ── Java (required by Android Gradle Plugin 8.x) ──────────────────────────
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -154,7 +154,7 @@ jobs:
 
       # ── caches ────────────────────────────────────────────────────────────────
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -164,7 +164,7 @@ jobs:
           restore-keys: android-cargo-
 
       - name: Cache Flutter pub
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.pub-cache
           key: android-pub-${{ hashFiles('ui/pubspec.lock') }}

@@ -145,12 +145,11 @@ class RustBuilder {
   Future<String> build() async {
     final extraArgs = _buildOptions?.flags ?? [];
     final manifestPath = path.join(environment.manifestDir, 'Cargo.toml');
+    final useExplicitToolchain = _buildOptions?.toolchain != null;
     runCommand(
-      'rustup',
+      useExplicitToolchain ? 'rustup' : 'cargo',
       [
-        'run',
-        _toolchain,
-        'cargo',
+        if (useExplicitToolchain) ...['run', _toolchain, 'cargo'],
         (target.android == null && environment.glibcVersion != null)
             ? 'zigbuild'
             : 'build',

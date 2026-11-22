@@ -62,10 +62,11 @@ jobs:
         run: |
           if ! command -v sccache &>/dev/null; then
             ARCH=$(uname -m)
+            [ "$ARCH" = "arm64" ] && ARCH="aarch64"
             curl -fsSL \
-              "https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${ARCH}-apple-darwin.tar.gz" \
+              "https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-${ARCH}-apple-darwin.tar.gz" \
               | tar xz --strip-components=1 -C /tmp \
-                "sccache-v0.8.1-${ARCH}-apple-darwin/sccache"
+                "sccache-v0.19.0-${ARCH}-apple-darwin/sccache"
             sudo mv /tmp/sccache /usr/local/bin/sccache
           fi
           sccache --start-server 2>/dev/null || true

@@ -239,6 +239,7 @@ jobs:
       - name: Build macOS release (flutter)
         working-directory: ui
         env:
+          RUSTC_WRAPPER: ""
           FLUTTER_XCODE_CODE_SIGN_IDENTITY: ""
           FLUTTER_XCODE_CODE_SIGNING_REQUIRED: "NO"
           FLUTTER_XCODE_CODE_SIGNING_ALLOWED: "NO"

@@ -32,7 +32,7 @@ jobs:
 
       - name: install Rust toolchain
         # actions-rust-lang/setup-rust-toolchain reads rust-toolchain.toml
-        # automatically and installs the pinned version (1.95.0) with the
+        # automatically and installs the pinned version (1.100.0) with the
         # requested components.  dtolnay/rust-toolchain@stable installs a
         # different toolchain version and leaves rustfmt/clippy on the wrong one.
         uses: actions-rust-lang/setup-rust-toolchain@v1

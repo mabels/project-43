@@ -72,7 +72,7 @@ jobs:
           sccache --start-server 2>/dev/null || true
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
-      # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ─────────────────────
+      # ── Rust toolchain (rust-toolchain.toml → 1.100.0) ─────────────────────
       # Bootstrap rustup without sudo if it is not already present.
       # This matters on self-hosted runners where the runner account may be
       # a fresh user with no rustup installed.  The official rustup-init.sh
@@ -90,7 +90,7 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      # Explicitly add cross-compile targets to the active toolchain (1.95.0).
+      # Explicitly add cross-compile targets to the active toolchain (1.100.0).
       # The action's `target:` input installs against `stable` before
       # rust-toolchain.toml is resolved, so we do this separately.
       - name: Add cross-compilation targets

@@ -73,7 +73,7 @@ jobs:
             patchelf \
             file
 
-      # ── Rust toolchain (rust-toolchain.toml → 1.95.0) ──────────────────────
+      # ── Rust toolchain (rust-toolchain.toml → 1.100.0) ──────────────────────
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 

@@ -1,4 +1,4 @@
 [toolchain]
-# Pinned to 1.95.0 to match the Homebrew-installed rustc on the dev machine.
+# Pinned to 1.100.0 to match the Homebrew-installed rustc on the dev machine.
 # Update this when upgrading Homebrew's rustc.
-channel = "1.95.0"
+channel = "1.100.0"

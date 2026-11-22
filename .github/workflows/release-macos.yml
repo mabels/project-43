@@ -236,6 +236,15 @@ jobs:
       # CODE_SIGN_STYLE=Automatic which would try to auto-provision and fail on
       # a CI runner with no Apple Developer session.  Our codesign step below
       # handles all signing with the Developer ID cert from the keychain.
+      - name: Pre-build rust_lib_p43 for macOS (arm64 + x86_64)
+        env:
+          RUSTC_WRAPPER: ""
+          CARGO_BUILD_RUSTC_WRAPPER: ""
+        run: |
+          TARGET_DIR="$PWD/ui/build/macos/Build/Intermediates.noindex/Pods.build/Release/rust_lib_p43.build"
+          cargo build --config 'build.rustc-wrapper=""' --manifest-path ui/rust/Cargo.toml -p rust_lib_p43 --release --target aarch64-apple-darwin --target-dir "$TARGET_DIR"
+          cargo build --config 'build.rustc-wrapper=""' --manifest-path ui/rust/Cargo.toml -p rust_lib_p43 --release --target x86_64-apple-darwin  --target-dir "$TARGET_DIR"
+
       - name: Build macOS release (flutter)
         working-directory: ui
         env:

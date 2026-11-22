@@ -197,6 +197,9 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
       # ── Flutter dependencies ───────────────────────────────────────────────
+      - name: Clean stale Flutter/cargokit build artifacts
+        run: rm -rf ui/build
+
       - name: flutter pub get
         working-directory: ui
         run: flutter pub get

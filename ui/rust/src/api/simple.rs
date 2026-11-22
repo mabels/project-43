@@ -3647,46 +3647,55 @@ pub fn wallet_add_yubikey_ref(
     pin: String,
     card_ident: Option<String>,
 ) -> anyhow::Result<()> {
-    use p43::sync_store::KeyRef;
-    use p43::wallet::{WalletPayload, YubikeyRef};
-    use serde_bytes::ByteBuf;
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = (master_hex, label, pin, card_ident);
+        anyhow::bail!("YubiKey PC/SC is not supported on mobile platforms");
+    }
 
-    // Select card and get its AID.
-    let cards = p43::pkcs11::card::list_connected_cards()?;
-    anyhow::ensure!(!cards.is_empty(), "no OpenPGP card connected");
-    let card = if let Some(ident) = card_ident {
-        cards
-            .into_iter()
-            .find(|c| c.ident == ident)
-            .ok_or_else(|| anyhow::anyhow!("card not found"))?
-    } else {
-        cards.into_iter().next().unwrap()
-    };
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        use p43::sync_store::KeyRef;
+        use p43::wallet::{WalletPayload, YubikeyRef};
+        use serde_bytes::ByteBuf;
 
-    let wallet = open_wallet()?;
-    let root_key = master_key(&master_hex)?;
-    let payload = WalletPayload::YubikeyRef(YubikeyRef {
-        version: 1,
-        card_fingerprint: card.ident.clone(),
-        label,
-        pin,
-    });
-    // Use card ident as fingerprint, direct key_ref from gate-key store.
-    let store = open_gate_key_store()?;
-    let ids = store.list()?;
-    anyhow::ensure!(!ids.is_empty(), "no gate-key configured");
-    let id_bytes = hex::decode(ids[0].trim_start_matches("gate-"))?;
-    let key_ref = KeyRef::Direct {
-        gate_key_id: ByteBuf::from(id_bytes),
-    };
-    wallet.put(
-        &card.ident,
-        "yubikey-ref",
-        &payload,
-        &root_key,
-        key_ref,
-        "ui",
-    )
+        // Select card and get its AID.
+        let cards = p43::pkcs11::card::list_connected_cards()?;
+        anyhow::ensure!(!cards.is_empty(), "no OpenPGP card connected");
+        let card = if let Some(ident) = card_ident {
+            cards
+                .into_iter()
+                .find(|c| c.ident == ident)
+                .ok_or_else(|| anyhow::anyhow!("card not found"))?
+        } else {
+            cards.into_iter().next().unwrap()
+        };
+
+        let wallet = open_wallet()?;
+        let root_key = master_key(&master_hex)?;
+        let payload = WalletPayload::YubikeyRef(YubikeyRef {
+            version: 1,
+            card_fingerprint: card.ident.clone(),
+            label,
+            pin,
+        });
+        // Use card ident as fingerprint, direct key_ref from gate-key store.
+        let store = open_gate_key_store()?;
+        let ids = store.list()?;
+        anyhow::ensure!(!ids.is_empty(), "no gate-key configured");
+        let id_bytes = hex::decode(ids[0].trim_start_matches("gate-"))?;
+        let key_ref = KeyRef::Direct {
+            gate_key_id: ByteBuf::from(id_bytes),
+        };
+        wallet.put(
+            &card.ident,
+            "yubikey-ref",
+            &payload,
+            &root_key,
+            key_ref,
+            "ui",
+        )
+    }
 }
 
 /// Add an SSH private key to the wallet.

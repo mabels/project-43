@@ -15,6 +15,9 @@ p43 = { path = "../../lib", default-features = false, features = [
     "e2e-encryption",
     "ssh",
     "bus",
+    "gate_key",
+    "sync_store",
+    "wallet",
 ] }
 # These deps are needed on all platforms including Android and iOS.
 anyhow    = "1"
@@ -24,6 +27,7 @@ dirs      = "6"
 hex       = "0.4"
 serde_bytes = "0.11"
 rpassword = "7"
+ssh-key   = { version = "0.6", features = ["alloc", "ed25519"] }
 # tokio for spawning tasks from StreamSink bridge functions
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 # Bundled SQLite so no system libsqlite3 is required (important on Android).
@@ -38,7 +42,6 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 p43           = { path = "../../lib", features = ["pcsc"] }
 ssh-agent-lib = "0.5"
-ssh-key       = { version = "0.6", features = ["alloc", "ed25519"] }
 uuid          = { version = "1", features = ["v4"] }
 
 [features]

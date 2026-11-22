@@ -192,6 +192,7 @@ jobs:
           LOGIN_KC="$HOME/Library/Keychains/login.keychain-db"
           [ -f "$LOGIN_KC" ] && KEYCHAINS="$KEYCHAINS $LOGIN_KC"
           security list-keychain -d user -s $KEYCHAINS
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
 
           # Verify the cert is reachable before proceeding.
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
@@ -285,6 +286,7 @@ jobs:
           # A plain CLI needs no special entitlements beyond the runtime flag.
           codesign \
             --force \
+            --keychain "$RUNNER_TEMP/app-signing.keychain-db" \
             --sign "Developer ID Application" \
             --options runtime \
             --timestamp \
@@ -303,6 +305,7 @@ jobs:
           codesign \
             --force \
             --deep \
+            --keychain "$RUNNER_TEMP/app-signing.keychain-db" \
             --sign "Developer ID Application" \
             --options runtime \
             --entitlements "$PROCESSED_ENTITLEMENTS" \

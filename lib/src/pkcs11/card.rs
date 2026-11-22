@@ -41,7 +41,9 @@ pub struct ConnectedCard {
 }
 
 pub fn list_card() -> Result<()> {
-    let _guard = CARD_LOCK.lock().map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
+    let _guard = CARD_LOCK
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
     let backends =
         PcscBackend::cards(None).context("Failed to list PC/SC cards — is pcscd running?")?;
 
@@ -130,7 +132,9 @@ pub fn list_card() -> Result<()> {
 
 /// Return a summary of every connected OpenPGP card (no PIN required).
 pub fn list_connected_cards() -> Result<Vec<ConnectedCard>> {
-    let _guard = CARD_LOCK.lock().map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
+    let _guard = CARD_LOCK
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
     let backends =
         PcscBackend::cards(None).context("Failed to list PC/SC cards — is pcscd running?")?;
     let mut out = Vec::new();
@@ -188,7 +192,9 @@ pub fn card_pin_retries(ident: Option<&str>) -> Result<u8> {
 }
 
 pub fn open_first_card() -> Result<LockedCard> {
-    let guard = CARD_LOCK.lock().map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
+    let guard = CARD_LOCK
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
     let mut backends =
         PcscBackend::cards(None).context("Failed to list PC/SC cards — is pcscd running?")?;
     let backend = backends
@@ -196,13 +202,18 @@ pub fn open_first_card() -> Result<LockedCard> {
         .context("No OpenPGP cards found")?
         .context("Failed to open card backend")?;
     let card = Card::<Open>::new(backend).context("Failed to open card")?;
-    Ok(LockedCard { card, _guard: guard })
+    Ok(LockedCard {
+        card,
+        _guard: guard,
+    })
 }
 
 /// Open a specific card by its AID ident string, or the first card if `ident`
 /// is `None`.
 pub fn open_card(ident: Option<&str>) -> Result<LockedCard> {
-    let guard = CARD_LOCK.lock().map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
+    let guard = CARD_LOCK
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Card lock poisoned: {e}"))?;
     let card = match ident {
         None => {
             let mut backends = PcscBackend::cards(None)
@@ -221,7 +232,10 @@ pub fn open_card(ident: Option<&str>) -> Result<LockedCard> {
                 .context(format!("No connected card with ident '{wanted}'"))?
         }
     };
-    Ok(LockedCard { card, _guard: guard })
+    Ok(LockedCard {
+        card,
+        _guard: guard,
+    })
 }
 
 /// Wrap a raw PIN string as a `SecretString` for the card API.

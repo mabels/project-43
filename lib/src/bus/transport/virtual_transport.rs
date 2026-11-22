@@ -59,7 +59,10 @@ impl VirtualTransport {
     }
 
     pub fn sent_frames(&self) -> Vec<String> {
-        self.sent_frames.lock().map(|g| g.clone()).unwrap_or_default()
+        self.sent_frames
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     pub fn clear_sent(&self) {

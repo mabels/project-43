@@ -63,8 +63,12 @@ impl LocalUdsServer {
             std::fs::create_dir_all(parent)?;
         }
 
-        let listener = UnixListener::bind(&sock_path)
-            .map_err(|e| anyhow::anyhow!("Failed to bind local UDS socket {}: {e}", sock_path.display()))?;
+        let listener = UnixListener::bind(&sock_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to bind local UDS socket {}: {e}",
+                sock_path.display()
+            )
+        })?;
 
         // Restrict permissions to user only (0600).
         #[cfg(unix)]
@@ -74,7 +78,8 @@ impl LocalUdsServer {
 
         let (state_tx, state_rx) = watch::channel(BackendState::Disconnected);
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let clients: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let clients: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
         let server = Arc::new(Self {
             sock_path: sock_path.clone(),
@@ -458,13 +463,11 @@ mod tests {
         assert!(send_res.is_ok());
 
         // 4. Server receives request.
-        let received_by_server = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            server_in_rx.recv(),
-        )
-        .await
-        .expect("server should receive within timeout")
-        .expect("channel not closed");
+        let received_by_server =
+            tokio::time::timeout(std::time::Duration::from_secs(2), server_in_rx.recv())
+                .await
+                .expect("server should receive within timeout")
+                .expect("channel not closed");
 
         match received_by_server.message {
             protocol::Message::SshSignRequest(r) => {
@@ -483,13 +486,11 @@ mod tests {
         assert!(server_send_res.is_ok());
 
         // 6. Client receives response.
-        let received_by_client = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            client_in_rx.recv(),
-        )
-        .await
-        .expect("client should receive within timeout")
-        .expect("channel not closed");
+        let received_by_client =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client_in_rx.recv())
+                .await
+                .expect("client should receive within timeout")
+                .expect("channel not closed");
 
         match received_by_client.message {
             protocol::Message::SshSignResponse(r) => {

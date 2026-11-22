@@ -154,7 +154,8 @@ impl Wallet {
             let nb = format!("{}-{}", b.0.fingerprint, b.0.kind);
             let ra = rank.get(na.as_str()).copied().unwrap_or(usize::MAX);
             let rb = rank.get(nb.as_str()).copied().unwrap_or(usize::MAX);
-            ra.cmp(&rb).then_with(|| a.0.fingerprint.cmp(&b.0.fingerprint))
+            ra.cmp(&rb)
+                .then_with(|| a.0.fingerprint.cmp(&b.0.fingerprint))
         });
 
         Ok(items)
@@ -179,7 +180,14 @@ impl Wallet {
         creator_id: &str,
     ) -> Result<()> {
         let payload = WalletPayload::KeyOrder(KeyOrderPayload { version: 1, order });
-        self.put("default", "key-order", &payload, root_key, key_ref, creator_id)
+        self.put(
+            "default",
+            "key-order",
+            &payload,
+            root_key,
+            key_ref,
+            creator_id,
+        )
     }
 
     // ── Write ─────────────────────────────────────────────────────────────────

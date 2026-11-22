@@ -128,7 +128,8 @@ impl ssh_agent_lib::agent::Session for P43CardSession {
 // ── Matrix proxy session ──────────────────────────────────────────────────────
 
 /// Pending request map: request_id → oneshot sender for the response and its event_id.
-type PendingMap = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<(p43::protocol::Message, String)>>>>;
+type PendingMap =
+    Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<(p43::protocol::Message, String)>>>>;
 
 /// Decryption context shared between the Matrix listener middleware and the
 /// session.  Populated after [`ensure_registered`] completes; `None` during

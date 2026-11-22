@@ -11,9 +11,9 @@ use crate::bus::bridge::ExternalBusMessage;
 
 pub mod dedup;
 pub mod local_uds;
-pub mod virtual_transport;
 #[cfg(feature = "matrix")]
 pub mod matrix;
+pub mod virtual_transport;
 
 pub use dedup::{message_dedup_id, MessageDeduplicator};
 
@@ -154,7 +154,10 @@ impl TransportRouter {
 
     /// Returns the name of the currently active backend (first available in priority order).
     pub fn active_backend_name(&self) -> Option<&'static str> {
-        self.backends.iter().find(|b| b.is_available()).map(|b| b.name())
+        self.backends
+            .iter()
+            .find(|b| b.is_available())
+            .map(|b| b.name())
     }
 
     /// Snapshot of all registered backend statuses with active marker.
@@ -195,7 +198,8 @@ impl TransportRouter {
         raw_frame: &str,
         preferred_backend: Option<&str>,
     ) -> anyhow::Result<(String, &'static str)> {
-        self.send_with_notifier(raw_frame, preferred_backend, |_id, _name| {}).await
+        self.send_with_notifier(raw_frame, preferred_backend, |_id, _name| {})
+            .await
     }
 
     /// Send `raw_frame` over transport backends, calling `on_sent` for every backend
@@ -211,7 +215,8 @@ impl TransportRouter {
     {
         match self.strategy {
             SendStrategy::Parallel => {
-                self.send_parallel_with_notifier(raw_frame, preferred_backend, on_sent).await
+                self.send_parallel_with_notifier(raw_frame, preferred_backend, on_sent)
+                    .await
             }
             SendStrategy::Sequential => {
                 let res = self.send_sequential(raw_frame, preferred_backend).await;
@@ -229,7 +234,8 @@ impl TransportRouter {
         raw_frame: &str,
         preferred_backend: Option<&str>,
     ) -> anyhow::Result<(String, &'static str)> {
-        self.send_parallel_with_notifier(raw_frame, preferred_backend, |_id, _name| {}).await
+        self.send_parallel_with_notifier(raw_frame, preferred_backend, |_id, _name| {})
+            .await
     }
 
     /// Parallel racing with per-backend completion notifier.
@@ -393,7 +399,7 @@ impl TransportRouter {
                 let mut changed_any = false;
                 for rx in &mut receivers {
                     if rx.has_changed().unwrap_or(false) {
-                        let _ = rx.mark_unchanged();
+                        rx.mark_unchanged();
                         changed_any = true;
                     }
                 }
@@ -474,7 +480,10 @@ mod tests {
         // Local UDS wins immediately without waiting for Matrix!
         assert_eq!(name, "local_uds");
         assert_eq!(id, "local_uds:1");
-        assert!(elapsed.as_millis() < 40, "parallel send should return immediately on fastest backend");
+        assert!(
+            elapsed.as_millis() < 40,
+            "parallel send should return immediately on fastest backend"
+        );
     }
 
     #[tokio::test]
@@ -482,7 +491,10 @@ mod tests {
         let (inbound_tx, _inbound_rx) = new_external_bus();
         let mut router = TransportRouter::new(inbound_tx);
 
-        let t1 = Arc::new(VirtualTransport::with_initial_state("matrix", BackendState::Disconnected));
+        let t1 = Arc::new(VirtualTransport::with_initial_state(
+            "matrix",
+            BackendState::Disconnected,
+        ));
         let t2 = Arc::new(VirtualTransport::new("local_uds"));
 
         router.register_backend(t1.clone());
@@ -538,7 +550,10 @@ mod tests {
 
         // Preferred is matrix (incoming transport), but it fails to send.
         // Router should seamlessly fall back to the available fallback list (local_uds).
-        let (id, name) = router.send("payload fallback", Some("matrix")).await.unwrap();
+        let (id, name) = router
+            .send("payload fallback", Some("matrix"))
+            .await
+            .unwrap();
         assert_eq!(name, "local_uds");
         assert_eq!(id, "local_uds:1");
         assert_eq!(t2.sent_frames(), vec!["payload fallback"]);
@@ -549,8 +564,14 @@ mod tests {
         let (inbound_tx, _inbound_rx) = new_external_bus();
         let mut router = TransportRouter::new(inbound_tx);
 
-        let t1 = Arc::new(VirtualTransport::with_initial_state("local_uds", BackendState::Disconnected));
-        let t2 = Arc::new(VirtualTransport::with_initial_state("matrix", BackendState::Disconnected));
+        let t1 = Arc::new(VirtualTransport::with_initial_state(
+            "local_uds",
+            BackendState::Disconnected,
+        ));
+        let t2 = Arc::new(VirtualTransport::with_initial_state(
+            "matrix",
+            BackendState::Disconnected,
+        ));
 
         router.register_backend(t1);
         router.register_backend(t2);
@@ -597,11 +618,10 @@ mod tests {
             .unwrap();
 
         // 1st message arrives on internal bus
-        let received =
-            tokio::time::timeout(std::time::Duration::from_millis(500), int_rx.recv())
-                .await
-                .expect("first message should arrive")
-                .unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_millis(500), int_rx.recv())
+            .await
+            .expect("first message should arrive")
+            .unwrap();
         assert_eq!(received.event_id, "local_uds:1");
 
         // 2nd duplicate message is dropped: channel should timeout with no message
@@ -684,7 +704,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let locked_items = locked_queue.lock().unwrap().clone();
-        assert_eq!(locked_items.len(), 1, "message should be buffered in locked_queue");
+        assert_eq!(
+            locked_items.len(),
+            1,
+            "message should be buffered in locked_queue"
+        );
 
         // Internal bus should have received nothing yet
         let recv_none =
@@ -700,11 +724,10 @@ mod tests {
         }
 
         // 3. The replayed message MUST be processed and not dropped by deduplicator!
-        let replayed =
-            tokio::time::timeout(std::time::Duration::from_millis(500), int_rx.recv())
-                .await
-                .expect("replayed message should arrive on internal bus after unlock")
-                .unwrap();
+        let replayed = tokio::time::timeout(std::time::Duration::from_millis(500), int_rx.recv())
+            .await
+            .expect("replayed message should arrive on internal bus after unlock")
+            .unwrap();
         assert_eq!(replayed.event_id, "$matrix_locked_event");
     }
 
@@ -844,13 +867,11 @@ mod tests {
             .unwrap();
 
         // 5. Server decrypts request on internal bus
-        let received_req = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            server_int_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let received_req =
+            tokio::time::timeout(std::time::Duration::from_secs(3), server_int_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
 
         match received_req.message {
             Message::SshSignRequest(r) => {
@@ -859,7 +880,9 @@ mod tests {
             }
             other => panic!("expected SshSignRequest, got {other:?}"),
         }
-        let sender_cert = received_req.sender_cert.expect("sender cert must be present");
+        let sender_cert = received_req
+            .sender_cert
+            .expect("sender cert must be present");
         assert_eq!(sender_cert.label, "laptop-agent");
 
         // 6. Server responds with SshSignResponse sealed to device
@@ -872,13 +895,11 @@ mod tests {
             .unwrap();
 
         // 7. Client decrypts response on internal bus
-        let received_res = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            client_int_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let received_res =
+            tokio::time::timeout(std::time::Duration::from_secs(3), client_int_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
 
         match received_res.message {
             Message::SshSignResponse(r) => {

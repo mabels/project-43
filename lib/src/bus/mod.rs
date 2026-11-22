@@ -53,14 +53,14 @@ pub use message::{
     BusRecipient, MsgPayload,
 };
 pub use signer::BusSigner;
+#[cfg(feature = "matrix")]
+pub use transport::matrix::MatrixBackend;
 pub use transport::{
     dedup::{message_dedup_id, MessageDeduplicator, DEFAULT_DEDUP_CAPACITY, DEFAULT_DEDUP_TTL},
     local_uds::{local_bus_socket_path, LocalUdsClient, LocalUdsServer, LOCAL_BUS_SOCK_NAME},
     virtual_transport::VirtualTransport,
     BackendState, BackendStatus, SendStrategy, TransportBackend, TransportRouter,
 };
-#[cfg(feature = "matrix")]
-pub use transport::matrix::MatrixBackend;
 
 // ── Directory helpers ─────────────────────────────────────────────────────────
 

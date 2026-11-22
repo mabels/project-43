@@ -993,7 +993,13 @@ pub async fn mx_respond_sign_wallet(
         request_id,
         signature: sig,
     });
-    send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await
+    send_via_bridge(
+        &room_id,
+        response,
+        pending.sender_cert,
+        pending.preferred_backend,
+    )
+    .await
 }
 
 // ── Bus registration (authority side) ────────────────────────────────────────
@@ -2413,7 +2419,13 @@ pub async fn mx_respond_sign(
         request_id,
         signature: sig,
     });
-    send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await
+    send_via_bridge(
+        &room_id,
+        response,
+        pending.sender_cert,
+        pending.preferred_backend,
+    )
+    .await
 }
 
 /// Approve an `ssh.sign_request` for a card-backed key using the card's User PIN.
@@ -2473,7 +2485,13 @@ pub async fn mx_respond_sign_card(
             request_id,
             signature: sig,
         });
-        return send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await;
+        return send_via_bridge(
+            &room_id,
+            response,
+            pending.sender_cert,
+            pending.preferred_backend,
+        )
+        .await;
     }
     #[cfg(any(target_os = "ios", target_os = "android"))]
     anyhow::bail!("PC/SC card operations are not supported on this platform")
@@ -2627,7 +2645,13 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
             request_id,
             signature: sig,
         });
-        return send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await;
+        return send_via_bridge(
+            &room_id,
+            response,
+            pending.sender_cert,
+            pending.preferred_backend,
+        )
+        .await;
     }
 
     // ── Fast path 2: cached decrypted Ed25519 keypair ─────────────────────────
@@ -2660,7 +2684,13 @@ pub async fn mx_respond_sign_cached(room_id: String, request_id: String) -> anyh
         request_id,
         signature: sig,
     });
-    send_via_bridge(&room_id, response, pending.sender_cert, pending.preferred_backend).await
+    send_via_bridge(
+        &room_id,
+        response,
+        pending.sender_cert,
+        pending.preferred_backend,
+    )
+    .await
 }
 
 /// Reject an `ssh.sign_request`: send an error response and discard the request.

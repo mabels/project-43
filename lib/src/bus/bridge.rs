@@ -358,10 +358,7 @@ pub fn spawn_encrypt_worker_with_router(
                         }
                     };
 
-                    if let Err(e) = router
-                        .send_with_notifier(&json, preferred, notify_cb)
-                        .await
-                    {
+                    if let Err(e) = router.send_with_notifier(&json, preferred, notify_cb).await {
                         eprintln!("[p43::bus::bridge] router.send error: {e}");
                     }
                 }

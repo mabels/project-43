@@ -145,6 +145,7 @@ class RustBuilder {
   Future<String> build() async {
     final extraArgs = _buildOptions?.flags ?? [];
     final manifestPath = path.join(environment.manifestDir, 'Cargo.toml');
+    final isDarwin = target.darwinPlatform != null;
     final useExplicitToolchain = _buildOptions?.toolchain != null;
     runCommand(
       useExplicitToolchain ? 'rustup' : 'cargo',
@@ -153,7 +154,7 @@ class RustBuilder {
         (target.android == null && environment.glibcVersion != null)
             ? 'zigbuild'
             : 'build',
-        if (target.darwinPlatform != null) ...[
+        if (isDarwin) ...[
           '--config',
           'build.rustc-wrapper=""',
         ],
@@ -172,6 +173,7 @@ class RustBuilder {
         environment.targetTempDir,
       ],
       environment: await _buildEnvironment(),
+      includeParentEnvironment: !isDarwin,
     );
     return path.join(
       environment.targetTempDir,
@@ -182,6 +184,25 @@ class RustBuilder {
 
   Future<Map<String, String>> _buildEnvironment() async {
     if (target.android == null) {
+      if (target.darwinPlatform != null) {
+        // Strip Xcode's ~400 build-setting env vars that break proc-macro
+        // compilation/loading on macOS; keep only the minimal clean env.
+        const keep = {
+          'PATH',
+          'HOME',
+          'USER',
+          'TMPDIR',
+          'CARGO_HOME',
+          'RUSTUP_HOME',
+          'MACOSX_DEPLOYMENT_TARGET',
+          'IPHONEOS_DEPLOYMENT_TARGET',
+          'SDKROOT',
+        };
+        return {
+          for (final k in keep)
+            if (Platform.environment.containsKey(k)) k: Platform.environment[k]!,
+        };
+      }
       return {};
     } else {
       final sdkPath = environment.androidSdkPath;

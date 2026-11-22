@@ -168,4 +168,103 @@ mod wallet_tests {
         let restored = WalletPayload::from_cbor(&bytes).unwrap();
         assert_eq!(restored.kind(), "yubikey-ref");
     }
+
+    #[test]
+    fn key_order_sorts_entries_and_hides_metadata_chain() {
+        let w = wallet();
+        let rk = root_key();
+        w.put(
+            "0006:17684870",
+            "yubikey-ref",
+            &yubikey_ref("0006:17684870"),
+            &rk,
+            key_ref(),
+            "t",
+        )
+        .unwrap();
+        w.put(
+            "meno_macbook",
+            "ssh-key",
+            &WalletPayload::SshKey(SshKey {
+                version: 1,
+                private_key: ByteBuf::from(vec![0u8; 32]),
+                comment: "meno_macbook".into(),
+            }),
+            &rk,
+            key_ref(),
+            "t",
+        )
+        .unwrap();
+
+        // Default order is lexicographical by fingerprint: 0006_... before meno_macbook.
+        let default_names: Vec<String> = w
+            .list_with_ids(&rk)
+            .unwrap()
+            .into_iter()
+            .map(|(c, _)| format!("{}-{}", c.fingerprint, c.kind))
+            .collect();
+        assert_eq!(
+            default_names,
+            vec!["0006_17684870-yubikey-ref", "meno_macbook-ssh-key"]
+        );
+
+        // Reverse via set_key_order (also include a nonexistent stale entry to ensure it's ignored).
+        w.set_key_order(
+            vec![
+                "meno_macbook-ssh-key".into(),
+                "deleted-ssh-key".into(),
+                "0006_17684870-yubikey-ref".into(),
+            ],
+            &rk,
+            key_ref(),
+            "t",
+        )
+        .unwrap();
+
+        assert_eq!(
+            w.get_key_order(&rk).unwrap(),
+            vec![
+                "meno_macbook-ssh-key",
+                "deleted-ssh-key",
+                "0006_17684870-yubikey-ref",
+            ]
+        );
+
+        // list_with_ids must honour the custom order and NOT include default-key-order.
+        let ordered_names: Vec<String> = w
+            .list_with_ids(&rk)
+            .unwrap()
+            .into_iter()
+            .map(|(c, _)| format!("{}-{}", c.fingerprint, c.kind))
+            .collect();
+        assert_eq!(
+            ordered_names,
+            vec!["meno_macbook-ssh-key", "0006_17684870-yubikey-ref"]
+        );
+
+        // Adding a new unordered entry appends it after the ordered entries.
+        w.put(
+            "0001:00000001",
+            "yubikey-ref",
+            &yubikey_ref("0001:00000001"),
+            &rk,
+            key_ref(),
+            "t",
+        )
+        .unwrap();
+        let with_new: Vec<String> = w
+            .list_with_ids(&rk)
+            .unwrap()
+            .into_iter()
+            .map(|(c, _)| format!("{}-{}", c.fingerprint, c.kind))
+            .collect();
+        assert_eq!(
+            with_new,
+            vec![
+                "meno_macbook-ssh-key",
+                "0006_17684870-yubikey-ref",
+                "0001_00000001-yubikey-ref",
+            ]
+        );
+    }
 }

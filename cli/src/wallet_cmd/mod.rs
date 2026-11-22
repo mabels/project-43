@@ -369,6 +369,10 @@ fn payload_to_json(payload: &WalletPayload, show_secrets: bool) -> serde_json::V
             "device_id": d.device_id,
             "cert_bytes": if show_secrets { hex::encode(&*d.cert_bytes) } else { "(omitted)".into() },
         }),
+        WalletPayload::KeyOrder(ko) => serde_json::json!({
+            "kind":  "key-order",
+            "order": ko.order,
+        }),
     }
 }
 
@@ -446,6 +450,12 @@ fn print_payload(payload: &WalletPayload, show_secrets: bool) {
                     "cert_bytes:        ({} bytes, use --show-secrets)",
                     a.cert_bytes.len()
                 );
+            }
+        }
+        WalletPayload::KeyOrder(ko) => {
+            println!("kind:              key-order");
+            for (i, name) in ko.order.iter().enumerate() {
+                println!("  {:>2}. {}", i + 1, name);
             }
         }
     }

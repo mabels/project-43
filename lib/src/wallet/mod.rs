@@ -15,8 +15,8 @@ pub use chain::{ChainName, KNOWN_KINDS};
 pub use credential::KeyCredential;
 pub use credential::PgpCredential;
 pub use entry::{
-    AuthorityKeyPayload, CertifiedDeviceIdPayload, DeviceIdPayload, FilePgpKey, KeySlot, SshKey,
-    WalletPayload, YubikeyRef,
+    AuthorityKeyPayload, CertifiedDeviceIdPayload, DeviceIdPayload, FilePgpKey, KeyOrderPayload,
+    KeySlot, SshKey, WalletPayload, YubikeyRef,
 };
 
 use anyhow::{Context, Result};
@@ -106,16 +106,80 @@ impl Wallet {
 
     /// List all wallet entries with their stable chain_id (requires root_key
     /// to scan content-addressed chains).
+    ///
+    /// Entries are ordered according to the stored `key-order` metadata chain
+    /// (if present); unordered entries follow in deterministic fingerprint order.
+    /// The internal `key-order` metadata chain itself is omitted from the result.
     pub fn list_with_ids(&self, root_key: &[u8]) -> Result<Vec<(ChainName, String)>> {
-        let idx = self.build_index(root_key)?;
-        let mut result = Vec::new();
-        for (name, chain_id) in &idx {
-            if let Some(cn) = ChainName::from_chain_name(name) {
-                result.push((cn, chain_id.as_hex()));
+        Ok(self
+            .list_with_labels(root_key)?
+            .into_iter()
+            .map(|(cn, cid, _label)| (cn, cid))
+            .collect())
+    }
+
+    /// List all wallet entries with their stable chain_id and human-readable
+    /// label/comment, ordered according to the stored `key-order` metadata chain.
+    ///
+    /// The internal `key-order` metadata chain itself is omitted from the result.
+    pub fn list_with_labels(&self, root_key: &[u8]) -> Result<Vec<(ChainName, String, String)>> {
+        let mut order: Vec<String> = Vec::new();
+        let mut items: Vec<(ChainName, String, String)> = Vec::new();
+
+        for (chain_ref, meta) in self.store.list_chains()? {
+            if let Some(bytes) = self.store.read(&chain_ref, root_key)? {
+                if let Ok(payload) = WalletPayload::from_cbor(&bytes) {
+                    if let WalletPayload::KeyOrder(ko) = payload {
+                        order = ko.order;
+                        continue;
+                    }
+                    let name = chain_name_for(&payload);
+                    if let Some(cn) = ChainName::from_chain_name(&name) {
+                        let chain_id = ItemId(meta.chain_id.clone()).as_hex();
+                        let label = label_for(&payload);
+                        items.push((cn, chain_id, label));
+                    }
+                }
             }
         }
-        result.sort_by(|a, b| a.0.fingerprint.cmp(&b.0.fingerprint));
-        Ok(result)
+
+        let rank: HashMap<&str, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.as_str(), i))
+            .collect();
+
+        items.sort_by(|a, b| {
+            let na = format!("{}-{}", a.0.fingerprint, a.0.kind);
+            let nb = format!("{}-{}", b.0.fingerprint, b.0.kind);
+            let ra = rank.get(na.as_str()).copied().unwrap_or(usize::MAX);
+            let rb = rank.get(nb.as_str()).copied().unwrap_or(usize::MAX);
+            ra.cmp(&rb).then_with(|| a.0.fingerprint.cmp(&b.0.fingerprint))
+        });
+
+        Ok(items)
+    }
+
+    /// Read the stored key order (`"<fingerprint>-<kind>"` chain names).
+    /// Returns an empty `Vec` if no custom order has been saved yet.
+    pub fn get_key_order(&self, root_key: &[u8]) -> Result<Vec<String>> {
+        match self.get("default", "key-order", root_key)? {
+            Some(WalletPayload::KeyOrder(ko)) => Ok(ko.order),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Persist a custom key order (`"<fingerprint>-<kind>"` chain names) in the
+    /// singleton `default-key-order` metadata chain.
+    pub fn set_key_order(
+        &self,
+        order: Vec<String>,
+        root_key: &[u8],
+        key_ref: KeyRef,
+        creator_id: &str,
+    ) -> Result<()> {
+        let payload = WalletPayload::KeyOrder(KeyOrderPayload { version: 1, order });
+        self.put("default", "key-order", &payload, root_key, key_ref, creator_id)
     }
 
     // ── Write ─────────────────────────────────────────────────────────────────
@@ -232,5 +296,28 @@ fn chain_name_for(payload: &WalletPayload) -> String {
         WalletPayload::CertifiedDeviceId(d) => {
             format!("{}-certified-device-id", d.device_id)
         }
+        // Key order: singleton metadata chain per wallet.
+        WalletPayload::KeyOrder(_) => "default-key-order".to_owned(),
+    }
+}
+
+/// Extract a human-readable display label/comment from a wallet payload.
+fn label_for(payload: &WalletPayload) -> String {
+    match payload {
+        WalletPayload::YubikeyRef(r) => r.label.clone(),
+        WalletPayload::SshKey(k) => {
+            if !k.comment.is_empty() {
+                k.comment.clone()
+            } else if let Ok(sk) = ssh_key::PrivateKey::from_openssh(&k.private_key) {
+                sk.comment().to_owned()
+            } else {
+                String::new()
+            }
+        }
+        WalletPayload::PgpKey(k) => k.label.clone(),
+        WalletPayload::AuthorityKey(_) => "Bus authority".to_owned(),
+        WalletPayload::DeviceId(d) => d.label.clone(),
+        WalletPayload::CertifiedDeviceId(d) => d.label.clone(),
+        WalletPayload::KeyOrder(_) => "Key order".to_owned(),
     }
 }

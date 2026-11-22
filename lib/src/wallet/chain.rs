@@ -19,6 +19,7 @@ pub const KNOWN_KINDS: &[&str] = &[
     "authority-key",
     "certified-device-id",
     "device-id",
+    "key-order",
 ];
 
 /// Wallet-level chain identifier: a (fingerprint, kind) pair.

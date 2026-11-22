@@ -50,6 +50,13 @@ pub enum WalletPayload {
     /// replacing it with this entry once the authority returns the cert.
     #[serde(rename = "certified-device-id")]
     CertifiedDeviceId(CertifiedDeviceIdPayload),
+
+    /// User-defined display and SSH-agent key order.
+    ///
+    /// Singleton metadata chain (`"default-key-order"`) holding an ordered list
+    /// of wallet chain names (`"<fingerprint>-<kind>"`).
+    #[serde(rename = "key-order")]
+    KeyOrder(KeyOrderPayload),
 }
 
 impl WalletPayload {
@@ -62,6 +69,7 @@ impl WalletPayload {
             Self::AuthorityKey(_) => "authority-key",
             Self::DeviceId(_) => "device-id",
             Self::CertifiedDeviceId(_) => "certified-device-id",
+            Self::KeyOrder(_) => "key-order",
         }
     }
 
@@ -184,4 +192,15 @@ pub struct CertifiedDeviceIdPayload {
     pub device_id: String,
     /// Raw COSE_Sign1 certificate bytes (from [`crate::bus::DeviceCert`]).
     pub cert_bytes: serde_bytes::ByteBuf,
+}
+
+/// User-defined display and SSH-agent key order stored in the wallet.
+///
+/// There is at most one `key-order` chain per wallet (`"default-key-order"`).
+/// Entries in `order` are wallet chain names (`"<fingerprint>-<kind>"`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyOrderPayload {
+    pub version: u8,
+    /// Ordered list of wallet chain names (`"<fingerprint>-<kind>"`).
+    pub order: Vec<String>,
 }

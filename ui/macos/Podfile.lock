@@ -14,7 +14,7 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/rust_lib_p43/macos
 
 SPEC CHECKSUMS:
-  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
   rust_lib_p43: d626ff6e87d4814e8c38881921bba509318c43c8
 
 PODFILE CHECKSUM: 33aa956cc6939a4022df082cabd59db6dde2e3e2

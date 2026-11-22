@@ -832,9 +832,20 @@ Future<void> gateKeyRevoke({required String keyId}) =>
 Future<bool> gateKeyIsConfigured() =>
     RustLib.instance.api.crateApiSimpleGateKeyIsConfigured();
 
-/// List all wallet credentials.  Requires the master secret (from gate-key unlock).
+/// List all wallet credentials in user-defined order.  Requires the master secret (from gate-key unlock).
 Future<List<WalletEntry>> walletListWithIds({required String masterHex}) =>
     RustLib.instance.api.crateApiSimpleWalletListWithIds(masterHex: masterHex);
+
+/// Persist the user-defined order of wallet entries (`"<fingerprint>-<kind>"` chain names).
+///
+/// Controls both the Flutter Keys list order and the order emitted to `ssh-add -l`.
+Future<void> walletSetKeyOrder({
+  required String masterHex,
+  required List<String> order,
+}) => RustLib.instance.api.crateApiSimpleWalletSetKeyOrder(
+  masterHex: masterHex,
+  order: order,
+);
 
 /// Add a YubiKey reference to the wallet.
 ///
@@ -1460,15 +1471,18 @@ class WalletEntry {
   final String chainName;
   final String kind;
   final String chainId;
+  final String label;
 
   const WalletEntry({
     required this.chainName,
     required this.kind,
     required this.chainId,
+    required this.label,
   });
 
   @override
-  int get hashCode => chainName.hashCode ^ kind.hashCode ^ chainId.hashCode;
+  int get hashCode =>
+      chainName.hashCode ^ kind.hashCode ^ chainId.hashCode ^ label.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1477,7 +1491,8 @@ class WalletEntry {
           runtimeType == other.runtimeType &&
           chainName == other.chainName &&
           kind == other.kind &&
-          chainId == other.chainId;
+          chainId == other.chainId &&
+          label == other.label;
 }
 
 /// Full detail for a wallet PGP key — UID, algorithm, subkeys, armored pubkey.

@@ -877,7 +877,8 @@ fn wallet_ssh_public_keys(master_hex: &str) -> anyhow::Result<Vec<p43::protocol:
             WalletPayload::PgpKey(_)
             | WalletPayload::AuthorityKey(_)
             | WalletPayload::DeviceId(_)
-            | WalletPayload::CertifiedDeviceId(_) => continue,
+            | WalletPayload::CertifiedDeviceId(_)
+            | WalletPayload::KeyOrder(_) => continue,
         };
 
         let fingerprint = ssh_key::PublicKey::from_bytes(&pub_wire)
@@ -980,7 +981,8 @@ pub async fn mx_respond_sign_wallet(
             WalletPayload::PgpKey(_)
             | WalletPayload::AuthorityKey(_)
             | WalletPayload::DeviceId(_)
-            | WalletPayload::CertifiedDeviceId(_) => {}
+            | WalletPayload::CertifiedDeviceId(_)
+            | WalletPayload::KeyOrder(_) => {}
         }
     }
 
@@ -3563,22 +3565,44 @@ pub struct WalletEntry {
     pub chain_name: String,
     pub kind: String,
     pub chain_id: String,
+    pub label: String,
 }
 
-/// List all wallet credentials.  Requires the master secret (from gate-key unlock).
+/// List all wallet credentials in user-defined order.  Requires the master secret (from gate-key unlock).
 #[frb]
 pub fn wallet_list_with_ids(master_hex: String) -> anyhow::Result<Vec<WalletEntry>> {
     let wallet = open_wallet()?;
     let key = master_key(&master_hex)?;
-    let entries = wallet.list_with_ids(&key)?;
+    let entries = wallet.list_with_labels(&key)?;
     Ok(entries
         .into_iter()
-        .map(|(name, chain_id)| WalletEntry {
+        .map(|(name, chain_id, label)| WalletEntry {
             chain_name: format!("{}-{}", name.fingerprint, name.kind),
             kind: name.kind,
             chain_id,
+            label,
         })
         .collect())
+}
+
+/// Persist the user-defined order of wallet entries (`"<fingerprint>-<kind>"` chain names).
+///
+/// Controls both the Flutter Keys list order and the order emitted to `ssh-add -l`.
+#[frb]
+pub fn wallet_set_key_order(master_hex: String, order: Vec<String>) -> anyhow::Result<()> {
+    use p43::sync_store::KeyRef;
+    use serde_bytes::ByteBuf;
+
+    let wallet = open_wallet()?;
+    let root_key = master_key(&master_hex)?;
+    let store = open_gate_key_store()?;
+    let ids = store.list()?;
+    anyhow::ensure!(!ids.is_empty(), "no gate-key configured");
+    let id_bytes = hex::decode(ids[0].trim_start_matches("gate-"))?;
+    let key_ref = KeyRef::Direct {
+        gate_key_id: ByteBuf::from(id_bytes),
+    };
+    wallet.set_key_order(order, &root_key, key_ref, "ui")
 }
 
 /// Add a YubiKey reference to the wallet.
@@ -3795,6 +3819,13 @@ pub fn wallet_get_credential(
             kind: "certified-device-id".into(),
             label: d.label.clone(),
             display_id: d.device_id.clone(),
+            pubkey_text: None,
+            pgp_armored: None,
+        }),
+        WalletPayload::KeyOrder(_) => Ok(WalletCredentialDetail {
+            kind: "key-order".into(),
+            label: "Key order".into(),
+            display_id: "default".into(),
             pubkey_text: None,
             pgp_armored: None,
         }),

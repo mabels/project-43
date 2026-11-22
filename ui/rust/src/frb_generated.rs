@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -627568752;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1692638979;
 
 // Section: executor
 
@@ -3448,6 +3448,43 @@ fn wire__crate__api__simple__wallet_remove_entry_impl(
         },
     )
 }
+fn wire__crate__api__simple__wallet_set_key_order_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "wallet_set_key_order",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_master_hex = <String>::sse_decode(&mut deserializer);
+            let api_order = <Vec<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok =
+                            crate::api::simple::wallet_set_key_order(api_master_hex, api_order)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__wallet_unlock_session_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -4108,10 +4145,12 @@ impl SseDecode for crate::api::simple::WalletEntry {
         let mut var_chainName = <String>::sse_decode(deserializer);
         let mut var_kind = <String>::sse_decode(deserializer);
         let mut var_chainId = <String>::sse_decode(deserializer);
+        let mut var_label = <String>::sse_decode(deserializer);
         return crate::api::simple::WalletEntry {
             chain_name: var_chainName,
             kind: var_kind,
             chain_id: var_chainId,
+            label: var_label,
         };
     }
 }
@@ -4377,6 +4416,9 @@ fn pde_ffi_dispatcher_primary_impl(
         }
         92 => wire__crate__api__simple__wallet_remove_entry_impl(port, ptr, rust_vec_len, data_len),
         93 => {
+            wire__crate__api__simple__wallet_set_key_order_impl(port, ptr, rust_vec_len, data_len)
+        }
+        94 => {
             wire__crate__api__simple__wallet_unlock_session_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -4834,6 +4876,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::simple::WalletEntry {
             self.chain_name.into_into_dart().into_dart(),
             self.kind.into_into_dart().into_dart(),
             self.chain_id.into_into_dart().into_dart(),
+            self.label.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5365,6 +5408,7 @@ impl SseEncode for crate::api::simple::WalletEntry {
         <String>::sse_encode(self.chain_name, serializer);
         <String>::sse_encode(self.kind, serializer);
         <String>::sse_encode(self.chain_id, serializer);
+        <String>::sse_encode(self.label, serializer);
     }
 }
 

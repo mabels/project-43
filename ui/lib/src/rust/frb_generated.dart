@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -627568752;
+  int get rustContentHash => 1692638979;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -412,6 +412,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiSimpleWalletRemoveEntry({
     required String masterHex,
     required String chainName,
+  });
+
+  Future<void> crateApiSimpleWalletSetKeyOrder({
+    required String masterHex,
+    required List<String> order,
   });
 
   Future<void> crateApiSimpleWalletUnlockSession({required String masterHex});
@@ -3395,6 +3400,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiSimpleWalletSetKeyOrder({
+    required String masterHex,
+    required List<String> order,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(masterHex, serializer);
+          sse_encode_list_String(order, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 93,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleWalletSetKeyOrderConstMeta,
+        argValues: [masterHex, order],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleWalletSetKeyOrderConstMeta =>
+      const TaskConstMeta(
+        debugName: "wallet_set_key_order",
+        argNames: ["masterHex", "order"],
+      );
+
+  @override
   Future<void> crateApiSimpleWalletUnlockSession({required String masterHex}) {
     return handler.executeNormal(
       NormalTask(
@@ -3404,7 +3444,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 93,
+            funcId: 94,
             port: port_,
           );
         },
@@ -3910,12 +3950,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WalletEntry dco_decode_wallet_entry(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return WalletEntry(
       chainName: dco_decode_String(arr[0]),
       kind: dco_decode_String(arr[1]),
       chainId: dco_decode_String(arr[2]),
+      label: dco_decode_String(arr[3]),
     );
   }
 
@@ -4547,10 +4588,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_chainName = sse_decode_String(deserializer);
     var var_kind = sse_decode_String(deserializer);
     var var_chainId = sse_decode_String(deserializer);
+    var var_label = sse_decode_String(deserializer);
     return WalletEntry(
       chainName: var_chainName,
       kind: var_kind,
       chainId: var_chainId,
+      label: var_label,
     );
   }
 
@@ -5147,6 +5190,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.chainName, serializer);
     sse_encode_String(self.kind, serializer);
     sse_encode_String(self.chainId, serializer);
+    sse_encode_String(self.label, serializer);
   }
 
   @protected

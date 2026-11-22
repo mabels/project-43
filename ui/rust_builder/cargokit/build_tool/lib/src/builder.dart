@@ -154,6 +154,10 @@ class RustBuilder {
         (target.android == null && environment.glibcVersion != null)
             ? 'zigbuild'
             : 'build',
+        if (target.darwinPlatform != null) ...[
+          '--config',
+          'build.rustc-wrapper=""',
+        ],
         ...extraArgs,
         '--manifest-path',
         manifestPath,

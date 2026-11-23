@@ -21,7 +21,7 @@ rpassword      = "7"
 dirs           = "6.0.0"
 ssh-agent-lib  = "0.5"
 ssh-key        = { version = "0.6", features = ["alloc", "ed25519"] }
-signature      = { version = "2", features = ["alloc"] }
+signature      = { version = "3", features = ["alloc"] }
 tokio          = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 matrix-sdk     = { version = "0.16.0", default-features = false, features = ["rustls-tls"] }
 uuid           = { version = "1", features = ["v4"] }

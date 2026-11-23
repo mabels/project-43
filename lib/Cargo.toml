@@ -95,7 +95,7 @@ async-trait  = { version = "0.1", optional = true }
 
 # ssh feature
 ssh-key   = { version = "0.6", features = ["alloc", "ed25519", "rsa", "encryption"], optional = true }
-signature = { version = "2", optional = true }
+signature = { version = "3", optional = true }
 rsa       = { version = "0.9", features = ["sha2"], optional = true }
 sha2      = { version = "0.10", optional = true }
 

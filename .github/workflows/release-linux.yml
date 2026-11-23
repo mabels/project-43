@@ -75,7 +75,7 @@ jobs:
 
       # ── Rust toolchain (rust-toolchain.toml → 1.100.0) ──────────────────────
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
 
       # ── Flutter stable ──────────────────────────────────────────────────────
       # subosito/flutter-action@v2 fails to resolve the stable version on arm64

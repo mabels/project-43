@@ -3388,13 +3388,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "openpgp-card"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfe28dfe068394559d52390c0d1f3081e161f58e158c368d5da668c426cd81b7"
+dependencies = [
+ "card-backend",
+ "hex-slice",
+ "log",
+ "nom 7.1.3",
+ "secrecy",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "openpgp-card-rpgp"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f3c2dbf032c1403df9fb3f4e3c25ee80ea89cffab86869bd039bbda400ea7c5"
 dependencies = [
  "ed25519-dalek",
- "openpgp-card",
+ "openpgp-card 0.6.1",
  "p256",
  "p384",
  "p521",
@@ -3547,7 +3562,7 @@ dependencies = [
  "hostname",
  "keepass",
  "matrix-sdk",
- "openpgp-card",
+ "openpgp-card 0.7.3",
  "openpgp-card-rpgp",
  "opentelemetry",
  "opentelemetry-otlp",

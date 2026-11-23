@@ -88,7 +88,7 @@ jobs:
           fi
 
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
 
       # Explicitly add cross-compile targets to the active toolchain (1.100.0).
       # The action's `target:` input installs against `stable` before

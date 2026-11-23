@@ -25,7 +25,7 @@ signature      = { version = "2", features = ["alloc"] }
 tokio          = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 matrix-sdk     = { version = "0.16.0", default-features = false, features = ["rustls-tls"] }
 uuid           = { version = "1", features = ["v4"] }
-base64         = "0.22"
+base64         = "0.23"
 hex            = "0.4"
 serde_json     = "1"
 serde_bytes    = "0.11"

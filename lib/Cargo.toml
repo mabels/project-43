@@ -66,7 +66,7 @@ telemetry = [
 [dependencies]
 # Always required
 anyhow          = "1"
-base64          = "0.22"
+base64          = "0.23"
 hex             = "0.4"
 rpassword       = "7"
 hostname        = "0.4"
